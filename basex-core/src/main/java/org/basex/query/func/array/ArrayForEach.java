@@ -1,0 +1,52 @@
+package org.basex.query.func.array;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ArrayForEach extends ArrayFn {
+  @Override
+  public XQArray value(final QueryContext qc) throws QueryException {
+    final XQArray array = toArray(arg(0), qc);
+    final FItem action = toFunction(arg(1), 2, qc);
+
+    final HofArgs args = new HofArgs(2, action);
+    final ArrayBuilder ab = new ArrayBuilder(qc, array.structSize());
+    for(final Value value : array.members()) {
+      ab.add(invoke(action, args.set(0, value).inc(), qc));
+    }
+    return ab.array(this);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr array = arg(0);
+    // array:for-each([], $action) → []
+    if(array == XQArray.empty()) return array;
+
+    if(array.seqType().type instanceof final ArrayType at) {
+      arg(1, arg -> arg.refineFunc(cc, at.valueType(), Types.INTEGER_O));
+    }
+
+    // assign type after coercion (expression might have changed)
+    final FuncType ft = arg(1).funcType();
+    if(ft != null) exprType.assign(ArrayType.get(ft.refinedType));
+
+    return this;
+  }
+
+  @Override
+  public long structSize() {
+    return arraySize(arg(0));
+  }
+}

@@ -1,0 +1,192 @@
+package org.basex.query.value.map;
+
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Map that stores its entries in a hash table.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+abstract class XQHashMap extends XQMap {
+  /** Cached immutable variant, for updates (can be {@code null}). */
+  private XQMap trie;
+
+  /**
+   * Constructor.
+   * @param type map type
+   */
+  XQHashMap(final Type type) {
+    super(type);
+  }
+
+  @Override
+  public abstract long structSize();
+
+  @Override
+  public abstract Value getOrNull(Item key) throws QueryException;
+
+  @Override
+  public final XQMap put(final Item key, final Value value) throws QueryException {
+    return trie().put(key, value);
+  }
+
+  @Override
+  public final XQMap putAt(final int index, final Value value) throws QueryException {
+    return trie().putAt(index, value);
+  }
+
+  /**
+   * Replaces the value at the specified position. Called when shrinking data.
+   * @param index map index (starting with 0, must be valid)
+   * @param value value
+   */
+  @SuppressWarnings("unused")
+  void valueAt(final int index, final Value value) {
+    throw Util.notExpected();
+  }
+
+  @Override
+  public final XQMap remove(final Item key) throws QueryException {
+    return getOrNull(key) == null ? this : trie().remove(key);
+  }
+
+  @Override
+  public final void forEach(final QueryBiConsumer<Item, Value> func) throws QueryException {
+    final long is = structSize();
+    for(int i = 0; i < is; i++) func.accept(keyAt(i), valueAt(i));
+  }
+
+  @Override
+  public final boolean test(final QueryBiPredicate<Item, Value> func) throws QueryException {
+    final long is = structSize();
+    for(int i = 0; i < is; i++) {
+      if(!func.test(keyAt(i), valueAt(i))) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Creates an empty hash map with a representation that is suited for the specified entry.
+   * @param capacity initial capacity
+   * @param keyType type of the first key
+   * @param valueType type of the first value
+   * @return map
+   */
+  static XQHashMap get(final long capacity, final Type keyType, final SeqType valueType) {
+    final int c = Array.initialCapacity(capacity);
+    if(keyType == BasicType.INTEGER) {
+      if(valueType.eq(Types.INTEGER_O)) return new XQIntMap(c);
+      if(valueType.eq(Types.STRING_O)) return new XQIntStrMap(c);
+      return new XQIntValueMap(c);
+    }
+    if(keyType == BasicType.STRING) {
+      if(valueType.eq(Types.STRING_O)) return new XQStrMap(c);
+      if(valueType.eq(Types.INTEGER_O)) return new XQStrIntMap(c);
+      if(valueType.eq(Types.DOUBLE_O)) return new XQStrDblMap(c);
+      return new XQStrValueMap(c);
+    }
+    if(keyType == BasicType.UNTYPED_ATOMIC) {
+      if(valueType.eq(Types.STRING_O)) return new XQAtmStrMap(c);
+      if(valueType.eq(Types.INTEGER_O)) return new XQAtmIntMap(c);
+      return new XQAtmValueMap(c);
+    }
+    return new XQItemValueMap(c);
+  }
+
+  /**
+   * Indicates if {@link #get} provides a compact representation for the specified types.
+   * @param keyType key type
+   * @param valueType value type
+   * @return result of check
+   */
+  static boolean compact(final Type keyType, final SeqType valueType) {
+    if(!valueType.one()) return false;
+    final Type vt = valueType.type;
+    return vt.oneOf(BasicType.INTEGER, BasicType.STRING) ||
+        vt == BasicType.DOUBLE && keyType == BasicType.STRING;
+  }
+
+  /**
+   * Builds the map by adding a new key and value.
+   * @param key key to insert
+   * @param value value to insert
+   * @return map
+   * @throws QueryException query exception
+   */
+  abstract XQHashMap build(Item key, Value value) throws QueryException;
+
+  /**
+   * Builds the map by adding keys and values from the old map and a new key and value.
+   * @param old old values
+   * @return map
+   * @throws QueryException query exception
+   */
+  final XQHashMap build(final XQHashMap old) throws QueryException {
+    old.forEach((QueryBiConsumer<Item, Value>) this::build);
+    return this;
+  }
+
+  /**
+   * Shrinks the map values.
+   * @param qc query context
+   * @throws QueryException query exception
+   */
+  final void shrinkValues(final QueryContext qc) throws QueryException {
+    final long is = structSize();
+    for(int i = 0; i < is; i++) valueAt(i, valueAt(i).shrink(qc));
+  }
+
+  @Override
+  XQMap trie() throws QueryException {
+    if(trie == null) trie = super.trie();
+    return trie;
+  }
+
+  /**
+   * Tries to convert the value to a string.
+   * @param value value
+   * @return token or {@code null}
+   * @throws QueryException query exception
+   */
+  static byte[] toStr(final Value value) throws QueryException {
+    if(value.seqType().eq(Types.STRING_O)) {
+      return ((AStr) value).string(null);
+    }
+    return null;
+  }
+
+  /**
+   * Tries to convert the value to an untyped atomic.
+   * @param value value
+   * @return token or {@code null}
+   */
+  static byte[] toAtm(final Value value) {
+    if(value.seqType().eq(Types.UNTYPED_ATOMIC_O)) {
+      return ((Atm) value).string(null);
+    }
+    return null;
+  }
+
+  /**
+   * Tries to convert the value to a double.
+   * @param value value
+   * @return double item, or {@code null}
+   */
+  static Dbl toDbl(final Value value) {
+    return value.seqType().eq(Types.DOUBLE_O) ? (Dbl) value : null;
+  }
+
+  /**
+   * Tries to convert the value to an integer (excluding {@link Integer#MIN_VALUE}).
+   * @param value value
+   * @return integer or {@link Integer#MIN_VALUE}
+   */
+  static int toInt(final Value value) {
+    return value instanceof final Itr itr ? itr.toInt() : Integer.MIN_VALUE;
+  }
+}

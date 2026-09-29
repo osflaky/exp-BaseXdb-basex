@@ -1,0 +1,174 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryText.*;
+
+import java.util.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Otherwise expression.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Otherwise extends Arr {
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param exprs expressions
+   */
+  public Otherwise(final InputInfo info, final Expr... exprs) {
+    super(info, Types.ITEM_ZM, exprs);
+  }
+
+  @Override
+  public boolean navigational() {
+    for(final Expr expr : exprs) {
+      if(!expr.navigational()) return false;
+    }
+    return true;
+  }
+
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    final int el = exprs.length - 1;
+    for(int e = 0; e < el; e++) {
+      final Iter input = exprs[e].iter(qc);
+      final long size = input.size();
+      // size is known, results exist: return items iterator
+      if(size > 0) return input;
+      // unknown result size: retrieve first item
+      if(size < 0) {
+        final Item item = qc.next(input);
+        if(item != null) return new Iter() {
+          boolean next;
+
+          @Override
+          public Item next() throws QueryException {
+            if(next) return qc.next(input);
+            next = true;
+            return item;
+          }
+        };
+      }
+    }
+    return exprs[el].iter(qc);
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    for(final Expr expr : exprs) {
+      final Value value = expr.value(qc);
+      if(value != Empty.VALUE) return value;
+    }
+    return Empty.VALUE;
+  }
+
+  @Override
+  public boolean eager() {
+    return Checks.all(exprs, Expr::eager);
+  }
+
+  @Override
+  public Expr compile(final CompileContext cc) throws QueryException {
+    final int el = exprs.length;
+    for(int e = 0; e < el; e++) {
+      exprs[e] = cc.compileOrError(exprs[e], e == 0);
+    }
+    return optimize(cc);
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) {
+    flatten(cc);
+    removeEmpty(cc);
+
+    // drop dead operands once an operand is known to yield one or more items
+    // 1 otherwise 2 otherwise 3 → 1
+    int el = exprs.length - 1;
+    int e = -1;
+    while(++e < el && !exprs[e].seqType().oneOrMore());
+    if(e < el) exprs = Arrays.copyOf(exprs, e + 1);
+
+    el = exprs.length;
+    if(el == 0) return cc.emptySeq(this);
+    if(el == 1) return cc.replaceWith(this, exprs[0]);
+
+    // determine result type
+    long max = 0;
+    for(final Expr expr : exprs) max = Math.max(max, expr.seqType().occ.max);
+    final Occ occ = Occ.get(exprs[el - 1].seqType().occ.min, max);
+    final SeqType st = SeqType.union(exprs, false);
+    exprType.assign(st != null ? st.type : BasicType.ITEM, occ).data(exprs);
+
+    return this;
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    // data(<a>{ $x }</a> otherwise <b/>) → data(xs:untypedAtomic($x) otherwise <b/>)
+    // EBV: all but the last operand must stay, as their emptiness selects the result
+    final int el = exprs.length;
+    Expr[] tmp = null;
+    for(int e = mode.conditional() ? el - 1 : 0; e < el; e++) {
+      final Expr expr = exprs[e].simplifyFor(mode, cc);
+      if(expr != exprs[e]) {
+        if(tmp == null) tmp = exprs.clone();
+        tmp[e] = expr;
+      }
+    }
+    return cc.simplify(this, tmp != null ? new Otherwise(info, tmp).optimize(cc) : this, mode);
+  }
+
+  @Override
+  public Expr inlineTypeCheck(final TypeCheck tc, final CompileContext cc) throws QueryException {
+    // (A otherwise B) coerce to T → (A coerce to T?) otherwise (B coerce to T)
+    // leading operands may be empty without being selected, so their cardinality is widened
+    final SeqType st = tc.seqType(), lst = st.union(Occ.ZERO);
+    boolean changed = false;
+    final int el = exprs.length;
+    for(int e = 0; e < el; e++) {
+      final Expr expr = tc.check(exprs[e], e < el - 1 ? lst : st, cc);
+      if(expr != null) {
+        changed = true;
+        exprs[e] = expr;
+      }
+    }
+    return changed ? optimize(cc) : this;
+  }
+
+  @Override
+  public void markTailCalls(final CompileContext cc) {
+    exprs[exprs.length - 1].markTailCalls(cc);
+  }
+
+  @Override
+  public boolean vacuous() {
+    return Checks.all(exprs, Expr::vacuous);
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof Otherwise && super.equals(obj);
+  }
+
+  @Override
+  public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new Otherwise(info, copyAll(cc, vm, exprs)));
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.tokens(exprs, ' ' + OTHERWISE + ' ', true);
+  }
+}

@@ -1,0 +1,75 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnString extends ContextFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Item value = context(qc).item(qc, info);
+
+    if(value.isEmpty()) return Str.EMPTY;
+    if(value.type == BasicType.STRING) return value;
+    if(!(value instanceof FItem) || value instanceof XQJava) return Str.get(value.string(info));
+
+    throw FISTRING_X.get(info, value);
+  }
+
+  @Override
+  protected boolean ebv(final QueryContext qc) throws QueryException {
+    final Item value = context(qc).item(qc, info);
+
+    if(value.isEmpty()) return false;
+    if(!(value instanceof FItem) || value instanceof XQJava) return value.string(info).length > 0;
+
+    throw FISTRING_X.get(info, value);
+  }
+
+  @Override
+  protected void simplifyArgs(final CompileContext cc) throws QueryException {
+    // string(xs:string($x)) → string($x)
+    exprs = simplifyAll(Simplify.STRING_VALUE, cc);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) {
+    final boolean context = contextAccess();
+    final Expr value = context ? cc.qc.focus.value : arg(0);
+    if(value != null && value.seqType().eq(Types.STRING_O)) {
+      // string('x') → 'x'
+      // $string[string() = 'a'] → $string[. = 'a']
+      return context && cc.nestedFocus() ? ContextValue.get(cc, info) : value;
+    }
+    return this;
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    Expr expr = this;
+    final Expr item = contextAccess() ? ContextValue.get(cc, info) : arg(0);
+    final SeqType st = item.seqType();
+    if(mode.oneOf(Simplify.STRING, Simplify.STRING_VALUE) && st.type.isStringOrUntyped() &&
+        st.one()) {
+      // $node[string() = 'x'] → $node[. = 'x']
+      expr = item;
+    } else if(mode.oneOf(Simplify.EBV, Simplify.PREDICATE)) {
+      // boolean(string($node)) → boolean($node/descendant::text())
+      expr = simplifyEbv(item, cc, null);
+      // boolean(string($number)) → true()
+      if(item.seqType().instanceOf(Types.NUMERIC_O)) return Bln.TRUE;
+    }
+    return cc.simplify(this, expr, mode);
+  }
+}

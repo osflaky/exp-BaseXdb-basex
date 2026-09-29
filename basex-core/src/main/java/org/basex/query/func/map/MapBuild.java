@@ -1,0 +1,80 @@
+package org.basex.query.func.map;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class MapBuild extends MapMerge {
+  @Override
+  public XQMap value(final QueryContext qc) throws QueryException {
+    final Iter input = arg(0).iter(qc);
+    final FItem keys = toFunctionOrNull(arg(1), 2, qc);
+    final FItem value = toFunctionOrNull(arg(2), 2, qc);
+    final MapDuplicates dups = duplicates(3, qc, Duplicates.COMBINE);
+
+    final HofArgs args = new HofArgs(2, keys, value);
+    final MapBuilder builder = new MapBuilder();
+    for(Item item; (item = qc.next(input)) != null;) {
+      args.set(0, item).inc();
+      final Iter iter = (keys != null ? invoke(keys, args, qc) : item).atomIter(qc, info);
+      for(Item key; (key = qc.next(iter)) != null;) {
+        final Value old = builder.get(key);
+        final Value val = dups.merge(key, old, value != null ? invoke(value, args, qc) : item, qc);
+        if(val != null) builder.put(key, val);
+      }
+    }
+    return builder.map(this);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    prepareMerge(3, Duplicates.COMBINE, cc);
+
+    final Expr input = arg(0), keys = arg(1), value = arg(2);
+    final SeqType st = input.seqType(), s1t = st.with(Occ.EXACTLY_ONE);
+    if(st.zero()) return cc.voidAndReturn(input, XQMap.empty(), info);
+
+    final boolean fiKey = keys instanceof FuncItem || keys instanceof Closure;
+    Type kt = fiKey || keys.size() == 0 ? s1t.type : BasicType.ITEM;
+    if(fiKey) {
+      arg(1, arg -> arg.refineFunc(cc, s1t));
+      kt = arg(1).funcType().refinedType.type;
+    }
+    kt = kt.atomic();
+
+    final boolean fiValue = value instanceof FuncItem || value instanceof Closure;
+    SeqType vt = fiValue || value.size() == 0 ? s1t : Types.ITEM_ZM;
+    if(fiValue) {
+      arg(2, arg -> arg.refineFunc(cc, s1t));
+      vt = arg(2).funcType().refinedType;
+    }
+    assignType(kt, vt);
+    return this;
+  }
+
+  @Override
+  public long structSize() {
+    final Expr input = arg(0), keys = arg(1);
+    final SeqType st = input.seqType();
+    final long size = input.size();
+    return keys.size() == 0 && (size == 1 && !st.mayBeWrapped() && st.type.atomic() != null ||
+        input instanceof RangeSeq) ? size : -1;
+  }
+
+  @Override
+  public int hofOffsets() {
+    return functionOption(3) ? Integer.MAX_VALUE : hofOffset(1) | hofOffset(2);
+  }
+}

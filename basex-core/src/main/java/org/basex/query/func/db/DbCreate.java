@@ -1,0 +1,26 @@
+package org.basex.query.func.db;
+
+import org.basex.query.*;
+import org.basex.query.up.primitives.*;
+import org.basex.query.up.primitives.name.*;
+import org.basex.query.value.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class DbCreate extends DbNew {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final String database = toName(arg(0), qc);
+    checkCreate(database, qc);
+    final NewInput[] inputs = toInputs(qc);
+    final XQMap options = toEmptyMap(arg(3), qc);
+    qc.updates().add(new DBCreate(database, inputs, options, qc, info), qc);
+    return Empty.VALUE;
+  }
+}

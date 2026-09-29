@@ -1,0 +1,73 @@
+package org.basex.query.util.index;
+
+import java.util.*;
+
+import org.basex.index.path.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.path.*;
+
+/**
+ * Index predicate.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+abstract class IndexPred {
+  /** Index info. */
+  final IndexInfo info;
+
+  /**
+   * Constructor.
+   * @param info index info
+   */
+  IndexPred(final IndexInfo info) {
+    this.info = info;
+  }
+
+  /**
+   * Creates an index predicate instance.
+   * @param expr predicate expression
+   * @param info index info
+   * @return index predicate or {@code null}
+   */
+  static IndexPred get(final Expr expr, final IndexInfo info) {
+    if(expr instanceof ContextValue) return new IndexContext(info);
+    if(expr instanceof final AxisPath path) return new IndexPath(path, info);
+    return null;
+  }
+
+  /**
+   * Returns the most specific step in the path that points to the index values.
+   * @return step or {@code null}
+   */
+  abstract Step step();
+
+  /**
+   * Returns the step pointing to the element or attribute node.
+   * @return step with name
+   */
+  abstract Step qname();
+
+  /**
+   * Drops a trailing step that addresses text nodes and returns the step that points to their
+   * parent element.
+   * @return step or {@code null}
+   */
+  abstract Step dropText();
+
+  /**
+   * Rewrites an inverted path expression.
+   * @param root new root expression
+   * @return path
+   * @throws QueryException query exception
+   */
+  abstract Expr invert(Expr root) throws QueryException;
+
+  /**
+   * Returns the path nodes that are addressed by the predicate.
+   * @param nodes path nodes of the step
+   * @return path nodes, or {@code null} if nodes cannot be collected
+   */
+  abstract ArrayList<PathNode> nodes(ArrayList<PathNode> nodes);
+}

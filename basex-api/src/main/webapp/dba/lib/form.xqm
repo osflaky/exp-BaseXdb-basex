@@ -1,0 +1,368 @@
+(:~
+ : Form controls.
+ :
+ : @author Christian Grün, BaseX Team, BSD License
+ :)
+module namespace form = 'dba/lib/form';
+
+import module namespace config = 'dba/lib/config' at 'config.xqm';
+
+(:~
+ : Creates an option checkbox.
+ : @param  $value  value
+ : @param  $label  label
+ : @param  $opts   checked options
+ : @return checkbox
+ :)
+declare function form:option(
+  $value  as xs:string,
+  $label  as xs:string,
+  $opts   as xs:string*
+) as node()+ {
+  form:checkbox('opts', $value, $opts = $value, $label)
+};
+
+(:~
+ : Creates a checkbox.
+ : @param  $name     name of checkbox
+ : @param  $value    value
+ : @param  $checked  checked state
+ : @param  $label    label
+ : @return checkbox
+ :)
+declare function form:checkbox(
+  $name     as xs:string,
+  $value    as xs:string,
+  $checked  as xs:boolean,
+  $label    as xs:string
+) as node()+ {
+  element label {
+    element input {
+      attribute type { 'checkbox' },
+      attribute name { $name },
+      attribute value { $value },
+      attribute checked { }[$checked]
+    },
+    text { $label }
+  },
+  element br { }
+};
+
+(:~
+ : Creates a button.
+ : @param  $action   button action
+ : @param  $label    label
+ : @param  $options  options: 'CONFIRM' (ask before the action is run), 'CHECK' (consider checkboxes)
+ : @return button
+ :)
+declare function form:button(
+  $action   as xs:string,
+  $label    as xs:string,
+  $options  as enum('CONFIRM', 'CHECK')* := ()
+) as element(button) {
+  <button>{
+    attribute formaction { $action }[$action],
+    attribute onclick { `return confirmAction(this, "{ $label }");` }[$options = 'CONFIRM'],
+    attribute data-check { 'check' }[$options = 'CHECK'],
+    $label
+  }</button>
+};
+
+(:~
+ : Creates a labeled form field.
+ : @param  $label    field label
+ : @param  $control  input control and supplementary content
+ : @param  $class    additional class, e.g. 'stacked' for labels above their control
+ : @return field
+ :)
+declare function form:field(
+  $label    as xs:string,
+  $control  as item()*,
+  $class    as xs:string? := ()
+) as element(div) {
+  <div class='field{ $class ! (' ' || .) }'>{
+    <span>{ $label }</span>,
+    <div>{ $control }</div>
+  }</div>
+};
+
+(:~
+ : Creates a modal dialog: a form that needs more room than a prompt can offer.
+ : @param  $id      id of the dialog; opened by the client with showDialog
+ : @param  $title   heading of the dialog; its buttons are the OK and Cancel of every dialog
+ : @param  $action  action the form posts to
+ : @param  $upload  whether the dialog submits files
+ : @param  $fields  form fields
+ : @return dialog
+ :)
+declare function form:dialog(
+  $id      as xs:string,
+  $title   as xs:string,
+  $action  as xs:string,
+  $upload  as xs:boolean,
+  $fields  as node()*
+) as element(dialog) {
+  (: it is submitted like any other form, so the action it posts to redirects back to the
+     page it was opened from :)
+  <dialog id='{ $id }-dialog'>
+    <form method='post' action='{ $action }' autocomplete='off'>{
+      attribute enctype { 'multipart/form-data' }[$upload],
+      attribute onsubmit { 'uploading(this);' }[$upload],
+      <h2>{ $title }</h2>,
+      $fields,
+      <div class='buttons'>{
+        <button>OK</button>,
+        (: 'dialog' closes the dialog instead of submitting it: native, and needs no script :)
+        <button formmethod='dialog' formnovalidate=''>Cancel</button>
+      }</div>
+    }</form>
+  </dialog>
+};
+
+(:~
+ : Creates the form of a file chooser: the Upload button opens it, and choosing files submits
+ : what it collects.
+ : @param  $action    action the form posts to
+ : @param  $id        id of the file input; opened by the client with chooseUpload
+ : @param  $multiple  whether several files can be chosen
+ : @param  $fields    hidden fields that state what the files are added to
+ : @return form
+ :)
+declare function form:upload(
+  $action    as xs:string,
+  $id        as xs:string,
+  $multiple  as xs:boolean,
+  $fields    as node()*
+) as element(form) {
+  (: the upload is announced, as it may take a while :)
+  <form method='post' action='{ $action }' enctype='multipart/form-data' autocomplete='off'
+        onsubmit='uploading(this);'>{
+    $fields,
+    <input type='file' name='files' id='{ $id }' hidden=''
+           onchange='this.form.requestSubmit();'>{
+      attribute multiple { 'multiple' }[$multiple]
+    }</input>
+  }</form>
+};
+
+(:~
+ : Creates the form that submits an answer the client asked for: the field that carries it is
+ : filled in by promptSubmit, which then submits the form the field belongs to.
+ : @param  $id      id of the field that carries the answer
+ : @param  $name    name the answer is submitted under
+ : @param  $action  action the form posts to; empty if the client chooses it
+ : @param  $fields  hidden fields that state what the answer applies to
+ : @return form
+ :)
+declare function form:prompt(
+  $id      as xs:string,
+  $name    as xs:string,
+  $action  as xs:string? := (),
+  $fields  as node()* := ()
+) as element(form) {
+  <form method='post' autocomplete='off'>{
+    attribute action { $action }[$action],
+    $fields,
+    <input type='hidden' name='{ $name }' id='{ $id }'/>
+  }</form>
+};
+
+(:~ Index options that can be assigned when a database is created and optimized. :)
+(: an option that names an index of its own is set apart by a heading; 'create' marks the ones
+   that are reserved for new databases :)
+declare %private variable $form:INDEX-OPTIONS := (
+  { 'name': 'textindex', 'label': 'Text Index', 'index': true() },
+  { 'name': 'attrindex', 'label': 'Attribute Index', 'index': true() },
+  { 'name': 'tokenindex', 'label': 'Token Index', 'index': true() },
+  { 'name': 'updindex', 'label': 'Incremental Indexing', 'create': true() },
+  { 'name': 'ftindex', 'label': 'Fulltext Index', 'index': true() },
+  { 'name': 'ftmixed', 'label': 'Mixed Content' },
+  { 'name': 'stemming', 'label': 'Stemming' },
+  { 'name': 'casesens', 'label': 'Case Sensitivity' },
+  { 'name': 'diacritics', 'label': 'Diacritics' }
+);
+
+(:~
+ : Returns the index options that a dialog offers.
+ : @param  $create  include the options that are reserved for new databases
+ : @return options
+ :)
+declare %private function form:index-list(
+  $create  as xs:boolean
+) as map(*)+ {
+  $form:INDEX-OPTIONS[$create or empty(?create)]
+};
+
+(:~
+ : Creates the index options of a database dialog.
+ : @param  $opts    checked options
+ : @param  $create  include the options that are reserved for new databases
+ : @return form fields
+ :)
+declare function form:index-options(
+  $opts    as xs:string*,
+  $create  as xs:boolean
+) as node()+ {
+  (: kept next to form:index-map, which turns the same options into the arguments of the
+     database operation :)
+  for $option in form:index-list($create)
+  let $checkbox := form:option($option?name, $option?label, $opts)
+  return if ($option?index) then <h3>{ $checkbox }</h3> else $checkbox
+};
+
+(:~
+ : Creates the field that chooses the language of the full-text index.
+ : @param  $lang  language
+ : @return form field
+ :)
+declare function form:language-field(
+  $lang  as xs:string?
+) as element(div) {
+  (: the field is labeled, so it belongs to the fields of a dialog, not to the flags of the
+     index options :)
+  form:field('Language:', <input type='text' name='lang' value='{ $lang }'/>)
+};
+
+(:~
+ : Creates the field that restricts the full-text index to specific element names.
+ : @param  $names  element names
+ : @return form field
+ :)
+declare function form:ftinclude-field(
+  $names  as xs:string? := ()
+) as element(div) {
+  (: the names are what Mixed Content refers to: string values are indexed for these
+     elements, so the option is rejected if no name is supplied :)
+  form:field('Full-text names:', <input type='text' name='ftinclude' value='{ $names }'
+    placeholder='name, *:name, Q{{uri}}name'/>)
+};
+
+(:~
+ : Returns the index options of a database dialog as database options.
+ : @param  $opts     checked options
+ : @param  $lang     language
+ : @param  $include  element names of the full-text index
+ : @param  $create   include the options that are reserved for new databases
+ : @return database options
+ :)
+declare function form:index-map(
+  $opts     as xs:string*,
+  $lang     as xs:string?,
+  $include  as xs:string?,
+  $create   as xs:boolean
+) as map(*) {
+  {
+    for $option in form:index-list($create)
+    return { $option?name: $opts = $option?name },
+    $lang ! { 'language': . },
+    $include ! { 'ftinclude': . }
+  }
+};
+
+(:~ Parsers that can be chosen for an input. :)
+declare %private variable $form:PARSERS := ('xml', 'html', 'json', 'csv', 'raw');
+
+(:~ Parsing options that can be assigned when resources are added. :)
+declare %private variable $form:PARSING-OPTIONS := (
+  { 'name': 'intparse', 'label': 'Use internal XML parser' },
+  { 'name': 'dtd', 'label': 'Parse DTDs and entities' },
+  { 'name': 'stripns', 'label': 'Strip namespaces' },
+  { 'name': 'stripws', 'label': 'Strip whitespace' },
+  { 'name': 'xinclude', 'label': 'Use XInclude' },
+  { 'name': 'addarchives', 'label': 'Parse files in archives' },
+  { 'name': 'archivename', 'label': 'Include name of archive in document path' },
+  { 'name': 'addraw', 'label': 'Add other files as binary files' },
+  { 'name': 'skipcorrupt', 'label': 'Skip corrupt (non-well-formed) files' }
+);
+
+(:~
+ : Creates the fields that decide how an input is read.
+ : @return form fields
+ :)
+declare function form:parsing-fields() as node()+ {
+  (: the fields are labeled, so they belong to the fields of a dialog, not to the flags of the
+     parsing options :)
+  (: the parser is applied to every file of the input; it is configured by the options of
+     the server, which the dialog does not repeat :)
+  form:field('Input format:', <select name='parser'>{
+    $form:PARSERS ! element option { . }
+  }</select>),
+  (: the filter selects the files of a directory; the default is assigned by the server :)
+  form:field('Filter:', <input type='text' name='filter' placeholder='*.xml'
+                               title='File patterns, separated by commas'/>)
+};
+
+(:~
+ : Creates the parsing options of a database dialog.
+ : @param  $opts  checked options
+ : @return form fields
+ :)
+declare function form:parsing-options(
+  $opts  as xs:string*
+) as node()+ {
+  (: kept next to form:parsing-map, which turns the same options into the arguments of the
+     database operation :)
+  <h3>Parsing Options</h3>,
+  for $option in $form:PARSING-OPTIONS
+  return form:option($option?name, $option?label, $opts)
+};
+
+(:~
+ : Returns the parsing options of a database dialog as database options.
+ : @param  $opts    checked options
+ : @param  $filter  file filter (empty: use the default of the server)
+ : @param  $parser  parser (empty: use the default of the server)
+ : @return database options
+ :)
+declare function form:parsing-map(
+  $opts    as xs:string*,
+  $filter  as xs:string?,
+  $parser  as xs:string?
+) as map(*) {
+  {
+    for $option in $form:PARSING-OPTIONS
+    return { $option?name: $opts = $option?name },
+    $filter[.] ! { 'createfilter': . },
+    $parser[.] ! { 'parser': . }
+  }
+};
+
+(:~
+ : Creates a chooser for the current directory.
+ : @param  $dir  current directory
+ : @return chooser
+ :)
+declare function form:directory(
+  $dir  as xs:string
+) as element(select) {
+  (: the selected value is the resolved directory: the client stores it and sends it back
+     with its next request :)
+  <select id='dir' class='wide directory' onchange='changeDir(this.value)'>{
+      let $dir-path := fn($path) {
+        try {
+          file:path-to-native($path)
+        } catch file:* { }
+      }
+      let $webapp := $dir-path(db:option('webpath'))[.]
+      let $options := (
+        [ 'DBA'       , $config:DBA-DIR ],
+        [ 'Webapp'    , $webapp ],
+        [ 'RESTXQ'    , $dir-path($webapp ! file:resolve-path(db:option('restxqpath'), .)) ],
+        [ 'Repository', $dir-path(db:option('repopath')) ],
+        [ 'Home'      , Q{org.basex.util.Prop}HOMEDIR() ],
+        [ 'Working'   , file:current-dir() ],
+        [ 'Temporary' , file:temp-dir() ],
+        file:list-roots() ! [ 'Root', string(.) ],
+        [ 'Current'   , $dir ]
+      )
+      let $selected := head(index-where($options, fn($option) { $option?2 = $dir }))
+      for $option at $pos in $options
+      let $[$name, $path] := $option
+      where $path
+      return element option {
+        attribute value { $path },
+        attribute selected { }[$pos = $selected],
+        `{ $name }: { $path }`
+      }
+    }</select>
+};

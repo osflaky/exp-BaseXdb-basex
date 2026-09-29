@@ -1,0 +1,114 @@
+package org.basex.query.up;
+
+import static org.basex.util.Token.*;
+
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * This class serves as a container for updated names.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class NamePool {
+  /** Name cache. */
+  private NameCache[] cache = new NameCache[1];
+  /** Number of entries. */
+  private int size;
+
+  /**
+   * Adds an entry to the pool and increases its number of occurrence.
+   * @param name name
+   * @param type node type
+   */
+  public void add(final QNm name, final NodeType type) {
+    final Kind kind = type.kind();
+    final boolean elem = kind == Kind.ELEMENT, attr = kind == Kind.ATTRIBUTE;
+    if(elem || attr) {
+      final int i = index(name, attr);
+      cache[i].add++;
+    }
+  }
+
+  /**
+   * Adds an entry to the pool and decreases its number of occurrence.
+   * @param node node
+   */
+  public void remove(final XNode node) {
+    final Kind kind = node.kind();
+    final boolean elem = kind == Kind.ELEMENT, attr = kind == Kind.ATTRIBUTE;
+    if(elem || attr) {
+      final int i = index(node.qname(), attr);
+      cache[i].del = true;
+    }
+  }
+
+  /**
+   * Returns the name of a duplicate attribute.
+   * @return name of duplicate attribute or {@code null}
+   */
+  QNm duplicate() {
+    // if node has been deleted, overall count for duplicates must be bigger 2
+    for(int i = 0; i < size; i++) {
+      final NameCache nc = cache[i];
+      if(nc.attr && nc.add > (nc.del ? 2 : 1)) return nc.name;
+    }
+    return null;
+  }
+
+  /**
+   * Checks if no namespace conflicts occur.
+   * @return conflicting namespaces or {@code null}
+   */
+  byte[][] nsOK() {
+    final Atts at = new Atts();
+    for(int i = 0; i < size; i++) {
+      final NameCache nc = cache[i];
+      if(nc.add <= (nc.del ? 1 : 0)) continue;
+      final QNm nm = nc.name;
+      final byte[] prefix = nm.prefix(), uri = nm.uri();
+      // attributes with empty URI don't conflict with anything
+      if(nc.attr && uri.length == 0) continue;
+      final byte[] u = at.value(prefix);
+      if(u == null) at.add(prefix, uri);
+      // check if only one URI is assigned to a prefix
+      else if(!eq(uri, u)) return new byte[][] { uri, u };
+    }
+    return null;
+  }
+
+  /**
+   * Returns an index to an existing entry.
+   * @param name name to be found
+   * @param at attribute/element flag
+   * @return index offset, or -1
+   */
+  private int index(final QNm name, final boolean at) {
+    for(int i = 0; i < size; i++) {
+      final NameCache nc = cache[i];
+      if(nc.name.eq(name) && nc.attr == at) return i;
+    }
+    if(size == cache.length)
+      cache = Array.copy(cache, new NameCache[Array.newCapacity(size)]);
+    final NameCache nc = new NameCache();
+    nc.name = name;
+    nc.attr = at;
+    cache[size] = nc;
+    return size++;
+  }
+
+  /** Name cache. */
+  private static final class NameCache {
+    /** Name. */
+    private QNm name;
+    /** Attribute/element flag. */
+    private boolean attr;
+    /** Counts the number of times the name is added. */
+    private int add;
+    /** States if the name is deleted. */
+    private boolean del;
+  }
+}

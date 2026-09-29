@@ -1,0 +1,1147 @@
+package org.basex.gui;
+
+import static org.basex.core.Text.*;
+
+import java.awt.*;
+import java.util.function.Supplier;
+
+import org.basex.core.*;
+import org.basex.core.cmd.*;
+import org.basex.data.*;
+import org.basex.gui.dialog.*;
+import org.basex.gui.layout.*;
+import org.basex.gui.text.TextEditor.*;
+import org.basex.gui.view.*;
+import org.basex.gui.view.editor.*;
+import org.basex.io.*;
+import org.basex.io.serial.*;
+import org.basex.query.func.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+import org.basex.util.options.Options.*;
+
+/**
+ * This enumeration encapsulates all commands that are triggered by GUI operations.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public enum GUIMenuCmd implements GUICommand {
+
+  /* DATABASE MENU */
+
+  /** Opens a dialog to create a new database. */
+  C_CREATE(NEW + ELLIPSIS, "% N", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      // open file chooser for XML creation
+      final DialogNew dialog = new DialogNew(gui);
+      if(!dialog.ok()) return;
+      final String in = gui.gopts.get(GUIOptions.INPUTPATH);
+      final String db = gui.gopts.get(GUIOptions.DBNAME);
+      DialogProgress.execute(gui, new CreateDB(db, in.isEmpty() ? null : in));
+    }
+  },
+
+  /** Opens a dialog to manage databases. */
+  C_OPEN_MANAGE(OPEN_MANAGE + ELLIPSIS, "% M", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      if(new DialogManage(gui).nodb() && BaseXDialog.confirm(gui, NEW_DB_QUESTION))
+        C_CREATE.execute(gui);
+    }
+  },
+
+  /** Shows database info. */
+  C_PROPERTIES(PROPERTIES + ELLIPSIS, "% shift M", true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      new DialogProps(gui);
+    }
+  },
+
+  /** Exports a database. */
+  C_EXPORT(EXPORT + ELLIPSIS, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      final DialogExport dialog = new DialogExport(gui);
+      if(!dialog.ok()) return;
+
+      final IOFile root = new IOFile(dialog.path());
+
+      // check if existing files will be overwritten
+      if(root.exists()) {
+        IOFile file = null;
+        boolean overwrite = false;
+        final Data data = gui.context.data();
+        final IntList docs = data.resources.docs();
+        final int ds = docs.size();
+        for(int d = 0; d < ds; d++) {
+          file = root.resolve(Token.string(data.text(docs.get(d), true)));
+          if(file.exists()) {
+            if(overwrite) {
+              // more than one file will be overwritten; check remaining tests
+              file = null;
+              break;
+            }
+            overwrite = true;
+          }
+        }
+        if(overwrite) {
+          // show message for overwriting files or directories
+          final String msg = file == null ? FILES_REPLACE_X : FILE_EXISTS_X;
+          if(file == null) file = root;
+          if(!BaseXDialog.confirm(gui, Util.info(msg, file))) return;
+        }
+      }
+      DialogProgress.execute(gui, new Export(root.path()));
+    }
+  },
+
+  /** Closes the database. */
+  C_CLOSE(CLOSE, Prop.MAC ? null : "% Q", true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.execute(new Close());
+    }
+  },
+
+  /** Creates a new file in the editor. */
+  C_EDIT_NEW(NEW, "% T", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.newFile();
+    }
+  },
+
+  /** Opens a new file in the editor. */
+  C_EDIT_OPEN(OPEN + ELLIPSIS, "% O", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.open();
+    }
+  },
+
+  /** Reverts the current editor file. */
+  C_EDIT_REVERT(REVERT + ELLIPSIS, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().reopen(true);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea ea = gui.editor.getEditor();
+      return gui.gopts.get(GUIOptions.SHOWEDITOR) && ea != null && ea.opened() && ea.modified();
+    }
+  },
+
+  /** Saves the current file in the editor. */
+  C_EDIT_SAVE(SAVE, "% S", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.save();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea ea = gui.editor.getEditor();
+      return gui.gopts.get(GUIOptions.SHOWEDITOR) && ea != null && (ea.modified() || !ea.opened());
+    }
+  },
+
+  /** Saves the current editor file under a new name. */
+  C_EDIT_SAVE_AS(SAVE_AS + ELLIPSIS, "% shift S", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.saveAs();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Saves a copy of the current editor file. */
+  C_EDIT_SAVE_COPY_AS(SAVE_COPY_AS + ELLIPSIS, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.saveCopyAs();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Closes the current editor file. */
+  C_EDIT_CLOSE(CLOSE, "% W", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.close(null);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Closes all editor files. */
+  C_EDIT_CLOSE_ALL(CLOSE_ALL, "% shift W", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.closeAll();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Runs the currently opened query. */
+  C_GO(RUN_QUERY, "% ENTER", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.run();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Stops the currently opened query. */
+  C_STOP(STOP, "shift ESCAPE", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.stop();
+    }
+  },
+
+  /** Edits external variables. */
+  C_EXTERNAL_VARIABLES(EXTERNAL_VARIABLES + ELLIPSIS, "% shift E", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      new DialogBindings(gui);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Indent result. */
+  C_INDENT_RESULT(INDENT_RESULT, "% shift I", false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      final boolean indent = gui.gopts.invert(GUIOptions.INDENTRESULT);
+      final SerializerOptions sopts = gui.context.options.get(MainOptions.SERIALIZER);
+      sopts.put(SerializerOptions.INDENT, indent ? YesNo.YES : YesNo.NO);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.INDENTRESULT);
+    }
+  },
+
+  /** Jumps to the next error. */
+  C_NEXT_ERROR(NEXT_ERROR, "% PERIOD", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.markError(true);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Wraps long lines. */
+  C_WORD_WRAP(WORD_WRAP, null, false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.WORDWRAP);
+      gui.notify.layout();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.WORDWRAP);
+    }
+  },
+
+  /** Adds or removes a comment. */
+  C_COMMENT(COMMENT, "% K", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().comment();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Formats text in the editor. */
+  C_FORMAT(FORMAT, "% shift F", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().format();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Sorts text. */
+  C_SORT(SORT + ELLIPSIS, "% U", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().sort();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Lower case. */
+  C_LOWER_CASE(LOWER_CASE, "% shift L", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().toCase(Case.LOWER);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Upper case. */
+  C_UPPER_CASE(UPPER_CASE, "% shift U", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().toCase(Case.UPPER);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Title case. */
+  C_TITLE_CASE(TITLE_CASE, "% shift T", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().toCase(Case.TITLE);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Jump to matching bracket. */
+  C_JUMP_TO_BRACKET(JUMP_TO_BRACKET, "% shift B", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().bracket();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Undoes the last modification. */
+  C_UNDO(UNDO, () -> BaseXKeys.UNDOSTEP) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().history(true);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea edit = editor(gui);
+      return edit != null && edit.hasHistory(true);
+    }
+  },
+
+  /** Redoes the last modification. */
+  C_REDO(REDO, () -> BaseXKeys.REDOSTEP) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().history(false);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea edit = editor(gui);
+      return edit != null && edit.hasHistory(false);
+    }
+  },
+
+  /** Opens the search bar. */
+  C_FIND(FIND + ELLIPSIS, () -> BaseXKeys.FIND) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().find();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea edit = editor(gui);
+      return edit != null && edit.searchable();
+    }
+  },
+
+  /** Jumps to the next search hit. */
+  C_FIND_NEXT(FIND_NEXT, () -> BaseXKeys.FINDNEXT) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().search(true);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea edit = editor(gui);
+      return edit != null && edit.searchable();
+    }
+  },
+
+  /** Jumps to the previous search hit. */
+  C_FIND_PREVIOUS(FIND_PREVIOUS, () -> BaseXKeys.FINDPREV) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().search(false);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea edit = editor(gui);
+      return edit != null && edit.searchable();
+    }
+  },
+
+  /** Jumps to a specific line. */
+  C_GO_TO_LINE(GO_TO_LINE + ELLIPSIS, "% L", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().gotoLine();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea edit = editor(gui);
+      return edit != null && edit.searchable();
+    }
+  },
+
+  /** Jumps to a declaration. */
+  C_DECLARATIONS(DECLARATIONS + ELLIPSIS, "% shift O", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.getEditor().gotoDeclaration();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final EditorArea edit = editor(gui);
+      return edit != null && edit.hasDeclarations();
+    }
+  },
+
+  /** Exits the application. */
+  C_EXIT(EXIT, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.quit();
+    }
+  },
+
+  /* EDIT COMMANDS */
+
+  /** Copies the current database path to the clipboard. */
+  C_COPY_PATH(COPY_PATH, "% shift C", true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      final int pre = gui.context.marked.pre(0);
+      BaseXLayout.toClipboard(Token.string(ViewData.path(gui.context.data(), pre)));
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      // disallow copy of empty node set or root node
+      final DBNodes marked = gui.context.marked;
+      return marked != null && !marked.isEmpty();
+    }
+  },
+
+  /** Copies the currently marked nodes. */
+  C_COPY_NODES(COPY, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      final Context ctx = gui.context;
+      final DBNodes n = ctx.marked;
+      ctx.copied = new DBNodes(n.data(), n.pres());
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      // disallow copy of empty node set or root node
+      return updatable(gui.context.marked);
+    }
+  },
+
+  /** Pastes the copied nodes. */
+  C_PASTE_NODES(PASTE, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      final StringBuilder sb = new StringBuilder();
+      final DBNodes n = gui.context.copied;
+      final long ns = n.size();
+      for(int i = 0; i < ns; i++) {
+        if(i > 0) sb.append(',');
+        sb.append(openPre(n, i));
+      }
+      gui.context.copied = null;
+      gui.execute(new XQuery("insert nodes (" + sb + ") into " +
+        openPre(gui.context.marked, 0)));
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final Context ctx = gui.context;
+      // disallow copy of empty node set or root node
+      return updatable(ctx.marked, Data.DOC) && ctx.copied != null;
+    }
+  },
+
+  /** Deletes the currently marked nodes. */
+  C_DELETE_NODES(DELETE + ELLIPSIS, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      if(!BaseXDialog.confirm(gui, DELETE_NODES)) return;
+      final StringBuilder sb = new StringBuilder();
+      final DBNodes n = gui.context.marked;
+      final long ns = n.size();
+      for(int i = 0; i < ns; i++) {
+        if(i > 0) sb.append(',');
+        sb.append(openPre(n, i));
+      }
+      gui.context.marked = new DBNodes(n.data());
+      gui.context.copied = null;
+      gui.context.focused = -1;
+      gui.execute(new XQuery("delete nodes (" + sb + ')'));
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return updatable(gui.context.marked, Data.DOC);
+    }
+  },
+
+  /** Inserts new nodes. */
+  C_NEW_NODES(NEW + ELLIPSIS, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      final DBNodes n = gui.context.marked;
+      final DialogInsert insert = new DialogInsert(gui);
+      if(!insert.ok()) return;
+
+      final StringList sl = insert.result;
+      final Kind kind = XNode.type(insert.kind).kind();
+      final TokenBuilder item = new TokenBuilder();
+      item.add(kind.description()).add(" { ").add(quote(sl.get(0))).add(" }");
+
+      if(kind.oneOf(Kind.ATTRIBUTE, Kind.PROCESSING_INSTRUCTION)) {
+        item.add(" { ").add(quote(sl.get(1))).add(" }");
+      } else if(kind == Kind.ELEMENT) {
+        item.add(" { () }");
+      }
+
+      gui.context.copied = null;
+      gui.execute(new XQuery("insert node " + item.add(" into ").add(openPre(n, 0)).toString()));
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return updatable(gui.context.marked, Data.ATTR, Data.PI, Data.COMM, Data.TEXT);
+    }
+  },
+
+  /** Opens a dialog to edit the currently marked nodes. */
+  C_EDIT_NODES(EDIT + ELLIPSIS, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      final DBNodes n = gui.context.marked;
+      final DialogEdit edit = new DialogEdit(gui, n.pre(0));
+      if(!edit.ok()) return;
+
+      String rename = null;
+      String replace = null;
+      final int k = edit.kind;
+      if(k == Data.ELEM || k == Data.PI || k == Data.ATTR) {
+        rename = edit.result.get(0);
+        if(k != Data.ELEM) replace = edit.result.get(1);
+      } else {
+        replace = edit.result.get(0);
+      }
+
+      if(rename != null) gui.execute(new XQuery("rename node " +
+        openPre(n, 0) + " as " + quote(rename)));
+      if(replace != null) gui.execute(new XQuery("replace value of node " +
+        openPre(n, 0) + " with " + quote(replace)));
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return updatable(gui.context.marked, Data.DOC);
+    }
+  },
+
+  /** Filters the currently marked nodes. */
+  C_FILTER_NODES(FILTER_SELECTED, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      final Context ctx = gui.context;
+      DBNodes marked = ctx.marked;
+      if(marked.isEmpty()) {
+        final int pre = gui.context.focused;
+        if(pre == -1) return;
+        marked = new DBNodes(ctx.data(), pre);
+      }
+      gui.notify.context(marked, false, null);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      final DBNodes marked = gui.context.marked;
+      return marked != null && !marked.isEmpty();
+    }
+  },
+
+  /** Shows the XQuery view. */
+  C_SHOW_EDITOR(EDITOR, "% E", false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWEDITOR);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Jumps to the currently edited file. */
+  C_JUMP_TO_FILE(JUMP_TO_FILE, "% J", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.showProject();
+      gui.editor.jumpToFile();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Finds files. */
+  C_FIND_CONTENTS(FIND_CONTENTS + ELLIPSIS, Prop.MAC ? "% shift H" : "% H", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.editor.showProject();
+      gui.editor.findFiles();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+  },
+
+  /** Shows the XQuery project structure. */
+  C_SHOW_PROJECT(PROJECT, "% P", false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWPROJECT);
+      gui.editor.toggleProject();
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEDITOR);
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWPROJECT);
+    }
+  },
+
+  /** Shows info. */
+  C_SHOW_INFO(INFO, "% I", false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWINFO);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWINFO);
+    }
+  },
+
+  /** Repository manager. */
+  C_PACKAGES(PACKAGES + ELLIPSIS, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      new DialogPackages(gui);
+    }
+  },
+
+  /* VIEW MENU */
+
+  /** Shows the buttons. */
+  C_SHOW_BUTTONS(BUTTONS, null, false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWBUTTONS);
+      gui.updateControl(gui.buttons, gui.gopts.get(GUIOptions.SHOWBUTTONS), BorderLayout.CENTER);
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWBUTTONS);
+    }
+  },
+
+  /** Show Input Field. */
+  C_SHOW_INPUT_BAR(INPUT_BAR, null, false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.updateControl(gui.nav, gui.gopts.invert(GUIOptions.SHOWINPUT), BorderLayout.SOUTH);
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWINPUT);
+    }
+  },
+
+  /** Shows the text view. */
+  C_SHOW_RESULT(RESULT, "% R", false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWTEXT);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWTEXT);
+    }
+  },
+
+  /** Shows the map. */
+  C_SHOW_MAP(MAP, "% 1", true, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWMAP);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWMAP);
+    }
+  },
+
+  /** Shows the tree view. */
+  C_SHOW_TREE(TREE, "% 2", true, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWTREE);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWTREE);
+    }
+  },
+
+  /** Shows the tree view. */
+  C_SHOW_FOLDER(FOLDER, "% 3", true, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWFOLDER);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWFOLDER);
+    }
+  },
+
+  /** Shows the plot view. */
+  C_SHOW_PLOT(PLOT, "% 4", true, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWPLOT);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWPLOT);
+    }
+  },
+
+  /** Shows the table view. */
+  C_SHOW_TABLE(TABLE, "% 5", true, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWTABLE);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWTABLE);
+    }
+  },
+
+  /** Shows the explorer view. */
+  C_SHOW_EXPLORE(EXPLORER, "% 6", true, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.SHOWEXPLORE);
+      gui.layoutViews();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.SHOWEXPLORE);
+    }
+  },
+
+  /** Shows used memory. */
+  C_SHOW_MEM(USED_MEM + ELLIPSIS, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      DialogMem.show(gui);
+    }
+  },
+
+  /* OPTION MENU */
+
+  /** Real-time execution on/off. */
+  C_RT_EXECUTION(RT_EXECUCTION, null, false, true) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.gopts.invert(GUIOptions.EXECRT);
+      gui.stop();
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.EXECRT);
+    }
+  },
+
+  /** Real-time filtering on/off. */
+  C_RT_FILTERING(RT_FILTERING, null, true, true) {
+    @Override
+    public void execute(final GUI gui) {
+      final boolean rt = gui.gopts.invert(GUIOptions.FILTERRT);
+      gui.stop();
+
+      final Context ctx = gui.context;
+      final boolean root = ctx.root();
+      final Data data = ctx.data();
+      if(rt) {
+        if(root) {
+          gui.notify.mark(new DBNodes(data), null);
+        } else {
+          final DBNodes mark = ctx.marked;
+          ctx.marked = new DBNodes(data);
+          gui.notify.context(mark, true, null);
+        }
+      } else if(!root) {
+        gui.notify.context(new DBNodes(data, 0), true, null);
+        gui.notify.mark(ctx.current(), null);
+      }
+    }
+
+    @Override
+    public boolean selected(final GUI gui) {
+      return gui.gopts.get(GUIOptions.FILTERRT);
+    }
+  },
+
+  /** Shows a preference dialog. */
+  C_PREFERENCES(PREFERENCES + ELLIPSIS, Prop.MAC ? null : "% shift P", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      DialogPrefs.show(gui);
+    }
+  },
+
+  /* HELP MENU */
+
+  /** Shows the documentation web page. */
+  C_HELP(HELP, "F1", false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      BaseXDialog.browse(gui, DOCS_URL);
+    }
+  },
+
+  /** Opens the community web page. */
+  C_COMMUNITY(COMMUNITY, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      BaseXDialog.browse(gui, COMMUNITY_URL);
+    }
+  },
+
+  /** Opens the update web page. */
+  C_CHECK_FOR_UPDATES(CHECK_FOR_UPDATES, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.checkVersion(true);
+    }
+  },
+
+  /** Shows the "about" information. */
+  C_ABOUT(ABOUT + ELLIPSIS, null, false, false) {
+    @Override
+    public void execute(final GUI gui) {
+      DialogAbout.show(gui);
+    }
+  },
+
+  /* BROWSE COMMANDS */
+
+  /** Goes one step back. */
+  C_GO_BACK(GO_BACK, Prop.MAC ? null : "alt LEFT", true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.notify.hist(false);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.notify.query(true) != null;
+    }
+  },
+
+  /** Goes one step forward. */
+  C_GO_FORWARD(GO_FORWARD, Prop.MAC ? null : "alt RIGHT", true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      gui.notify.hist(true);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return gui.notify.query(false) != null;
+    }
+  },
+
+  /** Goes one level up. */
+  C_GO_UP(GO_UP, null, true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      // skip operation for root context
+      final Context ctx = gui.context;
+      if(ctx.root()) return;
+      // check if all nodes are document nodes
+      boolean doc = true;
+      final Data data = ctx.data();
+      for(final int pre : ctx.current().pres()) doc &= data.kind(pre) == Data.DOC;
+      final DBNodes nodes;
+      if(doc) {
+        // if yes, jump to database root
+        ctx.invalidate();
+        nodes = ctx.current();
+      } else {
+        // otherwise, jump to parent nodes
+        final IntList pres = new IntList();
+        for(final int pre : ctx.current().pres()) {
+          final int k = data.kind(pre);
+          pres.add(k == Data.DOC ? pre : data.parent(pre, k));
+        }
+        nodes = new DBNodes(data, pres.ddo().finish());
+        ctx.current(nodes);
+      }
+      gui.notify.context(nodes, false, null);
+    }
+
+    @Override
+    public boolean enabled(final GUI gui) {
+      return super.enabled(gui) && !gui.context.root();
+    }
+  },
+
+  /** Goes to the root node. */
+  C_GO_HOME(GO_HOME, Prop.MAC ? null : "alt HOME", true, false) {
+    @Override
+    public void execute(final GUI gui) {
+      // jump to database root
+      final Context ctx = gui.context;
+      if(!ctx.root()) {
+        ctx.invalidate();
+        gui.notify.context(ctx.current(), false, null);
+      }
+      // highlight root nodes in all views
+      final Data data = ctx.data();
+      gui.notify.mark(new DBNodes(data, true, data.resources.docs().toArray()), null);
+    }
+  };
+
+  /** Menu label. */
+  private final String label;
+  /** Key shortcut (can be {@code null}). */
+  private final Object key;
+  /** States if the command needs a data reference. */
+  private final boolean data;
+  /** Indicates if this command has two states. */
+  private final boolean toggle;
+  /** Shortcut (can be {@code null}). */
+  private final String shortcut;
+  /** Supplier of a shortcut, resolved after class initialization (can be {@code null}). */
+  private final Supplier<BaseXKeys> textKey;
+
+  /**
+   * Constructor.
+   * @param label label of the menu item
+   * @param key shortcut (can be {@code null})
+   * @param data requires a database to be opened
+   * @param toggle indicates if this command has two states
+   */
+  GUIMenuCmd(final String label, final String key, final boolean data, final boolean toggle) {
+    this.label = label;
+    this.key = key;
+    this.data = data;
+    this.toggle = toggle;
+    shortcut = BaseXLayout.addShortcut(label, key);
+    textKey = null;
+  }
+
+  /**
+   * Constructor for commands that share their shortcut with the text panel.
+   * @param label label of the menu item
+   * @param key supplier of the shortcut
+   */
+  GUIMenuCmd(final String label, final Supplier<BaseXKeys> key) {
+    this.label = label;
+    textKey = key;
+    this.key = null;
+    data = false;
+    toggle = false;
+    shortcut = null;
+  }
+
+  @Override
+  public boolean enabled(final GUI gui) {
+    return !data || gui.context.data() != null;
+  }
+
+  @Override
+  public boolean selected(final GUI gui) {
+    return false;
+  }
+
+  @Override
+  public final String label() { return label; }
+
+  @Override
+  public final boolean toggle() { return toggle; }
+
+  @Override
+  public String shortCut() {
+    return textKey == null ? shortcut : BaseXLayout.addShortcut(label, textKey.get());
+  }
+
+  @Override
+  public Object shortcuts() {
+    return textKey == null ? key : new BaseXKeys[] { textKey.get() };
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Returns the currently opened editor.
+   * @param gui reference to the main window
+   * @return editor (can be {@code null})
+   */
+  private static EditorArea editor(final GUI gui) {
+    return gui.gopts.get(GUIOptions.SHOWEDITOR) ? gui.editor.getEditor() : null;
+  }
+
+  /**
+   * Checks if data can be updated.
+   * @param node node instance (can be {@code null})
+   * @param kinds disallowed node kinds
+   * @return result of check
+   */
+  private static boolean updatable(final DBNodes node, final int... kinds) {
+    if(node == null || (kinds.length == 0 ? node.isEmpty() : node.size() != 1)) return false;
+    final int k = node.data().kind(node.pre(0));
+    for(final int kind : kinds) {
+      if(k == kind) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Returns a quoted string.
+   * @param string string to encode
+   * @return quoted string
+   */
+  private static String quote(final String string) {
+    return '"' + string.replace("\"", "&quot;") + '"';
+  }
+
+  /**
+   * Returns a database function for the first node in a node set.
+   * @param nodes node set
+   * @param index node index
+   * @return function string
+   */
+  private static String openPre(final DBNodes nodes, final int index) {
+    return Function._DB_GET_PRE.args(nodes.data().meta.name, nodes.pre(index)).trim();
+  }
+}

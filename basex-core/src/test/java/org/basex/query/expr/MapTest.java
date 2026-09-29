@@ -1,0 +1,640 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.func.Function.*;
+
+import org.basex.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.junit.jupiter.api.*;
+
+/**
+ * Tests for XQuery maps.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public final class MapTest extends SandboxTest {
+  /** Duplicate keys are rejected while the map constructor is optimized. */
+  @Test public void duplicateKeys() {
+    // all keys are strings: the constructor is treated as a record
+    error("{ 'a': 1, 'a': 2 }", MAPDUPLKEY_X);
+    error("{ 'a': 1, 'b': 2, 'a': 3 }", MAPDUPLKEY_X);
+    // the duplicate is only detected after the first key has been constant folded
+    error("{ concat('a', ''): 1, 'a': 2 }", MAPDUPLKEY_X);
+    // distinct keys are accepted
+    query("{ 'a': 1, 'b': 2 }?a", 1);
+  }
+
+  /** A map as key should lead to FOTY0013. */
+  @Test public void mapAsKeyTest() {
+    error("declare variable $m := { 'a': 'b' };" +
+          "declare variable $q := { $m: 'a' };" +
+          "$q", FIATOMIZE_X);
+  }
+
+  /** Tests the map constructor. */
+  @Test public void constructor() {
+    check("{ 'A': 1, 2: 3 }?A", 1, root(Itr.class));
+    check("{ <_>A</_>: 1, 2: 3 }?A", 1, root(Itr.class));
+  }
+
+  /** Tests the new syntax for map literals. */
+  @Test public void gh755() {
+    query("(<x><y/></x> / { 'test': y, 42: 'asdf' })('test')", "<y/>");
+  }
+
+  /** Tests keys. */
+  @Test public void keys() {
+    error(" { ('a', 'b'): 'b' }", INVTYPE_X);
+    error(" { 'a': 'b', 'a': 'c' }", MAPDUPLKEY_X);
+    error(" { xs:time('01:01:01'): 1, xs:time('01:01:01'): 1 }", MAPDUPLKEY_X);
+
+    query(_MAP_SIZE.args(" { xs:time('01:01:01'): 1, xs:time('02:02:02'): 2 }"), 2);
+    query("let $k1 := xs:time('01:01:01')"
+        + "let $k2 := xs:time('01:01:02+01:00')"
+        + "let $m := { $k1: 1 }"
+        + "return map:put(map:remove($m, $k1), $k2, 2)($k2)", 2);
+
+    query(" {  xs:time('01:01:01'): 1, xs:time('01:01:02+01:00'): 2 }");
+    query(" {  xs:time('01:01:01'): 1, xs:time('01:01:02+01:00'): 2 }");
+
+    query("let $k1 := xs:time('01:01:01')"
+        + "let $k2 := xs:dateTime('2001-01-01T01:01:01+01:00')"
+        + "let $m := { $k1: 1 }"
+        + "return map:put($m, $k2, 2)");
+    query("let $k1 := xs:time('01:01:01')"
+        + "let $k2 := xs:time('01:01:02')"
+        + "let $k3 := xs:time('01:01:03+01:00')"
+        + "let $m := { $k1: 1, $k2: 2 }"
+        + "return map:put(map:remove($m, $k2), $k3, 3)");
+    query("let $k1 := xs:time('01:01:01')"
+        + "let $k2 := xs:time('01:01:02')"
+        + "let $k3 := xs:time('01:01:02+01:00')"
+        + "let $m := { $k1: 1, $k2: 2 }"
+        + "return map:merge((map:remove($m, $k2), { $k3: 3 }))");
+  }
+
+  /** Stack overflow bug. */
+  @Test public void so() {
+    query("let $x := { 'f': { 1: 1, 2: 2 } } "
+        + "return (every $k in map:keys($x('f')) satisfies $k eq $x('f')($k))", true);
+  }
+
+  /** Stack overflow bug. */
+  @Test public void soType() {
+    query("count(({}, array { <a/> }))", 2);
+    query("count((array { <a/> }, {}))", 2);
+  }
+
+  /** GitHub bug (#1012). */
+  @Test public void gh1012() {
+    error("{}(())", INVKEY_X_X);
+    error("{ 'a': 1 }((1, 2))", INVKEY_X_X);
+    error("{ 'a': 1 }(void(()))", INVKEY_X_X);
+  }
+
+  /** GitHub bug (#1297). */
+  @Test public void gh1297() {
+    query("let $m := { 'A_': 1, 'B@': 2, 'C!': 3 }"
+        + "return (map:remove($m, 'A_')('A_'), map:remove($m, 'C!')('C!'))", "");
+  }
+
+  /** GitHub bug (#1480). */
+  @Test public void gh1480() {
+    query("map:merge(( { 'AQ': 'A' }, { 'B2': 'C' }, { 'B2': 'X' }),"
+        + "{ 'duplicates': 'use-last' })?B2", "X");
+    query("map:merge(( { 'AQ': 'A' }, { 'B2': 'C' }, { 'B2': 'X' }),"
+        + "{ 'duplicates': 'use-first' })?B2", "C");
+    query("map:merge(( { 'AQ': 'A' }, { 'B2': 'C' }, { 'B2': 'X' }),"
+        + "{ 'duplicates': 'combine' })?B2", "C\nX");
+    error("map:merge(( { 'AQ': 'A' }, { 'B2': 'C' }, { 'B2': 'X' }),"
+        + "{ 'duplicates': 'reject' })?B2", MERGE_DUPLICATE_X);
+  }
+
+  /** map:put: Always replace equal values of different type. */
+  @Test public void gh2358() {
+    query("let $m := { 48e0: 1 }"
+        + "return some(map:keys($m), fn { . instance of xs:double })", true);
+    query("let $m := { 48: 1 } => map:put(48e0, 2)"
+        + "return every(map:keys($m), fn { . instance of xs:integer })", true);
+    query("let $m := { '0': 1 } => map:put(48, 2) => map:put(48e0, 3)"
+        + "return every(map:keys($m), fn { not(. instance of xs:double) })", true);
+    query("let $m := { '0': 1 } => map:put(48, 2) => map:put(48.0, 3) => map:put(48e0, 4)"
+        + "return every(map:keys($m), fn { not(. instance of xs:double) })", true);
+  }
+
+  /** Atomize key. */
+  @Test public void atomKey() {
+    query("{ 'x': 42 }([ 'x' ])", 42);
+  }
+
+  /** Ordered map construction. */
+  @Test public void ordered() {
+    query("{ 1: 1, 2: 2, 3: 3 }", "{1:1,2:2,3:3}");
+    query("{ 3: 3, 2: 2, 1: 1 }", "{3:3,2:2,1:1}");
+
+    query("map:merge(({ 1: 2 }, { 2: 1 }))", "{1:2,2:1}");
+    query("map:merge(({ 2: 1 }, { 1: 2 }))", "{2:1,1:2}");
+
+    query("map:build(1 to 3)", "{1:1,2:2,3:3}");
+    query("(1 to 3) => reverse() => map:build()", "{3:3,2:2,1:1}");
+    query("(1 to 100000) => map:build() => map:size()", 100000);
+    query("(1 to 100000) => reverse() => map:build() => map:size()", 100000);
+  }
+
+  /** Ordered deletes and puts. */
+  @Test public void orderedDeletes() {
+    query("map:build(1 to 3) => map:remove(3)", "{1:1,2:2}");
+    query("map:build(1 to 3) => map:remove(3) => map:remove(2)", "{1:1}");
+    query("map:build(1 to 3) => map:remove(3) => map:remove(2) => map:remove(1)", "{}");
+    query("map:build(1 to 3) => map:remove((3, 2, 1, 0))", "{}");
+    query("map:build(1 to 3) => map:remove((3, 3, 2, 2, 1, 1))", "{}");
+
+    query("map:build(1 to 3) => map:remove(1)", "{2:2,3:3}");
+    query("map:build(1 to 3) => map:remove(1) => map:remove(2)", "{3:3}");
+    query("map:build(1 to 3) => map:remove(1) => map:remove(2) => map:remove(3)", "{}");
+
+    query("map:build(1 to 1000) ! fold-left(1 to 1000, ., map:remove#2)", "{}");
+    query("map:build(1 to 1000) ! fold-left(reverse(1 to 1000), ., map:remove#2)", "{}");
+  }
+
+  /** Ordered puts. */
+  @Test public void orderedPuts() {
+    query("map:build((1 to 10)[. = 0]) => map:put(1, 2)", "{1:2}");
+    query("map:build((1 to 10)[. = 0]) => map:put(1, 2) => map:put(3, 4)", "{1:2,3:4}");
+    query("map:build((1 to 10)[. = 0]) => map:put(1, 2) => map:put(1, 3)", "{1:3}");
+
+    query("{} => map:put(1, 2)", "{1:2}");
+    query("{ 1: 2 } => map:put(3, 4)", "{1:2,3:4}");
+    query("{ 1: 2, 3: 4 } => map:put(5, 6)", "{1:2,3:4,5:6}");
+
+    query("{} ! fold-left(reverse(1 to 100000), ., map:put(?, ?, ())) ! sum(map:keys(.))",
+        5000050000L);
+  }
+
+  /** Operations on the same hash. */
+  @Test public void orderedSameHash() {
+    query("{ 48: 'I' } => map:put('0', 'S')", "{48:\"I\",\"0\":\"S\"}");
+    query("{ '0': 'S' } => map:put(48, 'I')", "{\"0\":\"S\",48:\"I\"}");
+
+    query("{ '0': 'S' } => map:put(48, 'I') => map:put('0', 'S2')",
+        "{\"0\":\"S2\",48:\"I\"}");
+    query("{ '0': 'S' } => map:put(48, 'I') => map:put('0', 'S2') => map:put(48, 'I2')",
+        "{\"0\":\"S2\",48:\"I2\"}");
+
+    query("map:build(48 to 57) "
+        + "! fold-left(map:keys(.), ., fn($m, $i) { map:put($m, char($i), $i) })"
+        + "! map:size(.)",
+        20);
+
+    query("{ 48: 'I', '0': 'S' } => map:remove('0')", "{48:\"I\"}");
+    query("{ 48: 'I', '0': 'S' } => map:remove(48)", "{\"0\":\"S\"}");
+    query("{ 48: 'I', 'x': 'x' } => map:remove('0')", "{48:\"I\",\"x\":\"x\"}");
+
+    query("{ 48: 'I' } => map:get(48)", "I");
+    query("{ 48: 'I' } => map:get('0')", "");
+
+    query("{ 48: 'I', '0': 'S' } => map:get(48)", "I");
+    query("{ 48: 'I', '0': 'S' } => map:get('0')", "S");
+    query("{ 48: 'I', 'x': 'x' } => map:get('0')", "");
+
+    query("{ 48: 'I', '0': 'S' } => map:put(9, 9) => map:get(48)", "I");
+    query("{ 48: 'I', '0': 'S' } => map:put(9, 9) => map:get('0')", "S");
+    query("{ 48: 'I', 'x': 'x' } => map:put(9, 9) => map:get('0')", "");
+  }
+
+  /** Operations on the same key. */
+  @Test public void orderedSameKey() {
+    query("{ 1: 'A' } => map:put(1, 'B')", "{1:\"B\"}");
+    query("{ 1: 'A' } => map:put(1, 'B') => map:put(1,'C')", "{1:\"C\"}");
+
+    query("{ 1: 'A', 2: 'B' } => map:put(2, 'C')", "{1:\"A\",2:\"C\"}");
+    query("{ 1: 'A', 2: 'B' } => map:put(2, 'C') => map:put(2, 'D')", "{1:\"A\",2:\"D\"}");
+
+    query("map:build(1 to 99) "
+        + "! map:put(., 50e0, '') "
+        + "! every(map:keys(.), fn { . instance of xs:integer })",
+        true);
+    query("map:build(1 to 99) "
+        + "! map:put(., 50e0, '') "
+        + "! map:put(., 50, '') "
+        + "! some(map:keys(.), fn { . instance of xs:double })",
+        false);
+    query("map:build(1 to 99) "
+        + "! fold-left(map:keys(.), ., fn($m, $i) { map:put($m, xs:double($i), ()) })"
+        + "! every(map:keys(.), fn { . instance of xs:integer })",
+        true);
+    query("map:build(1 to 99) "
+        + "! fold-left(map:keys(.), ., fn($m, $i) { map:put($m, xs:double($i), ()) })"
+        + "! fold-left(map:keys(.), ., fn($m, $i) { map:put($m, xs:integer($i), ()) })"
+        + "! every(map:keys(.), fn { . instance of xs:integer })",
+        true);
+
+    query("{ 48: 'I', '0': 'S' } => map:get(48)", "I");
+    query("{ 48: 'I', '0': 'S' } => map:get('0')", "S");
+  }
+
+  /** Replacements with equal keys of different type. */
+  @Test public void orderedEqualKey() {
+    query("{ 1: 'A' } => map:put(1e0, 'B')", "{1:\"B\"}");
+    query("{ 1: 'A' } => map:put(1e0, 'B') => map:put(1.0,'C')", "{1:\"C\"}");
+
+    query("{ 1: 'A', 2: 'B' } => map:put(2e0, 'C')", "{1:\"A\",2:\"C\"}");
+    query("{ 1: 'A', 2: 'B' } => map:put(2e0, 'C') => map:put(2.0,'D')", "{1:\"A\",2:\"D\"}");
+
+    // equal key: append new entries
+    query("{ 1: 'A', 2: 'B' } => map:put(1e0, 'C')", "{1:\"C\",2:\"B\"}");
+
+    query("{ 1: 1, 2: 2 } => map:remove(1e0)", "{2:2}");
+    query("{ 1: 1, 2: 2 } => map:remove(1.0)", "{2:2}");
+
+    query("{ 1: 1, 2: 2 } => map:remove(1e0)", "{2:2}");
+    query("{ 1: 1, 2: 2 } => map:remove(1.0)", "{2:2}");
+
+    query("{ 48: 'I', '0': 'S' } => map:get(48e0)", "I");
+    query("{ 48: 'I', '0': 'S' } => map:get(48.0)", "I");
+    query("{ 48: 'I', '0': 'S' } => map:put(9, 9) => map:get(48e0)", "I");
+    query("{ 48: 'I', '0': 'S' } => map:put(9, 9) => map:get(48.0)", "I");
+
+    query("{ 48: 'I', '0': 'S' } => map:put('0', 'S') => map:get('0')", "S");
+    query("{ 48: 'I', '0': 'S' } => map:put('0', 'T') => map:get('0')", "T");
+  }
+
+  /** Multiple puts/removes in the same map. */
+  @Test public void orderedMultiple() {
+    query("{} ! (map:put(., 9, 9), map:put(., 8, 8))",
+        "{9:9}\n{8:8}");
+    query("{ 1: 1 } ! (map:put(., 9, 9), map:put(., 8, 8))",
+        "{1:1,9:9}\n{1:1,8:8}");
+    query("{ 1: 1, 2: 2 } ! (map:put(., 9, 9), map:put(., 8, 8))",
+        "{1:1,2:2,9:9}\n{1:1,2:2,8:8}");
+    query("{ 1: 1, 2: 2, 3: 3 } ! (map:put(., 9, 9), map:put(., 8, 8))",
+        "{1:1,2:2,3:3,9:9}\n{1:1,2:2,3:3,8:8}");
+    query("{ 1: 1, 2: 2, 3: 3, 4: 4 } ! (map:put(., 9, 9), map:put(., 8, 8))",
+        "{1:1,2:2,3:3,4:4,9:9}\n{1:1,2:2,3:3,4:4,8:8}");
+
+    query("{ 1: 1, 2: 2, 3: 3, 4: 4 } ! (map:remove(., 4), map:put(., 8, 8))",
+        "{1:1,2:2,3:3}\n{1:1,2:2,3:3,4:4,8:8}");
+    query("{ 1: 1, 2: 2, 3: 3, 4: 4 } ! (map:put(., 8, 8), map:remove(., 4))",
+        "{1:1,2:2,3:3,4:4,8:8}\n{1:1,2:2,3:3}");
+
+    query("{ 1: 1, 2: 2, 3: 3 } ! (map:remove(., 1), map:remove(., 2))",
+        "{2:2,3:3}\n{1:1,3:3}");
+    query("{ 1: 1, 2: 2, 3: 3 } ! (map:remove(., 2), map:remove(., 1))",
+        "{1:1,3:3}\n{2:2,3:3}");
+
+    query("let $map := map:build(1 to 5) "
+        + "for $i in map:keys($map) "
+        + "return map:keys(map:remove($map, $i)) "
+        + "=> sum()",
+        "14\n13\n12\n11\n10");
+
+    query("{} ! (map:put(., 9, 9), map:put(., 8, 8)) ! map:keys(.)",
+        "9\n8");
+    query("{} ! (map:put(., 9, 9), map:put(., 8, 8)) ! ?*",
+        "9\n8");
+    query("{ 1: 1, 2: 2, 3: 3, 4: 4 } ! (map:put(., 9, 9), map:put(., 8, 8)) ! map:keys(.)",
+        "1\n2\n3\n4\n9\n1\n2\n3\n4\n8");
+    query("{ 1: 1, 2: 2, 3: 3, 4: 4 } ! (map:put(., 9, 9), map:put(., 8, 8)) ! ?*",
+        "1\n2\n3\n4\n9\n1\n2\n3\n4\n8");
+  }
+
+  /** Ordered deletes and puts. */
+  @Test public void orderedDeletesPuts() {
+    query("map:build(1 to 3) => map:remove(3) => map:put(3, 9)", "{1:1,2:2,3:9}");
+    query("map:build(1 to 3) => map:remove(3) => map:put(3, 9) "
+        + "=> map:remove(3) => map:put(3, 8)", "{1:1,2:2,3:8}");
+
+    query("map:build(1 to 3) => map:remove(1) => map:put(1, 9)", "{2:2,3:3,1:9}");
+    query("map:build(1 to 3) => map:remove(1) => map:put(1, 9) "
+        + "=> map:remove(1) => map:put(1, 8)", "{2:2,3:3,1:8}");
+
+    query("map:build(1 to 1000) "
+        + "! fold-left(reverse(1 to 1000), .,"
+        + " fn($m, $i) { $m => map:remove($i) => map:put($i, 1) }) "
+        + "! sum(?*)", 1000);
+    query("map:build(1 to 10000) "
+        + "! fold-left(reverse(1 to 10000), .,"
+        + " fn($m, $i) { $m => map:remove(1) => map:put(1, 1) }) "
+        + "! sum(?*)", 50005000);
+    query("map:build(1 to 100000) "
+        + "! fold-left(random-number-generator()?permute(1 to 100000), ., "
+        + " fn($m, $i) { $m => map:remove(1) => map:put(1, 1) }) "
+        + "! sum(?*)", 5000050000L);
+  }
+
+  /** Instance of tests. */
+  @Test public void instanceOf() {
+    query("map:build(1 to 100) instance of map(xs:integer, xs:integer)", true);
+    query("map:build(1 to 10000) instance of map(xs:integer, xs:integer)", true);
+    query("(map:build(1 to 10000) => map:put(0, 0)) instance of map(xs:integer, xs:integer)", true);
+
+    query("map:build(1 to 100) instance of map(xs:integer, xs:int)", false);
+    query("map:build(1 to 10000) instance of map(xs:integer, xs:int)", false);
+    query("(map:build(1 to 10000) => map:put(0, 0)) instance of map(xs:integer, xs:int)", false);
+  }
+
+  /** Traversal. */
+  @Test public void traversal() {
+    // variants: hash vs. trie map; iteration vs. value-based retrieval
+    query("map:build(1 to 10000) "
+        + "=> map:for-each(fn($k, $v) { $k + $v }) "
+        + "=> sum()",
+        100010000);
+    query("map:build(1 to 10000) "
+        + "=> map:for-each(fn($k, $v) { $k + $v }) "
+        + "=> sort()"
+        + "=> sum()",
+        100010000);
+    query("map:build(1 to 10000) "
+        + "=> map:put(0, 0) "
+        + "=> map:for-each(fn($k, $v) { $k + $v }) "
+        + "=> sum()",
+        100010000);
+    query("map:build(1 to 10000) "
+        + "=> map:put(0, 0) "
+        + "=> map:for-each(fn($k, $v) { $k + $v }) "
+        + "=> sort()"
+        + "=> sum()",
+        100010000);
+  }
+
+  /** Deep equality. */
+  @Test public void deepEqual() {
+    // compare pristine maps
+    query("let $a := map:build(1 to 1000) "
+        + "let $b := map:build(1 to 1000) "
+        + "return deep-equal($a, $b)",
+        true);
+    query("let $a := map:build(1 to 1000) "
+        + "let $b := map:build(reverse(1 to 1000)) "
+        + "return deep-equal($a, $b)",
+        true);
+    // compare pristine and updated maps
+    query("let $a := map:build(0 to 1000) "
+        + "let $b := map:build(1 to 1000) => map:put(0, 0) "
+        + "return deep-equal($a, $b)",
+        true);
+    query("let $a := map:build(1 to 1000) => map:put(0, 0) "
+        + "let $b := map:build(0 to 1000) "
+        + "return deep-equal($a, $b)",
+        true);
+    query("let $a := map:build(1 to 1000) => map:put(0, 0) "
+        + "let $b := map:build(reverse(0 to 1000)) "
+        + "return deep-equal($a, $b)",
+        true);
+    // compare updated maps
+    query("let $a := map:build(1 to 1000) => map:put(0, 0) "
+        + "let $b := map:build(0 to 999) => map:put(1000, 1000) "
+        + "return deep-equal($a, $b)",
+        true);
+    query("let $a := map:build(0 to 999) => map:put(1000, 1000) "
+        + "let $b := map:build(1 to 1000) => map:put(0, 0) "
+        + "return deep-equal($a, $b)",
+        true);
+    query("let $a := map:build(0 to 999) => map:put(1000, 1000) "
+        + "let $b := map:build(reverse(1 to 1000)) => map:put(0, 0) "
+        + "return deep-equal($a, $b)",
+        true);
+
+    // ignore different types
+    query("deep-equal({ 1: 2 }, { 1e0: 2 })", true);
+    query("deep-equal({ 1: 2 }, { 1.0: 2 })", true);
+    query("deep-equal({ 1: 2 }, { '1': 2 })", false);
+    query("deep-equal({}, [])", false);
+
+    // compare unequal maps
+    query("deep-equal({}, { 1: 2 })", false);
+    query("deep-equal({ 1: 2 }, {})", false);
+    query("deep-equal({ 1: 2 }, { 1: 3 })", false);
+    query("deep-equal({ 1: 2 }, { 2: 2 })", false);
+    query("deep-equal({ 1: 2, 3: 4 }, { 1: 2, 3: 3 })", false);
+    query("deep-equal({ 1: 2, 3: 4 }, { 1: 2, 4: 4 })", false);
+    query("deep-equal({ 1: 2, 3: 4, 5: 6 }, { 1: 2, 3: 4, 5: 5 })", false);
+  }
+
+  /** Deep equality checks triggered by optimizations. */
+  @Test public void deepEqualCode() {
+    query("{}, {}", "{}\n{}");
+    query("{1:2}, {1:2}", "{1:2}\n{1:2}");
+    query("{1:2,3:4}, {1:2,3:4}", "{1:2,3:4}\n{1:2,3:4}");
+
+    query("{1:2}, []", "{1:2}\n[]");
+    query("[], {1:2}", "[]\n{1:2}");
+    query("{1:2}, {}", "{1:2}\n{}");
+    query("{}, {1:2}", "{}\n{1:2}");
+    query("{1:2}, {2:3}", "{1:2}\n{2:3}");
+  }
+
+  /** Tests integer maps. */
+  @Test public void intMaps() {
+    query("map:build(1)", "{1:1}");
+    query("map:build(1) => map:keys()", 1);
+    query("map:build(1) => map:items()", 1);
+    query("map:build(1) => map:entries()", "{1:1}");
+    query("map:build(1) => map:get(1)", 1);
+    query("map:build(1) => map:get(1e0)", 1);
+    query("map:build(1) => map:get(1.0)", 1);
+    query("map:build(1) => map:get('1')", "");
+    query("map:build(1) => map:get(true())", "");
+
+    query("map:build(10_000_000_000)", "{10000000000:10000000000}");
+    query("map:build(1, value := fn { 10_000_000_000 })", "{1:10000000000}");
+    query("map:build(1, key := fn { 10_000_000_000 })", "{10000000000:1}");
+    query("map:build(xs:byte(1)) -> map:keys(.) -> (. instance of xs:byte)", true);
+
+    // more entries than XQSmallMap#MAX_SIZE: hash-based representations
+    check("map:merge(({ 1: 1 }, { 2: 2 }, { 3: 3 }, { 4: 4 }, { 5: 5 }))",
+        "{1:1,2:2,3:3,4:4,5:5}", root(XQIntMap.class));
+    check("map:merge(({ 1: 1 }, { 2: '2' }, { 3: '3' }, { 4: 4 }, { 5: 5 }))",
+        "{1:1,2:\"2\",3:\"3\",4:4,5:5}", root(XQIntValueMap.class));
+    check("map:merge(({ 1: 1 }, { 2: '2' }, { '3': '3' }, { 4: 4 }, { 5: 5 }))",
+        "{1:1,2:\"2\",\"3\":\"3\",4:4,5:5}", root(XQItemValueMap.class));
+    check("map:merge(({ 1: 1 }, { '2': '2' }, { '3': '3' }, { 4: 4 }, { 5: 5 }))",
+        "{1:1,\"2\":\"2\",\"3\":\"3\",4:4,5:5}", root(XQItemValueMap.class));
+    check("map:merge(({ 1: 1 }, { '2': '2' }, { 3: 3 }, { 4: 4 }, { 5: 5 }))",
+        "{1:1,\"2\":\"2\",3:3,4:4,5:5}", root(XQItemValueMap.class));
+  }
+
+  /** Tests string maps. */
+  @Test public void stringMaps() {
+    query("map:build('1')", "{\"1\":\"1\"}");
+    query("map:build('1') => map:keys()", 1);
+    query("map:build('1') => map:items()", 1);
+    query("map:build('1') => map:entries()", "{\"1\":\"1\"}");
+    query("map:build('1') => map:get(xs:anyURI('1'))", 1);
+    query("map:build('1') => map:get(xs:untypedAtomic('1'))", 1);
+    query("map:build('1') => map:get(1)", "");
+    query("map:build('1') => map:get(true())", "");
+
+    query("map:build(xs:token('1')) -> map:keys(.) -> (. instance of xs:token)", true);
+
+    // more entries than XQSmallMap#MAX_SIZE: hash-based representations
+    check("map:merge(({ '1': '1' }, { '2': '2' }, { '3': '3' }, "
+        + "{ '4': '4' }, { '5': '5' }))",
+        "{\"1\":\"1\",\"2\":\"2\",\"3\":\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQStrMap.class));
+    check("map:merge(({ '1': '1' }, { '2': '2' }, { '3': 3 }, "
+        + "{ '4': '4' }, { '5': '5' }))",
+        "{\"1\":\"1\",\"2\":\"2\",\"3\":3,\"4\":\"4\",\"5\":\"5\"}", root(XQStrValueMap.class));
+    check("map:merge(({ '1': '1' }, { '2': '2' }, { 3: '3' }, "
+        + "{ '4': '4' }, { '5': '5' }))",
+        "{\"1\":\"1\",\"2\":\"2\",3:\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQItemValueMap.class));
+    check("map:merge(({ '1': '1' }, { 2: 2 }, { 3: 3 }, "
+        + "{ '4': '4' }, { '5': '5' }))",
+        "{\"1\":\"1\",2:2,3:3,\"4\":\"4\",\"5\":\"5\"}", root(XQItemValueMap.class));
+    check("map:merge(({ '1': '1' }, { 2: 2 }, { '3': '3' }, "
+        + "{ '4': '4' }, { '5': '5' }))",
+        "{\"1\":\"1\",2:2,\"3\":\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQItemValueMap.class));
+
+    check("map:merge(({ '1': 1 }, { '2': 2 }, { '3': 3 }, { '4': 4 }, { '5': 5 }))",
+        "{\"1\":1,\"2\":2,\"3\":3,\"4\":4,\"5\":5}", root(XQStrIntMap.class));
+    check("map:merge(({ '1': 1 }, { '2': 2 }, { '3': '3' }, { '4': 4 }, { '5': 5 }))",
+        "{\"1\":1,\"2\":2,\"3\":\"3\",\"4\":4,\"5\":5}", root(XQStrValueMap.class));
+    check("map:merge(({ '1': 1e0 }, { '2': 2e0 }, { '3': 3e0 }, { '4': 4e0 }, { '5': 5e0 }))",
+        "{\"1\":1,\"2\":2,\"3\":3,\"4\":4,\"5\":5}", root(XQStrDblMap.class));
+  }
+
+  /** Tests untyped atomic maps. */
+  @Test public void untypedAtomicMaps() {
+    query("map:build(xs:untypedAtomic('1'))", "{\"1\":\"1\"}");
+    query("map:build(xs:untypedAtomic('1')) => map:keys()", 1);
+    query("map:build(xs:untypedAtomic('1')) => map:items()", 1);
+    query("map:build(xs:untypedAtomic('1')) => map:entries()", "{\"1\":\"1\"}");
+    query("map:build(xs:untypedAtomic('1')) => map:get(xs:anyURI('1'))", 1);
+    query("map:build(xs:untypedAtomic('1')) => map:get('1')", 1);
+    query("map:build(xs:untypedAtomic('1')) => map:get(1)", "");
+    query("map:build(xs:untypedAtomic('1')) => map:get(true())", "");
+
+    query("map:build(xs:untypedAtomic('1')) -> map:keys(.) -> (. instance of xs:untypedAtomic)",
+        true);
+
+    // more entries than XQSmallMap#MAX_SIZE: hash-based representations
+    check("map:merge(({ xs:untypedAtomic('1'): '1' }, "
+        + "{ xs:untypedAtomic('2'): '2' }, { xs:untypedAtomic('3'): '3' }, "
+        + "{ xs:untypedAtomic('4'): '4' }, { xs:untypedAtomic('5'): '5' }))",
+        "{\"1\":\"1\",\"2\":\"2\",\"3\":\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQAtmStrMap.class));
+    check("map:merge(({ xs:untypedAtomic('1'): '1' }, "
+        + "{ xs:untypedAtomic('2'): '2' }, { xs:untypedAtomic('3'): 3 }, "
+        + "{ xs:untypedAtomic('4'): '4' }, { xs:untypedAtomic('5'): '5' }))",
+        "{\"1\":\"1\",\"2\":\"2\",\"3\":3,\"4\":\"4\",\"5\":\"5\"}", root(XQAtmValueMap.class));
+    check("map:merge(({ xs:untypedAtomic('1'): '1' }, "
+        + "{ xs:untypedAtomic('2'): '2' }, { 3: '3' }, "
+        + "{ xs:untypedAtomic('4'): '4' }, { xs:untypedAtomic('5'): '5' }))",
+        "{\"1\":\"1\",\"2\":\"2\",3:\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQItemValueMap.class));
+    check("map:merge(({ xs:untypedAtomic('1'): '1' }, { 2: 2 }, { 3: 3 }, "
+        + "{ xs:untypedAtomic('4'): '4' }, { xs:untypedAtomic('5'): '5' }))",
+        "{\"1\":\"1\",2:2,3:3,\"4\":\"4\",\"5\":\"5\"}", root(XQItemValueMap.class));
+    check("map:merge(({ xs:untypedAtomic('1'): '1' }, { 2: 2 }, "
+        + "{ xs:untypedAtomic('3'): '3' }, "
+        + "{ xs:untypedAtomic('4'): '4' }, { xs:untypedAtomic('5'): '5' }))",
+        "{\"1\":\"1\",2:2,\"3\":\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQItemValueMap.class));
+
+    check("map:merge(({ xs:untypedAtomic('1'): xs:untypedAtomic('1') }, "
+        + "{ xs:untypedAtomic('2'): xs:untypedAtomic('2') }, "
+        + "{ xs:untypedAtomic('3'): xs:untypedAtomic('3') }, "
+        + "{ xs:untypedAtomic('4'): xs:untypedAtomic('4') }, "
+        + "{ xs:untypedAtomic('5'): xs:untypedAtomic('5') }))",
+        "{\"1\":\"1\",\"2\":\"2\",\"3\":\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQAtmValueMap.class));
+    check("map:merge(({ xs:untypedAtomic('1'): xs:untypedAtomic('1') }, "
+        + "{ xs:untypedAtomic('2'): xs:untypedAtomic('2') }, { 3: xs:untypedAtomic('3') }, "
+        + "{ xs:untypedAtomic('4'): xs:untypedAtomic('4') }, "
+        + "{ xs:untypedAtomic('5'): xs:untypedAtomic('5') }))",
+        "{\"1\":\"1\",\"2\":\"2\",3:\"3\",\"4\":\"4\",\"5\":\"5\"}", root(XQItemValueMap.class));
+
+    check("map:merge(({ xs:untypedAtomic('1'): 1 }, { xs:untypedAtomic('2'): 2 }, "
+        + "{ xs:untypedAtomic('3'): 3 }, { xs:untypedAtomic('4'): 4 }, "
+        + "{ xs:untypedAtomic('5'): 5 }))",
+        "{\"1\":1,\"2\":2,\"3\":3,\"4\":4,\"5\":5}", root(XQAtmIntMap.class));
+    check("map:merge(({ xs:untypedAtomic('1'): 1 }, { xs:untypedAtomic('2'): 2 }, "
+        + "{ xs:untypedAtomic('3'): '3' }, { xs:untypedAtomic('4'): 4 }, "
+        + "{ xs:untypedAtomic('5'): 5 }))",
+        "{\"1\":1,\"2\":2,\"3\":\"3\",\"4\":4,\"5\":5}", root(XQAtmValueMap.class));
+    check("map:merge(({ xs:untypedAtomic('1'): 1 }, { xs:untypedAtomic('2'): 2 }, "
+        + "{ 3: 3 }, { xs:untypedAtomic('4'): 4 }, { xs:untypedAtomic('5'): 5 }))",
+        "{\"1\":1,\"2\":2,3:3,\"4\":4,\"5\":5}", root(XQItemValueMap.class));
+  }
+
+  /** Tests maps with few entries, which are inlined. */
+  @Test public void smallMaps() {
+    // up to XQSmallMap#MAX_SIZE entries, keys and values are inlined
+    check("map:build(1 to 2)", "{1:1,2:2}", root(XQSmallMap.class));
+    check("map:build(1 to 4)", "{1:1,2:2,3:3,4:4}", root(XQSmallMap.class));
+    check("map:build(1 to 5)", "{1:1,2:2,3:3,4:4,5:5}", root(XQIntMap.class));
+
+    // the map type is refined while entries are added
+    check("map:build(1 to 2)", "{1:1,2:2}", type(XQSmallMap.class, "map(xs:integer, xs:integer)"));
+    check("map:merge(({ 1: 1 }, { '2': 'x' }, { 3: 3 }))", "{1:1,\"2\":\"x\",3:3}",
+        type(XQSmallMap.class, "map(xs:anyAtomicType, xs:anyAtomicType)"));
+
+    // entries are not lost when an inlined map is converted to a hash map
+    query("map:build(('January', 'February', 'March', 'April', 'May', 'June', 'July', "
+        + "'August', 'September', 'October', 'November', 'December'), string-length#1) "
+        + "=> map:size()", 7);
+    query("map:build(1 to 100) => map:size()", 100);
+    query("map:build(1 to 100, value := string#1) => map:size()", 100);
+    query("map:build(1 to 100, key := string#1) => map:size()", 100);
+
+    // the representation is upgraded if a later entry does not fit the first one
+    query("map:merge(({ 1: 1 }, { 2: 2 }, { 3: 3 }, { 4: 4 }, { 'x': 'y' })) => map:size()", 5);
+    query("map:merge(({ 1: 1 }, { 2: 2 }, { 3: 3 }, { 4: 4 }, { 'x': 'y' }))?x", "y");
+    query("map:merge(({ 1: 1 }, { 2: 2 }, { 3: 3 }, { 4: 4 }, { 5: 'y' })) => map:items()",
+        "1\n2\n3\n4\ny");
+
+    // key order is preserved, duplicate keys are replaced in place
+    query("map:merge(({ 3: 3 }, { 1: 1 }, { 2: 2 })) => map:keys()", "3\n1\n2");
+    query("map:merge(({ 3: 3 }, { 1: 1 }, { 3: 'x' }), { 'duplicates': 'use-last' })"
+        + " => map:keys()", "3\n1");
+
+    // lookups with keys that do not match the key type
+    query("map:build(1 to 3) => map:get(true())", "");
+    query("map:build(1 to 3) => map:get('1')", "");
+    query("map:build(1 to 3) => map:get(1e0)", 1);
+    query("map:build((1 to 2) ! string(.)) => map:get(xs:untypedAtomic('1'))", 1);
+    query("map:build((1 to 2) ! string(.)) => map:get(xs:anyURI('2'))", 2);
+  }
+
+  /** Tests maps whose keys are supplied by a shape. */
+  @Test public void shapeMaps() {
+    // values of single-field maps are stored without boxing
+    check("{ 'a': 1 }", "{\"a\":1}", root(XQShapeIntMap.class));
+    check("{ 'a': 1e0 }", "{\"a\":1}", root(XQShapeDblMap.class));
+    check("map:entry('a', 1)", "{\"a\":1}", root(XQShapeIntMap.class));
+    // a single value that cannot be unboxed needs no array
+    check("{ 'a': 'x' }", "{\"a\":\"x\"}", root(XQShapeSingletonMap.class));
+    // several values are stored in an array
+    check("{ 'a': 1, 'b': 2 }", "{\"a\":1,\"b\":2}", root(XQShapeValueMap.class));
+
+    // integer subtypes are not unboxed: the item type must be preserved
+    query("{ 'a': xs:byte(1) }?a instance of xs:byte", true);
+    query("{ 'a': xs:long(1) }?a instance of xs:long", true);
+    query("{ 'a': xs:byte(1) }?a", 1);
+
+    // shapes are preserved by map:put and map:remove
+    check("map:put({ 'a': 1 }, 'b', 2)", "{\"a\":1,\"b\":2}", root(XQShapeValueMap.class));
+    check("map:remove({ 'a': 1, 'b': 2 }, 'b')", "{\"a\":1}", root(XQShapeIntMap.class));
+    query("map:put({ 'a': 1 }, 'a', 2)?a", 2);
+    query("map:put({ 'a': 1 }, 'a', 'x')?a", "x");
+    query("map:put({ 'a': 1 }, 1, 'x')?1", "x");
+    query("map:remove({ 'a': 1 }, 'a')", "{}");
+    query("map:remove({ 'a': 1 }, 'b')?a", 1);
+
+    // shape maps behave like other maps
+    query("{ 'a': 1, 'b': 2 } => map:keys()", "a\nb");
+    query("{ 'a': 1, 'b': 2 } => map:items()", "1\n2");
+    query("{ 'a': 1, 'b': 2 } => map:size()", 2);
+    query("{ 'a': 1, 'b': 2 } => map:contains('b')", true);
+    query("{ 'a': 1, 'b': 2 } => map:contains('c')", false);
+    query("{ 'a': 1, 'b': 2 } => map:get(xs:untypedAtomic('a'))", 1);
+    query("{ 'a': 1, 'b': 2 } => map:get(1)", "");
+    query("{ 'a': 1, 'b': 2 } => map:for-each(fn($k, $v) { $k || $v })", "a1\nb2");
+    query("deep-equal({ 'a': 1, 'b': 2 }, map:merge(({ 'a': 1 }, { 'b': 2 })))", true);
+    query("{ 'a': 1, 'b': 2 } => serialize({ 'method': 'json' })", "{\"a\":1,\"b\":2}");
+
+    // shapes are derived at runtime and cached on the shape they are derived from
+    query("(1 to 2) ! (map:put({ 'a': . }, 'b', .) => map:put('c', .))?c", "1\n2");
+    query("(1 to 2) ! (map:put({ 'a': . }, 'b', .) instance of map(xs:string, xs:integer))",
+        "true\ntrue");
+    query("(1 to 2) ! (map:remove({ 'a': ., 'b': . }, 'b') => map:size())", "1\n1");
+  }
+}

@@ -1,0 +1,27 @@
+package org.basex.query.func.sql;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Rositsa Shadura
+ */
+public final class SqlClose extends SqlFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    @SuppressWarnings("resource")
+    final AutoCloseable ac = get(qc, true);
+    try {
+      ac.close();
+    } catch(final Exception ex) {
+      throw SQL_ERROR_X.get(info, ex);
+    }
+    return Empty.VALUE;
+  }
+}

@@ -1,0 +1,1205 @@
+package org.basex.query.func;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.net.*;
+import java.nio.file.*;
+import java.time.*;
+import java.util.*;
+import java.util.Map.*;
+import java.util.function.*;
+
+import org.basex.core.*;
+import org.basex.core.jobs.*;
+import org.basex.core.locks.*;
+import org.basex.core.users.*;
+import org.basex.data.*;
+import org.basex.io.*;
+import org.basex.io.out.*;
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.collation.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.basex.util.list.*;
+import org.basex.util.options.*;
+
+/**
+ * Built-in functions.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class StandardFunc extends Arr {
+  /** Function definition. */
+  public FuncDefinition definition;
+  /** Options, parsed at compile time (can be {@code null}). */
+  private Options staticOptions;
+  /** Argument index of the options parsed at compile time. */
+  private int staticArg = -1;
+
+  /**
+   * Constructor.
+   */
+  protected StandardFunc() {
+    super(null, Types.ITEM_ZM);
+  }
+
+  /**
+   * Initializes the function.
+   * @param ii input info (can be {@code null})
+   * @param df function definition
+   * @param args function arguments
+   */
+  final void init(final InputInfo ii, final FuncDefinition df, final Expr[] args) {
+    info = ii;
+    definition = df;
+    exprs = args;
+    exprType.assign(df.seqType);
+  }
+
+  @Override
+  public final Expr optimize(final CompileContext cc) throws QueryException {
+    checkPerm(cc.qc, definition.perm);
+    simplifyArgs(cc);
+
+    // apply custom optimizations
+    final Expr expr = opt(cc);
+    if(expr != this) return cc.replaceWith(this, expr);
+
+    // pre-evaluate if arguments are values and not too large
+    final SeqType st = definition.seqType;
+    return values(st.occ.max > 1 || st.type instanceof FType, cc) && isSimple() &&
+      !has(Flag.CNS) ? cc.preEval(this) : this;
+  }
+
+  /**
+   * Simplifies the types of all arguments. This function is overwritten by functions that
+   * rely on the original argument type.
+   * @param cc compilation context
+   * @throws QueryException query exception
+   */
+  protected void simplifyArgs(final CompileContext cc) throws QueryException {
+    final int al = args().length;
+    for(int a = 0; a < al; a++) {
+      // consider variable-size parameters
+      final int p = Math.min(a, definition.types.length - 1);
+      final Type type = definition.types[p].type;
+      if(type.instanceOf(BasicType.ANY_ATOMIC_TYPE)) {
+        final Simplify mode = type.instanceOf(BasicType.NUMERIC) ? Simplify.NUMBER :
+            type.instanceOf(BasicType.STRING) ? Simplify.STRING : Simplify.DATA;
+        arg(a, arg -> arg.simplifyFor(mode, cc));
+      } else if(type instanceof final FuncType ft && ft.declType != null &&
+          ft.declType.instanceOf(Types.ANY_ATOMIC_TYPE_ZM)) {
+        // sort($input, (), fn($x) { data($x) }) → sort($input, (), fn($x) { $x })
+        arg(a, arg -> arg.simplifyFunc(Simplify.DATA, cc));
+      }
+    }
+  }
+
+  /**
+   * Performs function-specific optimizations.
+   * @param cc compilation context
+   * @return optimized or original expression
+   * @throws QueryException query exception
+   */
+  @SuppressWarnings("unused")
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    return this;
+  }
+
+  @Override
+  public StandardFunc copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(definition.get(info, copyAll(cc, vm, args())));
+  }
+
+  /**
+   * Optimizes a function that returns an empty sequence when the first atomized argument is empty,
+   * and adjusts the occurrence indicator if the argument will always yield one item.
+   * @return original or optimized expression
+   */
+  protected final Expr optFirst() {
+    return optFirst(true, true, null);
+  }
+
+  /**
+   * Optimizes a function that returns an empty sequence when the first argument or the
+   * context value is empty.
+   * <ul>
+   *   <li> Returns the first argument (or the context) if it yields an empty sequence.</li>
+   *   <li> Sets the occurrence indicator to 1 if the argument returns at least one item.</li>
+   * </ul>
+   * @param occ assign occurrence indicator
+   *   ({@code true} if function will always yield one result if first argument is non-empty)
+   * @param atom argument will be atomized
+   * @param value context value (ignored if {@code null})
+   * @return original or optimized expression
+   */
+  protected final Expr optFirst(final boolean occ, final boolean atom, final Value value) {
+    final Expr expr = defined(0) ? arg(0) : value;
+    if(expr != null) {
+      final SeqType st = expr.seqType();
+      if(st.zero()) return expr instanceof Dummy ? Empty.VALUE : expr;
+      if(occ && st.oneOrMore() && !(atom && st.mayBeWrapped()) && exprType.seqType().zeroOrOne()) {
+        exprType.assign(Occ.EXACTLY_ONE);
+      }
+    }
+    return this;
+  }
+
+  /**
+   * Serializes the data from the specified iterator.
+   * @param iter data to serialize
+   * @param sopts serialization parameters
+   * @param err error to raise
+   * @param qc query context
+   * @return result
+   * @throws QueryException query exception
+   */
+  protected final byte[] serialize(final Iter iter, final SerializerOptions sopts,
+      final QueryError err, final QueryContext qc) throws QueryException {
+
+    // use line feeds if no line ending was requested
+    if(!sopts.contains(SerializerOptions.LINE_ENDING)) {
+      sopts.set(SerializerOptions.NEWLINE, SerializerOptions.Newline.NL);
+    }
+    try {
+      final ArrayOutput ao = new ArrayOutput();
+      try(Serializer ser = Serializer.get(ao, sopts)) {
+        ser.qc(qc).sc(info.sc());
+        for(Item item; (item = qc.next(iter)) != null;) {
+          ser.serialize(item);
+        }
+      }
+      return ao.finish();
+    } catch(final QueryIOException ex) {
+      throw ex.getCause(info);
+    } catch(final IOException ex) {
+      throw err.get(info, ex);
+    }
+  }
+
+  @Override
+  public final boolean has(final Flag... flags) {
+    for(final Flag flag : flags) {
+      switch(flag) {
+        case HOF -> {
+          if(hofOffsets() > 0) return true;
+          continue;
+        }
+        case UPD -> {
+          if(hasUPD()) return true;
+        }
+        case CTX -> {
+          if(hasCTX()) return true;
+        }
+        case NDT -> {
+          if(hasNDT()) return true;
+          // check whether function arguments may contain non-deterministic code
+          final int hof = hofOffsets(), al = args().length;
+          for(int a = 0; a < al; a++) {
+            if((hof & 1 << a) != 0 && (!(arg(a) instanceof final Item item) ||
+                !(item instanceof final FuncItem fi) || fi.ndt())) return true;
+          }
+        }
+        default -> { }
+      }
+      if(definition.has(flag)) return true;
+    }
+    // check arguments (without function invocation; it only applies to the function itself)
+    return super.has(Flag.remove(flags, Flag.HOF));
+  }
+
+  /**
+   * Indicates if this function is updating.
+   * @return result of check
+   */
+  public boolean hasUPD() {
+    return definition.has(Flag.UPD);
+  }
+
+  /**
+   * Indicates if this function relies on the context.
+   * @return result of check
+   */
+  public boolean hasCTX() {
+    return definition.has(Flag.CTX);
+  }
+
+  /**
+   * Indicates if this function is nondeterministic.
+   * @return result of check
+   */
+  public boolean hasNDT() {
+    return definition.has(Flag.NDT);
+  }
+
+  /**
+   * Returns the offsets to possible higher-order function arguments.
+   * Used to assess further properties, e.g. if a function is nondeterministic.
+   * @return bit offsets to function arguments (1: first argument, 2: second argument, 4: ...),
+   *   {@code 0} if no HOF parameter exists, or
+   *   {@code Integer#MAX_VALUE} if the functions cannot be accessed via offsets
+   */
+  protected int hofOffsets() {
+    if(definition.has(Flag.HOF)) return Integer.MAX_VALUE;
+    int bits = 0;
+    final int tl = definition.types.length;
+    for(int t = 0; t < tl; t++) {
+      if(definition.types[t].type instanceof FuncType) bits |= hofOffset(t);
+    }
+    return bits;
+  }
+
+  /**
+   * Returns a higher-order bit offset for the specified argument if it is present.
+   * @param i index of argument
+   * @return bit offset or {@code 0}
+   * @see #hofOffsets
+   */
+  protected final int hofOffset(final int i) {
+    return defined(i) ? 1 << i : 0;
+  }
+
+  @Override
+  public boolean vacuous() {
+    return size() == 0 && !has(Flag.UPD);
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    final Data data = data();
+    return (data == null || visitor.database(data)) && super.accept(visitor);
+  }
+
+  /**
+   * Returns a coerced version of a function item argument.
+   * @param i index of argument
+   * @param cc compilation context
+   * @return coerced argument
+   * @throws QueryException query exception
+   */
+  public final Expr coerceFunc(final int i, final CompileContext cc) throws QueryException {
+    return coerceFunc(i, cc, -1);
+  }
+
+  /**
+   * Returns a coerced version of a function item argument.
+   * @param i index of function argument
+   * @param cc compilation context
+   * @param arity arity of target function (ignored if {@code -1})
+   * @return coerced argument
+   * @throws QueryException query exception
+   */
+  public final Expr coerceFunc(final int i, final CompileContext cc, final int arity)
+      throws QueryException {
+
+    FuncType ft = (FuncType) definition.types[i].type;
+    if(arity != -1 && arity != ft.argTypes.length) ft = ft.with(arity);
+    return new TypeCheck(info, arg(i), ft.seqType()).optimize(cc);
+  }
+
+  /**
+   * Simplifies a function that returns the items of its first argument in a different order.
+   * @param mode mode of simplification
+   * @param cc compilation context
+   * @return simplified or original expression
+   * @throws QueryException query exception
+   */
+  protected final Expr simplifyOrder(final Simplify mode, final CompileContext cc)
+      throws QueryException {
+    // count(reverse(A)) → count(A), $a = sort(B) → $a = B
+    return cc.simplify(this, mode.oneOf(Simplify.COUNT, Simplify.EXISTENCE, Simplify.SET) &&
+        !has(Flag.NDT) ? arg(0) : this, mode);
+  }
+
+  /**
+   * Returns the arity of a function expression.
+   * @param expr function
+   * @return arity, or {@code -1} if unknown
+   */
+  public static int arity(final Expr expr) {
+    final FuncType ft = expr.funcType();
+    if(ft != null) {
+      final SeqType[] at = ft.argTypes;
+      if(at != null) return at.length;
+    }
+    return -1;
+  }
+
+  /**
+   * Opens a database at compile time.
+   * @param cc compilation context
+   * @return self reference
+   * @throws QueryException query exception
+   */
+  protected final Expr compileData(final CompileContext cc) throws QueryException {
+    if(cc.dynamic && defined(0) && arg(0) instanceof Value) {
+      final Data data = toData(cc.qc);
+      exprType.data(data);
+      cc.info(OPTOPEN_X, data.meta.name);
+    }
+    return this;
+  }
+
+  /**
+   * Returns the input of an expression that only reorders the items of its own input.
+   * @param input input expression
+   * @return input of the expression, or {@code null}
+   */
+  protected static Expr reordered(final Expr input) {
+    return Function.REVERSE.is(input) || Function.SORT.is(input) ||
+      Function.SORT_BY.is(input) || Function.SORT_WITH.is(input) ? input.arg(0) : null;
+  }
+
+  /**
+   * Tries to embed a positional function call in the input argument.
+   * @param cc compilation context
+   * @param skip skip evaluation of remaining operands
+   * @return optimized or original expression
+   * @throws QueryException query exception
+   */
+  protected Expr embed(final CompileContext cc, final boolean skip) throws QueryException {
+    // head($nodes ! name()) → head($nodes) ! name()
+    // foot((1 to 8) ! <_>{ . }</_>) → foot((1 to 8)) ! <_>{ . }</_>
+    // do not rewrite positional access:  foot($nodes ! position())
+    // do not rewrite non-deterministic expressions: foot($nodes ! file:append($name, .))
+    if(arg(0) instanceof SimpleMap) {
+      final Expr[] ops = arg(0).args();
+      if(Checks.all(ops, op ->
+          op == ops[0] || op.seqType().one() && !op.has(Flag.POS, Flag.NDT))) {
+        final Expr[] args = new ExprList().add(args()).set(0, ops[0]).finish();
+        final Expr fn = definition.get(info, args).optimize(cc);
+        return skip ? fn : SimpleMap.get(cc, info, new ExprList(ops.clone()).set(0, fn).finish());
+      }
+    }
+    return this;
+  }
+
+  /**
+   * Evaluates an expression to a date.
+   * @param expr expression
+   * @param qc query context
+   * @return date or {@code null}
+   * @throws QueryException query exception
+   */
+  protected final ADate toGregorianOrNull(final Expr expr, final QueryContext qc)
+      throws QueryException {
+    final Item item = expr.atomItem(qc, info);
+    return item.isEmpty() ? null : (ADate) Types.GREGORIAN_ZO.coerce(item, qc, info);
+  }
+
+  /**
+   * Converts an item to a date of the specified type.
+   * @param item item
+   * @param type expected type
+   * @param qc query context
+   * @return date
+   * @throws QueryException query exception
+   */
+  protected final ADate toDate(final Item item, final BasicType type, final QueryContext qc)
+      throws QueryException {
+    return (ADate) (item.type.isUntyped() ? type.cast(item, qc, info) : checkType(item, type));
+  }
+
+  /**
+   * Converts an item to a compact node.
+   * @param item item
+   * @param mainmem accept nodes of main-memory instances
+   * @return compact node
+   * @throws QueryException query exception
+   */
+  protected final DBNode toDBNode(final Item item, final boolean mainmem) throws QueryException {
+    if(item instanceof final DBNode node && (mainmem || !node.data().inMemory())) return node;
+    throw (mainmem ? DB_COMPACT_X : DB_NODE_X).get(info, item);
+  }
+
+  /**
+   * Evaluates an expression to a token contained in an {@link AStr} instance.
+   * @param expr expression
+   * @param qc query context
+   * @return {@link AStr} instance
+   * @throws QueryException query exception
+   */
+  protected final AStr toStr(final Expr expr, final QueryContext qc) throws QueryException {
+    final Item value = expr.atomItem(qc, info);
+    return value instanceof final AStr str ? str : Str.get(toToken(value));
+  }
+
+  /**
+   * Evaluates an expression to a token contained in an {@link AStr} instance.
+   * @param expr expression
+   * @param qc query context
+   * @return {@link AStr} instance (zero-length if result is an empty sequence)
+   * @throws QueryException query exception
+   */
+  protected final AStr toZeroStr(final Expr expr, final QueryContext qc) throws QueryException {
+    final Item value = expr.atomItem(qc, info);
+    return value.isEmpty() ? Str.EMPTY : value instanceof final AStr str ? str :
+      Str.get(toToken(value));
+  }
+
+  /**
+   * Evaluates an expression to a map.
+   * @param expr expression
+   * @param qc query context
+   * @return map (empty map if the expression yields an empty sequence)
+   * @throws QueryException query exception
+   */
+  protected final XQMap toEmptyMap(final Expr expr, final QueryContext qc) throws QueryException {
+    final Item item = expr.unwrappedItem(qc, info);
+    return item.isEmpty() ? XQMap.empty() : toMap(item);
+  }
+
+  /**
+   * Checks if the specified item is a Duration item. If it is untyped, a duration is returned.
+   * @param item item to be checked
+   * @return duration
+   * @throws QueryException query exception
+   */
+  protected final Dur toDur(final Item item) throws QueryException {
+    if(item instanceof final Dur dur) return dur;
+    if(item.type.isUntyped()) return new Dur(item.string(info), info);
+    throw typeError(item, BasicType.DURATION, info);
+  }
+
+  /**
+   * Evaluates an expression to a collation.
+   * @param expr expression
+   * @param qc query context
+   * @return collation, or {@code null} for default collation
+   * @throws QueryException query exception
+   */
+  protected final Collation toCollation(final Expr expr, final QueryContext qc)
+      throws QueryException {
+    return toCollation(toTokenOrNull(expr, qc), qc);
+  }
+
+  /**
+   * Evaluates an item to a collation.
+   * @param collation collation URI or {@code null}
+   * @param qc query context
+   * @return collation, or {@code null} for default collation
+   * @throws QueryException query exception
+   */
+  protected final Collation toCollation(final byte[] collation, final QueryContext qc)
+      throws QueryException {
+    return Collation.get(collation, qc, info, WHICHCOLL_X);
+  }
+
+  /**
+   * Evaluates an expression to a file path.
+   * @param expr expression
+   * @param qc query context
+   * @return file path
+   * @throws QueryException query exception
+   */
+  protected final Path toPath(final Expr expr, final QueryContext qc) throws QueryException {
+    return toPath(toString(expr, qc), qc);
+  }
+
+  /**
+   * Converts a path to a file path.
+   * @param path path string
+   * @param qc query context
+   * @return file path
+   * @throws QueryException query exception
+   */
+  protected final Path toPath(final String path, final QueryContext qc) throws QueryException {
+    final Path p = toRawPath(path);
+    final Path cd = qc.resources.currentDir;
+    return cd != null ? cd.resolve(p) : p;
+  }
+
+  /**
+   * Evaluates an expression to a file path that is not resolved against the current directory.
+   * @param expr expression
+   * @param qc query context
+   * @return file path
+   * @throws QueryException query exception
+   */
+  protected final Path toRawPath(final Expr expr, final QueryContext qc) throws QueryException {
+    return toRawPath(toString(expr, qc));
+  }
+
+  /**
+   * Converts a path to a file path that is not resolved against the current directory.
+   * @param path path string
+   * @return file path
+   * @throws QueryException query exception
+   */
+  protected final Path toRawPath(final String path) throws QueryException {
+    try {
+      return path.startsWith(IO.FILEPREF) ? Paths.get(new URI(path)) : Paths.get(path);
+    } catch(final IllegalArgumentException | URISyntaxException ex) {
+      throw FILE_INVALID_PATH_X.get(info, path).cause(ex);
+    }
+  }
+
+  /**
+   * Evaluates an expression to a reference to an existing input resource.
+   * @param expr expression
+   * @param qc query context
+   * @return input resource
+   * @throws QueryException query exception
+   */
+  protected final IO toIO(final Expr expr, final QueryContext qc) throws QueryException {
+    return toIO(toString(expr, qc), false);
+  }
+
+  /**
+   * Returns a reference to an existing input resource.
+   * @param uri URI string
+   * @param content allow string content
+   * @return IO reference
+   * @throws QueryException query exception
+   */
+  protected final IO toIO(final String uri, final boolean content) throws QueryException {
+    final IO io = sc().resolve(uri);
+    if(io instanceof IOContent && io.path().isEmpty()) {
+      if(!content) throw RESURI_X.get(info, uri);
+    } else {
+      if(Strings.contains(io.path(), '#')) throw RESFRAG_X.get(info, io);
+      if(io instanceof IOFile && io.isDir()) throw RESDIR_X.get(info, io);
+      if(!io.exists()) throw RESWHICH_X.get(info, io);
+      if(!Uri.get(uri).isValid()) throw RESURI_X.get(info, uri);
+    }
+    return io;
+  }
+
+  /**
+   * Evaluates an expression to an input resource.
+   * @param expr expression (xs:anyURI with URI or xs:string with content)
+   * @param qc query context
+   * @return input resource
+   * @throws QueryException query exception
+   */
+  protected final IOContent toContent(final Expr expr, final QueryContext qc)
+      throws QueryException {
+    return toContent(toAtomItem(expr, qc), qc);
+  }
+
+  /**
+   * Returns an input resource.
+   * @param item item
+   * @param qc query context
+   * @return input resource
+   * @throws QueryException query exception
+   */
+  protected final IOContent toContent(final Item item, final QueryContext qc)
+      throws QueryException {
+    return item instanceof Uri ? toContent(string(item.string(info)), qc) :
+      new IOContent(toToken(item));
+  }
+
+  /**
+   * Creates a job specification for a query or a function to be invoked.
+   * @param query query or function to be invoked
+   * @param args variable bindings or function arguments
+   * @param options job options
+   * @param service register job as service
+   * @param qc query context
+   * @return job specification
+   * @throws QueryException query exception
+   */
+  protected final QueryJobSpec toJobSpec(final Expr query, final Expr args,
+      final JobOptions options, final boolean service, final QueryContext qc)
+      throws QueryException {
+
+    final Item item = query.unwrappedItem(qc, info);
+    final FuncItem function = toInvocable(item, qc);
+    if(function != null) {
+      // a service is written to disk, and a scheduled job outlives the query that created it
+      if(service || QueryJobSpec.scheduled(options)) throw JOBS_FUNCTION.get(info);
+      return new QueryJobSpec(options, function, toArguments(args, function, qc));
+    }
+
+    final IOContent content = toContent(item, qc);
+    options.set(JobOptions.BASE_URI, toBaseUri(content.url(), options, JobOptions.BASE_URI));
+    final HashMap<String, Value> bindings = toBindings(args, qc);
+    if(service) {
+      if(!bindings.isEmpty()) throw JOBS_SERVICE.get(info);
+      // the id is the only handle for unregistering a service
+      final String id = options.get(JobOptions.ID);
+      if(id == null || id.isEmpty()) throw JOBS_SERVICE_ID.get(info);
+      // runtime restrictions are bound to the calling session, not to a persisted job
+      for(final Option<?> restriction : JobOptions.RESTRICTIONS) {
+        if(options.modified(restriction)) throw JOBS_SERVICE_X.get(info, restriction.name());
+      }
+    }
+
+    // copy variable values
+    for(final Entry<String, Value> binding : bindings.entrySet()) {
+      bindings.put(binding.getKey(), binding.getValue().materialize(n -> false, true, info, qc));
+    }
+    return new QueryJobSpec(options, bindings, content, sc().resolver());
+  }
+
+  /**
+   * Evaluates an expression to a function that can be invoked in another query context.
+   * @param item item
+   * @param qc query context
+   * @return function item, or {@code null} if the item is no function
+   * @throws QueryException query exception
+   */
+  protected final FuncItem toInvocable(final Item item, final QueryContext qc)
+      throws QueryException {
+    if(item instanceof final FuncItem function) {
+      // the invoked function must not depend on the query that created it
+      return function.materialize(TransferVisitor.SHAREABLE, true, info, qc);
+    }
+    // maps and arrays are function items, but they are no queries either
+    if(item instanceof FItem) throw typeError(item, Types.QUERY_SPEC_O, info);
+    return null;
+  }
+
+  /**
+   * Evaluates an expression to the arguments of a function to be invoked.
+   * @param expr expression
+   * @param function function item
+   * @param qc query context
+   * @return function arguments
+   * @throws QueryException query exception
+   */
+  protected final Value[] toArguments(final Expr expr, final FuncItem function,
+      final QueryContext qc) throws QueryException {
+
+    final Item item = expr.unwrappedItem(qc, info);
+    final XQArray array = item.isEmpty() ? XQArray.empty() : toArray(item);
+    final int as = (int) array.structSize();
+    if(as != function.arity()) throw APPLY_X_X_X.get(info, arguments(as), function, array);
+
+    // copy persistent database nodes, share everything else with the invoked function
+    final Value[] args = new Value[as];
+    int a = 0;
+    for(final Value member : array.members()) {
+      args[a++] = member.materialize(TransferVisitor.SHAREABLE, true, info, qc);
+    }
+    return args;
+  }
+
+  /**
+   * Returns an input resource.
+   * @param source source
+   * @param qc query context
+   * @return input resource
+   * @throws QueryException query exception
+   */
+  protected final IOContent toContent(final String source, final QueryContext qc)
+      throws QueryException {
+    checkPerm(qc, Perm.CREATE);
+    final IO io = toIO(source, false);
+    try {
+      return new IOContent(io.readString(), io.url());
+    } catch(final IOException ex) {
+      throw IOERR_X.get(info, ex);
+    }
+  }
+
+  /**
+   * Returns a base URI for the given path and the associated option.
+   * @param path custom path (can be {@code null})
+   * @param options options
+   * @param option base-uri option
+   * @return base URI
+   */
+  protected final String toBaseUri(final String path, final Options options,
+      final StringOption option) {
+    final String base = options.get(option);
+    return base != null && !base.isEmpty() ? base :
+      path != null && !path.isEmpty() ? path : string(sc().baseURI().string());
+  }
+
+  /**
+   * Evaluates an expression to an encoding string.
+   * @param expr expression (can be empty)
+   * @param err error to raise
+   * @param qc query context
+   * @return normalized encoding string or {@code null}
+   * @throws QueryException query exception
+   */
+  protected final String toEncodingOrNull(final Expr expr, final QueryError err,
+      final QueryContext qc) throws QueryException {
+    return toEncodingOrNull(toStringOrNull(expr, qc), err);
+  }
+
+  /**
+   * Evaluates an expression to an encoding string.
+   * @param encoding encoding (can be {@code null})
+   * @param err error to raise
+   * @return normalized encoding string or {@code null}
+   * @throws QueryException query exception
+   */
+  protected final String toEncodingOrNull(final String encoding, final QueryError err)
+      throws QueryException {
+
+    if(encoding == null) return null;
+    final String error = Strings.checkEncoding(encoding);
+    if(error != null) throw err.get(info, error);
+    return Strings.normEncoding(encoding, false);
+  }
+
+  /**
+   * Converts an item to a node or an atomized item.
+   * @param expr expression
+   * @param empty allow empty item
+   * @param qc query context
+   * @return node, atomized item or {@code null}
+   * @throws QueryException query exception
+   */
+  protected final Item toNodeOrAtomItem(final Expr expr, final boolean empty, final QueryContext qc)
+      throws QueryException {
+    Item item = expr.unwrappedItem(qc, info);
+    if(!(item instanceof XNode)) {
+      item = item.atomItem(qc, info);
+      if(item.isEmpty()) {
+        if(empty) return null;
+        throw typeError(item, BasicType.ITEM, info);
+      }
+    }
+    return item;
+  }
+
+  /**
+   * Evaluates an expression and returns serialization parameters.
+   * Constructor for serialization functions.
+   * @param expr expression (can be empty)
+   * @param qc query context
+   * @return serialization parameters
+   * @throws QueryException query exception
+   */
+  protected final SerializerOptions toSerializerOptions(final Expr expr, final QueryContext qc)
+      throws QueryException {
+
+    final SerializerOptions options = new SerializerOptions();
+    options.set(SerializerOptions.METHOD, SerialMethod.XML);
+
+    final Item item = expr.unwrappedItem(qc, info);
+    if(item instanceof final XQMap map) {
+      options.assign(map, qc, info);
+    } else if(!item.isEmpty()) {
+      options.assign(item, info);
+    }
+    return options;
+  }
+
+  /**
+   * Evaluates an expression to a map with string keys and values.
+   * @param expr expression (can be empty)
+   * @param qc query context
+   * @return user options
+   * @throws QueryException query exception
+   */
+  protected final HashMap<String, String> toOptions(final Expr expr, final QueryContext qc)
+      throws QueryException {
+    final Options opts = new Options();
+    opts.assign(toEmptyMap(expr, qc), qc, info);
+    return opts.free();
+  }
+
+  /**
+   * Evaluates an expression and assigns the result to the supplied options.
+   * @param <E> options type
+   * @param expr expression (can be empty)
+   * @param options options template
+   * @param qc query context
+   * @return options
+   * @throws QueryException query exception
+   */
+  protected final <E extends Options> E toOptions(final Expr expr, final E options,
+      final QueryContext qc) throws QueryException {
+    options.assign(toEmptyMap(expr, qc), qc, info);
+    return options;
+  }
+
+  /**
+   * Returns the options of an argument. An instance that was parsed at compile time by
+   * {@link #optOptions(int, Supplier, CompileContext)} will be reused.
+   * @param <E> options type
+   * @param arg argument index
+   * @param options supplier for the options template
+   * @param qc query context
+   * @return options
+   * @throws QueryException query exception
+   */
+  @SuppressWarnings("unchecked")
+  protected final <E extends Options> E options(final int arg, final Supplier<E> options,
+      final QueryContext qc) throws QueryException {
+    return staticArg == arg ? (E) staticOptions : toOptions(arg(arg), options.get(), qc);
+  }
+
+  /**
+   * Parses constant options at compile time. The resulting instance is shared by all
+   * evaluations of this expression and must not be modified.
+   * @param <E> options type
+   * @param arg argument index
+   * @param options supplier for the options template
+   * @param cc compilation context
+   * @throws QueryException query exception
+   */
+  protected final <E extends Options> void optOptions(final int arg, final Supplier<E> options,
+      final CompileContext cc) throws QueryException {
+    if(arg(arg) instanceof final Value value) {
+      staticOptions = toOptions(value, options.get(), cc.qc).seal();
+      staticArg = arg;
+    }
+  }
+
+  /**
+   * Indicates if external resources may be retrieved. If the option was not specified, the value
+   * of {@link MainOptions#TRUSTEXTERNAL} is returned.
+   * @param options options
+   * @param name name of the trust option
+   * @param qc query context
+   * @return result of check
+   */
+  protected final boolean trusted(final Options options, final String name,
+      final QueryContext qc) {
+    final Object trusted = options.get(name);
+    return trusted != null ? (Boolean) trusted :
+      qc.context.options.get(MainOptions.TRUSTEXTERNAL);
+  }
+
+  /**
+   * Evaluates an expression to variable bindings.
+   * @param expr expression (can be empty)
+   * @param qc query context
+   * @return variable bindings
+   * @throws QueryException query exception
+   */
+  protected final HashMap<String, Value> toBindings(final Expr expr, final QueryContext qc)
+      throws QueryException {
+
+    final HashMap<String, Value> hm = new HashMap<>();
+    toEmptyMap(expr, qc).forEach((key, value) -> {
+      final byte[] k = key.type.isStringOrUntyped() ? key.string(info) : toQNm(key).unique();
+      hm.put(string(k), value);
+    });
+    return hm;
+  }
+
+  /**
+   * Evaluates the first expression to a database instance.
+   * @param qc query context
+   * @return database instance
+   * @throws QueryException query exception
+   */
+  protected final Data toData(final QueryContext qc) throws QueryException {
+    final Data data = exprType.data();
+    return data != null ? data : toData(toName(arg(0), false, DB_NAME_X, qc), qc);
+  }
+
+  /**
+   * Evaluates an expression to a name.
+   * @param expr expression
+   * @param empty accept empty names
+   * @param error error to raise
+   * @param qc query context
+   * @return name
+   * @throws QueryException query exception
+   */
+  protected final String toName(final Expr expr, final boolean empty, final QueryError error,
+      final QueryContext qc) throws QueryException {
+    final String name = toZeroString(expr, qc);
+    if(empty && name.isEmpty() || Databases.validName(name)) return name;
+    throw error.get(info, name);
+  }
+
+  /**
+   * Evaluates an expression to a number of milliseconds.
+   * @param expr expression
+   * @param qc query context
+   * @return number of milliseconds
+   * @throws QueryException query exception
+   */
+  protected final long toMs(final Expr expr, final QueryContext qc) throws QueryException {
+    final Dtm dtm = (Dtm) checkType(expr, BasicType.DATE_TIME, qc);
+    try {
+      return dtm.toInstant(qc).toEpochMilli();
+    } catch(final ArithmeticException | DateTimeException ex) {
+      throw INTRANGE_X.get(info, dtm.yea()).cause(ex);
+    }
+  }
+
+  /**
+   * Returns a database instance.
+   * @param name name of database
+   * @param qc query context
+   * @return database instance
+   * @throws QueryException query exception
+   */
+  protected final Data toData(final String name, final QueryContext qc) throws QueryException {
+    return qc.resources.database(name, qc.user, definition.has(Flag.UPD), info);
+  }
+
+  /**
+   * Evaluates an expression to a non-updating function item.
+   * @param expr expression
+   * @param nargs maximum number of supplied arguments
+   * @param qc query context
+   * @return function item or {@code null}
+   * @throws QueryException query exception
+   */
+  protected final FItem toFunctionOrNull(final Expr expr, final int nargs, final QueryContext qc)
+      throws QueryException {
+    final Item item = expr.unwrappedItem(qc, info);
+    return item.isEmpty() ? null : checkArity(toFunction(item, qc), nargs, false);
+  }
+
+  /**
+   * Evaluates an expression to a non-updating function item.
+   * @param expr expression
+   * @param nargs maximum number of supplied arguments
+   * @param qc query context
+   * @return function item
+   * @throws QueryException query exception
+   */
+  protected final FItem toFunction(final Expr expr, final int nargs, final QueryContext qc)
+      throws QueryException {
+    return toFunction(expr, nargs, false, qc);
+  }
+
+  /**
+   * Evaluates an expression to a function item.
+   * @param expr expression
+   * @param nargs maximum number of supplied arguments
+   * @param updating updating flag
+   * @param qc query context
+   * @return function item
+   * @throws QueryException query exception
+   */
+  protected final FItem toFunction(final Expr expr, final int nargs, final boolean updating,
+      final QueryContext qc) throws QueryException {
+    return checkArity(toFunction(expr, qc), nargs, updating);
+  }
+
+  /**
+   * Evaluates an expression to a function item.
+   * @param function function
+   * @param nargs maximum number of supplied arguments
+   * @param updating updating flag
+   * @return function item
+   * @throws QueryException query exception
+   */
+  private FItem checkArity(final FItem function, final int nargs, final boolean updating)
+      throws QueryException {
+
+    checkUp(function, updating);
+    final int arity = function.arity();
+    if(nargs < arity) throw arityError(function, arity, nargs, true, info);
+    return function;
+  }
+
+  /**
+   * Returns the boolean result of a higher-order function invocation.
+   * @param predicate function to be invoked
+   * @param args higher-order function arguments
+   * @param qc query context
+   * @return result
+   * @throws QueryException query exception
+   */
+  protected final boolean test(final FItem predicate, final HofArgs args,
+      final QueryContext qc) throws QueryException {
+    final Item item = invoke(predicate, args, qc).atomItem(qc, info);
+    return item != Empty.VALUE && toBoolean(item);
+  }
+
+  /**
+   * Invokes a higher-order function.
+   * @param function function to be invoked
+   * @param args higher-order function arguments
+   * @param qc query context
+   * @return result
+   * @throws QueryException query exception
+   */
+  protected final Value invoke(final FItem function, final HofArgs args, final QueryContext qc)
+      throws QueryException {
+    return function.invoke(qc, info, args.get());
+  }
+
+  /**
+   * Indicates if the supplied argument is defined.
+   * @param i index of argument
+   * @return result of check
+   */
+  protected final boolean defined(final int i) {
+    return arg(i) != Empty.UNDEFINED;
+  }
+
+  /**
+   * Tries to lock a database supplied by the specified argument.
+   * @param expr expression
+   * @param backup argument may address a backup
+   * @param write write access
+   * @param visitor visitor
+   * @return result of check
+   */
+  protected final boolean dataLock(final Expr expr, final boolean backup, final boolean write,
+      final ASTVisitor visitor) {
+    return visitor.lock(() -> {
+      final ArrayList<String> list = new ArrayList<>(1);
+      String name = dbName(expr);
+      if(name != null && backup) {
+        final String db = Databases.name(name);
+        if(db.isEmpty()) name = null;
+        else list.add(db);
+      }
+      list.add(name);
+      return list;
+    }, write);
+  }
+
+  /**
+   * Tries to lock the backups of a database supplied by the specified argument.
+   * @param expr expression
+   * @param write write access
+   * @param visitor visitor
+   * @return result of check
+   */
+  protected final boolean backupLock(final Expr expr, final boolean write,
+      final ASTVisitor visitor) {
+    return visitor.lock(() -> {
+      final ArrayList<String> list = new ArrayList<>(1);
+      final String name = dbName(expr), db = name == null ? null : Databases.name(name);
+      list.add(db == null || db.isEmpty() ? null : Locking.backup(db));
+      return list;
+    }, write);
+  }
+
+  /**
+   * Returns the database name supplied by the specified argument.
+   * @param expr expression
+   * @return name, or {@code null} if it cannot be resolved statically
+   */
+  private String dbName(final Expr expr) {
+    final String name = expr instanceof final Str str ? string(str.string()) :
+      expr instanceof final Atm atm ? string(atm.string(info)) : null;
+    return name == null || name.isEmpty() ? null : name;
+  }
+
+  /**
+   * Visits the arguments of a function that hands its first argument over to a new job.
+   * @param visitor visitor
+   * @return result of check
+   */
+  protected final boolean visitJobSpec(final ASTVisitor visitor) {
+    final Expr[] args = args();
+    final int al = args.length;
+    if(!visitor.transferred(args[0])) return false;
+    for(int a = 1; a < al; a++) {
+      if(!args[a].accept(visitor)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Indicates if the supplied options argument may contain a function.
+   * @param i index of argument
+   * @return result of check
+   */
+  protected final boolean functionOption(final int i) {
+    if(!(arg(i) instanceof final Value value)) return true;
+
+    final Value v = value instanceof final JNode jnode ? jnode.value : value;
+    if(v instanceof final XQMap map) {
+      for(final XQMap.Entry entry : map.entries()) {
+        if(entry.value() instanceof FItem) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns the original exception, or a new exception for the specified error.
+   * @param ex original exception
+   * @param error adapted error (can be {@code null})
+   * @return new exception
+   */
+  protected final QueryException error(final QueryException ex, final QueryError error) {
+    if(error == null) return ex;
+    return error.get(info, ex.getLocalizedMessage()).cause(ex);
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final StandardFunc sf && definition == sf.definition &&
+        super.equals(obj);
+  }
+
+  @Override
+  public final String description() {
+    return definition.toString();
+  }
+
+  @Override
+  public final void toXml(final QueryPlan plan) {
+    final byte[] name = definition.name.prefixId(FN_URI);
+    final int undefined = undefined();
+    if(undefined == 0) {
+      plan.add(plan.create(this, NAME, name), args());
+    } else {
+      final int al = args().length;
+      final QNm[] names = definition.paramNames(al);
+      final ExprList args = new ExprList(al - undefined);
+      final StringList nms = new StringList(al - undefined);
+      for(int a = 0; a < al; a++) {
+        if(defined(a)) {
+          args.add(arg(a));
+          nms.add(names[a].toString());
+        }
+      }
+      plan.add(plan.create(this, NAME, name, ARG, String.join(", ", nms.finish())), args.finish());
+    }
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    final byte[] name = definition.name.prefixId(FN_URI);
+    final int undefined = undefined();
+    if(undefined == 0) {
+      qs.token(name).params(args());
+    } else {
+      final int al = args().length;
+      final QNm[] names = definition.paramNames(al);
+      final Object[] args = new Object[al - undefined];
+      boolean gap = false;
+      for(int a = 0, b = 0; a < al; a++) {
+        if(defined(a)) {
+          args[b++] = gap ? names[a] + " := " + arg(a) : arg(a);
+        } else {
+          gap = true;
+        }
+      }
+      qs.token(name).params(args);
+    }
+  }
+
+  /**
+   * Returns the number of undefined arguments.
+   * @return count
+   */
+  private int undefined() {
+    int c = 0;
+    final int al = args().length;
+    for(int a = 0; a < al; a++) {
+      if(!defined(a)) c++;
+    }
+    return c;
+  }
+}

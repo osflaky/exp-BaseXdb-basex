@@ -1,0 +1,52 @@
+package org.basex.query.func.db;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.data.*;
+import org.basex.index.resource.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class DbExists extends DbAccessFn {
+  @Override
+  public Bln value(final QueryContext qc) throws QueryException {
+    return Bln.get(ebv(qc));
+  }
+
+  @Override
+  protected boolean ebv(final QueryContext qc) throws QueryException {
+    try {
+      final Data data = toData(qc);
+      final String path = toDbPathOrNull(arg(1), qc);
+      if(path == null) return true;
+
+      final Checks<ResourceType> exists = type -> {
+        final IOFile bin = data.meta.file(path, type);
+        return bin != null && bin.exists() && !bin.isDir();
+      };
+      return data.resources.doc(path) != -1 || Checks.any(Resources.BINARIES, exists);
+    } catch(final QueryException ex) {
+      if(ex.error() == DB_GET2_X) return false;
+      throw ex;
+    }
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    try {
+      return compileData(cc);
+    } catch(final QueryException ex) {
+      if(ex.error() == DB_GET2_X) return Bln.FALSE;
+      throw ex;
+    }
+  }
+}

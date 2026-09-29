@@ -1,0 +1,52 @@
+package org.basex.query.func.validate;
+
+import java.io.*;
+import java.util.*;
+
+import javax.xml.parsers.*;
+
+import org.basex.io.*;
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.xml.sax.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class ValidateDtd extends ValidateFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return check(qc);
+  }
+
+  @Override
+  public final ArrayList<ErrorInfo> errors(final QueryContext qc) throws QueryException {
+    return validate(new Validation() {
+      @Override
+      void validate()
+          throws IOException, ParserConfigurationException, SAXException, QueryException {
+
+        final Item input = toNodeOrAtomItem(arg(0), false, qc);
+        final String dtd = toStringOrNull(arg(1), qc);
+        final IO schm = dtd != null ? toIO(dtd, true) : null;
+
+        // integrate doctype declaration via serialization parameters
+        SerializerOptions sopts = null;
+        if(schm != null) {
+          sopts = new SerializerOptions();
+          sopts.set(SerializerOptions.DOCTYPE_SYSTEM, prepare(schm).url());
+        }
+
+        final IO in = read(input, sopts);
+        final SAXParserFactory sf = SAXParserFactory.newInstance();
+        sf.setValidating(true);
+        sf.newSAXParser().parse(in.inputSource(), this);
+      }
+    });
+  }
+}

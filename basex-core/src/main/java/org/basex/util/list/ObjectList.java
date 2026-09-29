@@ -1,0 +1,339 @@
+package org.basex.util.list;
+
+import java.util.*;
+
+import org.basex.util.*;
+
+/**
+ * This is an abstract class for storing objects of any kind in an array-based list.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ * @param <E> generic object type
+ * @param <L> generic object type
+ */
+public abstract class ObjectList<E, L extends ObjectList<E, ?>> extends ElementList
+    implements Iterable<E> {
+
+  /** Element container (can be {@code null}). */
+  public E[] list;
+
+  /**
+   * Constructor.
+   * @param list initial list
+.   */
+  @SuppressWarnings("unchecked")
+  protected ObjectList(final E... list) {
+    this.list = list;
+  }
+
+  /**
+   * Creates a resized array.
+   * @param s size
+   * @return array
+   */
+  protected abstract E[] newArray(int s);
+
+  /**
+   * Returns the element at the specified index.
+   * @param index index of the element to return
+   * @return element, or {@code null} if index exceeds list size
+   */
+  public final E get(final int index) {
+    return index < size ? list[index] : null;
+  }
+
+  /**
+   * Checks if the specified element is found in the list.
+   * @param element element to be found
+   * @return result of check
+   */
+  public boolean contains(final E element) {
+    final E[] lst = list;
+    final int s = size;
+    for(int l = 0; l < s; l++) {
+      if(equals(lst[l], element)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Adds an element to the array if it is not contained yet.
+   * @param element element to be added
+   * @return result of check
+   */
+  @SuppressWarnings("unchecked")
+  public final L addUnique(final E element) {
+    if(!contains(element)) add(element);
+    return (L) this;
+  }
+
+  /**
+   * Adds an element to the array.
+   * @param element element to be added
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public L add(final E element) {
+    E[] lst = list;
+    final int s = size;
+    if(s == lst.length) {
+      lst = Array.copy(lst, newArray(newCapacity()));
+      list = lst;
+    }
+    lst[s] = element;
+    size = s + 1;
+    return (L) this;
+  }
+
+  /**
+   * Adds elements to the array.
+   * @param elements elements to be added
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L add(final E... elements) {
+    E[] lst = list;
+    final int l = elements.length, s = size, ns = s + l;
+    if(ns > lst.length) {
+      lst = Array.copy(lst, newArray(newCapacity(ns)));
+      list = lst;
+    }
+    Array.copyFromStart(elements, l, lst, s);
+    size = ns;
+    return (L) this;
+  }
+
+  /**
+   * Adds elements from a string list to the array.
+   * @param elements string list to be added
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L add(final L elements) {
+    for(final E e : elements) add(e);
+    return (L) this;
+  }
+
+  /**
+   * Stores an element at the specified index.
+   * @param index index of the element to replace
+   * @param element element to be stored
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L set(final int index, final E element) {
+    checkIndex(index);
+    E[] lst = list;
+    final int s = size, ns = index + 1;
+    if(ns > lst.length) {
+      lst = Array.copy(lst, newArray(newCapacity(ns)));
+      list = lst;
+    }
+    lst[index] = element;
+    size = Math.max(s, ns);
+    return (L) this;
+  }
+
+  /**
+   * Enforces the number of elements, releasing any elements above the new size.
+   * @param sz number of elements
+   */
+  @Override
+  public final void size(final int sz) {
+    if(sz < size) Arrays.fill(list, sz, size, null);
+    size = sz;
+  }
+
+  /**
+   * Inserts the given elements at the specified position.
+   * @param index inserting position
+   * @param elements elements to insert
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L insert(final int index, final E... elements) {
+    final int l = elements.length;
+    if(l != 0) {
+      E[] lst = list;
+      final int s = size, ns = s + l;
+      if(ns > lst.length) {
+        lst = Array.copy(lst, newArray(newCapacity(ns)));
+        list = lst;
+      }
+      Array.insert(lst, index, l, s, elements);
+      size = ns;
+    }
+    return (L) this;
+  }
+
+  /**
+   * Deletes the element at the specified position.
+   * @param index index of the element to delete
+   * @return deleted element
+   */
+  public final E remove(final int index) {
+    final E[] lst = list;
+    final E e = lst[index];
+    Array.remove(lst, index, 1, size);
+    lst[--size] = null;
+    return e;
+  }
+
+  /**
+   * Removes all occurrences of the specified element from the list.
+   * @param element element to be removed
+   * @return flag, indicating if any element was removed
+   */
+  public boolean removeAll(final E element) {
+    final E[] lst = list;
+    final int s = size;
+    int ns = 0;
+    for(int i = 0; i < s; i++) {
+      if(!equals(lst[i], element)) lst[ns++] = lst[i];
+    }
+    Arrays.fill(lst, ns, s, null);
+    size = ns;
+    return s != ns;
+  }
+
+  /**
+   * Removes all elements from the specified list.
+   * @param elements elements
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L removeAll(final L elements) {
+    for(final E e : elements) removeAll(e);
+    return (L) this;
+  }
+
+  /**
+   * Pops the uppermost element from the stack.
+   * @return popped element
+   */
+  public final E pop() {
+    final E[] lst = list;
+    final int sz = --size;
+    final E e = lst[sz];
+    lst[sz] = null;
+    return e;
+  }
+
+  /**
+   * Pushes an element onto the stack.
+   * @param element element
+   */
+  public final void push(final E element) {
+    add(element);
+  }
+
+  /**
+   * Returns the uppermost element on the stack, without removing it.
+   * @return uppermost element
+   */
+  public final E peek() {
+    return list[size - 1];
+  }
+
+  /**
+   * Reverses the order of the elements.
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L reverse() {
+    final E[] lst = list;
+    for(int l = 0, r = size - 1; l < r; l++, r--) {
+      final E tmp = lst[l];
+      lst[l] = lst[r];
+      lst[r] = tmp;
+    }
+    return (L) this;
+  }
+
+  /**
+   * Returns an array with all elements.
+   * @return array
+   */
+  public final E[] toArray() {
+    return Array.copy(list, newArray(size));
+  }
+
+  /**
+   * Returns an array with all elements and invalidates the internal array.
+   * Warning: the function must only be called if the list is discarded afterward.
+   * @return array (internal representation!)
+   */
+  public E[] finish() {
+    final E[] lst = list;
+    list = null;
+    final int s = size;
+    return s == lst.length ? lst : Array.copy(lst, newArray(s));
+  }
+
+  /**
+   * Returns an array with all elements and resets the array size.
+   * @return array
+   */
+  public E[] next() {
+    final E[] lst = toArray();
+    reset();
+    return lst;
+  }
+
+  /**
+   * Sorts the elements.
+   * @param comp comparator
+   * @param ascending ascending/descending order
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L sort(final Comparator<E> comp, final boolean ascending) {
+    Arrays.sort(list, 0, size, ascending ? comp : Collections.reverseOrder(comp));
+    return (L) this;
+  }
+
+  /**
+   * Compares two list elements.
+   * @param element1 first element
+   * @param element2 second element
+   * @return result of check
+   */
+  public boolean equals(final E element1, final E element2) {
+    return Objects.equals(element1, element2);
+  }
+
+  /**
+   * Removes duplicates, provided that the entries are sorted.
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final L unique() {
+    final E[] lst = list;
+    final int s = size;
+    if(s != 0) {
+      int ns = 0;
+      for(int l = 1; l < s; l++) {
+        if(!equals(lst[l], lst[ns])) lst[++ns] = lst[l];
+      }
+      size = ns + 1;
+    }
+    return (L) this;
+  }
+
+  @Override
+  public Iterator<E> iterator() {
+    return new ArrayIterator<>(list, size);
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return obj == this || obj instanceof final ObjectList l &&
+        Arrays.equals(list, 0, size, l.list, 0, l.size);
+  }
+
+  @Override
+  public String toString() {
+    return list == null ? "" : Arrays.toString(toArray());
+  }
+}

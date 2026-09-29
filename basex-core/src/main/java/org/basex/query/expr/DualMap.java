@@ -1,0 +1,101 @@
+package org.basex.query.expr;
+
+import org.basex.query.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Simple map expression: iterative evaluation with two operands (the last one yielding items).
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class DualMap extends SimpleMap {
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param exprs expressions
+   */
+  DualMap(final InputInfo info, final Expr... exprs) {
+    super(info, exprs);
+  }
+
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    return new Iter() {
+      final Expr expr1 = exprs[0], expr2 = exprs[1];
+      final Iter iter1 = expr1.iter(qc);
+      final long size = expr2.size() == 1 ? iter1.size() : -1;
+
+      @Override
+      public Item next() throws QueryException {
+        final QueryFocus qf = qc.focus;
+        final Value qv = qf.value;
+        try {
+          Item item;
+          do {
+            // left operand
+            item = qc.next(iter1);
+            if(item == null) break;
+            // right operand
+            qf.value = item;
+            item = expr2.item(qc, info);
+            qf.value = qv;
+          } while(item == Empty.VALUE);
+          return item;
+        } finally {
+          qf.value = qv;
+        }
+      }
+
+      @Override
+      public Item get(final long i) throws QueryException {
+        final QueryFocus qf = qc.focus;
+        final Value qv = qf.value;
+        try {
+          qf.value = iter1.get(i);
+          return exprs[1].item(qc, info);
+        } finally {
+          qf.value = qv;
+        }
+      }
+
+      @Override
+      public long size() {
+        return size;
+      }
+    };
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final QueryFocus qf = qc.focus;
+    final Value qv = qf.value;
+    final ValueBuilder vb = new ValueBuilder(qc, size());
+    final Iter iter = exprs[0].iter(qc);
+    for(Item item; (item = qc.next(iter)) != null;) {
+      qf.value = item;
+      try {
+        vb.add(exprs[1].item(qc, info));
+      } finally {
+        qf.value = qv;
+      }
+    }
+    return vb.value(this);
+  }
+
+  @Override
+  public DualMap copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new DualMap(info, copyAll(cc, vm, exprs)));
+  }
+
+  @Override
+  public String description() {
+    return "iterative dual " + super.description();
+  }
+}

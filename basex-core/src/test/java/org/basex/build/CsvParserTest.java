@@ -1,0 +1,178 @@
+package org.basex.build;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.charset.*;
+
+import org.basex.*;
+import org.basex.build.csv.*;
+import org.basex.build.csv.CsvOptions.*;
+import org.basex.core.*;
+import org.basex.core.MainOptions.MainParser;
+import org.basex.core.cmd.*;
+import org.basex.io.*;
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * CSV Parser Test.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class CsvParserTest extends SandboxTest {
+  /** CSV options. */
+  private CsvParserOptions copts;
+
+  /** Test CSV file. */
+  private static final String FILE = "src/test/resources/input.csv";
+  /** Temporary CSV file. */
+  private static final String TEMP = Prop.TEMPDIR + NAME + IO.CSVSUFFIX;
+
+  /**
+   * Creates the initial database.
+   */
+  @BeforeAll public static void before() {
+    set(MainOptions.PARSER, MainParser.CSV);
+  }
+
+  /**
+   * Removes the temporary CSV file.
+   */
+  @AfterAll public static void after() {
+    new IOFile(TEMP).delete();
+  }
+
+  /**
+   * Sets initial options.
+   */
+  @BeforeEach public void init() {
+    copts = new CsvParserOptions();
+    context.options.set(MainOptions.CSVPARSER, copts);
+  }
+
+  /**
+   * Drops the database.
+   */
+  @AfterEach public void finish() {
+    execute(new DropDB(NAME));
+  }
+
+  /**
+   * Adds an empty CSV file.
+   */
+  @Test public void emptyFile() {
+    write(new IOFile(TEMP), "");
+    execute(new CreateDB(NAME, TEMP));
+    assertEquals("<csv/>", query("."));
+  }
+
+  /**
+   * Adds the sample CSV file.
+   */
+  @Test public void one() {
+    copts.set(CsvOptions.HEADER, Bln.TRUE);
+    execute(new CreateDB(NAME, FILE));
+    assertEquals("3", query("count(//Name)"));
+    assertEquals("2", query("count(//Email)"));
+
+    execute(new CreateDB(NAME, FILE));
+    assertEquals("3", query("count(//record)"));
+    assertEquals("true", query("//text() = 'Picard'"));
+  }
+
+  /**
+   * Adds the sample CSV file, using different separators.
+   */
+  @Test public void separator() {
+    copts.set(CsvOptions.HEADER, Bln.TRUE);
+    copts.set(CsvOptions.STRICT_QUOTING, false);
+
+    copts.set(CsvOptions.SEPARATOR, "tab");
+    execute(new CreateDB(NAME, FILE));
+    assertEquals("0", query("count(//Name)"));
+
+    copts.set(CsvOptions.SEPARATOR, ";");
+    execute(new CreateDB(NAME, FILE));
+    assertEquals("0", query("count(//Name)"));
+  }
+
+  /**
+   * Adds a CSV file with a custom encoding.
+   * @throws Exception exception
+   */
+  @Test public void encoding() throws Exception {
+    new IOFile(TEMP).write("ä".getBytes(StandardCharsets.ISO_8859_1));
+    copts.set(CsvParserOptions.ENCODING, "ISO-8859-1");
+    execute(new CreateDB(NAME, TEMP));
+    assertEquals("ä", query("string(.)"));
+  }
+
+  /**
+   * Checks the quotes flag.
+   */
+  @Test public void quotes() {
+    copts.set(CsvOptions.HEADER, Bln.TRUE);
+
+    copts.set(CsvOptions.QUOTES, false);
+    execute(new CreateDB(NAME, FILE));
+    assertEquals("\"H ", query("(//Props[1])/text()"));
+
+    copts.set(CsvOptions.QUOTES, true);
+    execute(new CreateDB(NAME, FILE));
+    assertEquals("H \"U\\", query("normalize-space((//Props)[1])"));
+  }
+
+  /**
+   * Checks the backslash flag.
+   */
+  @Test public void backslash() {
+    copts.set(CsvOptions.HEADER, Bln.TRUE);
+    copts.set(CsvOptions.STRICT_QUOTING, false);
+
+    // "H \n""U\",a@b.c....
+    copts.set(CsvOptions.BACKSLASHES, false);
+    execute(new CreateDB(NAME, FILE));
+    // H \n"U\
+    assertEquals("H \"U\\", query("normalize-space((//Props)[1])"));
+
+    copts.set(CsvOptions.BACKSLASHES, true);
+    execute(new CreateDB(NAME, FILE));
+    // H \nU,a
+    assertEquals("H \"\"U\"", query("replace(normalize-space((//Props)[1]), ',.*', '')"));
+  }
+
+  /**
+   * Adds the sample CSV file, using different separators.
+   */
+  @Test public void atts() {
+    copts.set(CsvOptions.HEADER, Bln.TRUE);
+    copts.set(CsvOptions.FORMAT, CsvFormat.ATTRIBUTES);
+    execute(new CreateDB(NAME, FILE));
+    assertEquals("true", query("exists(//entry[@name = 'Name'])"));
+  }
+
+  /**
+   * CSV Parsing: empty lines #2653.
+   */
+  @Test public void gh2653() {
+    write(new IOFile(TEMP), "");
+    execute(new CreateDB(NAME, TEMP));
+    query(".", "<csv/>");
+
+    write(new IOFile(TEMP), "\n");
+    execute(new CreateDB(NAME, TEMP));
+    query(".", "<csv><record/></csv>");
+
+    write(new IOFile(TEMP), "\n\n");
+    execute(new CreateDB(NAME, TEMP));
+    query(".", "<csv><record/><record/></csv>");
+
+    write(new IOFile(TEMP), "X\n\nY\n");
+    execute(new CreateDB(NAME, TEMP));
+    query(".", "<csv><record><entry>X</entry></record><record/><record><entry>Y</entry></record></c"
+        + "sv>");
+  }
+}

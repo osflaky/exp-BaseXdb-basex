@@ -1,0 +1,37 @@
+package org.basex.query.func.client;
+
+import static org.basex.query.QueryError.*;
+
+import java.io.*;
+
+import org.basex.api.client.*;
+import org.basex.core.*;
+import org.basex.io.out.*;
+import org.basex.query.*;
+import org.basex.query.value.item.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ClientExecute extends ClientFn {
+  @Override
+  public Str value(final QueryContext qc) throws QueryException {
+    final ClientSession cs = session(qc, false);
+    final String cmd = toString(arg(1), qc);
+
+    try {
+      final ArrayOutput ao = new ArrayOutput();
+      cs.setOutputStream(ao);
+      cs.execute(cmd);
+      cs.setOutputStream(null);
+      return Str.get(ao.finish());
+    } catch(final BaseXException ex) {
+      throw CLIENT_COMMAND_X.get(info, ex);
+    } catch(final IOException ex) {
+      throw CLIENT_ERROR_X.get(info, ex);
+    }
+  }
+}

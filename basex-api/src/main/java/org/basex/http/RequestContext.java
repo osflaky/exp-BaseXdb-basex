@@ -1,0 +1,202 @@
+package org.basex.http;
+
+import java.io.*;
+import java.util.*;
+
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.io.in.*;
+import org.basex.io.out.*;
+import org.basex.query.*;
+import org.basex.query.util.*;
+import org.basex.query.util.hash.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+import org.basex.util.http.*;
+import org.basex.util.list.*;
+
+import jakarta.servlet.http.*;
+
+/**
+ * Request of an HTTP or WebSocket connection.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class RequestContext implements RequestScope {
+  /** HTTP servlet request (can be {@code null} if the request is not accessible). */
+  public final HttpServletRequest request;
+  /** Request state. */
+  private final RequestState state;
+  /** Query parameters (can be {@code null}). */
+  private XQMap values;
+  /** Form parameters (can be {@code null}). */
+  private XQMap form;
+  /** Headers (can be {@code null}). */
+  private XQMap headers;
+  /** Content body (can be {@code null}). */
+  private IO body;
+
+  /**
+   * Constructor for HTTP connections.
+   * @param request HTTP request
+   */
+  public RequestContext(final HttpServletRequest request) {
+    this.request = request;
+    state = new LiveRequest(request);
+  }
+
+  /**
+   * Constructor for request contexts without live servlet request.
+   * @param state request state
+   */
+  private RequestContext(final RequestState state) {
+    request = null;
+    this.state = state;
+  }
+
+  @Override
+  public RequestContext detach() {
+    if(request == null) return this;
+    final RequestContext rc = new RequestContext(new FrozenRequest(state));
+    rc.values = values;
+    rc.form = form;
+    rc.headers = headers;
+    rc.body = body;
+    return rc;
+  }
+
+  /**
+   * Returns the request state.
+   * @return state
+   */
+  public RequestState state() {
+    return state;
+  }
+
+  /**
+   * Returns the query headers.
+   * @return headers
+   * @throws QueryException query exception
+   */
+  public XQMap headers() throws QueryException {
+    if(headers == null) {
+      final MapBuilder map = new MapBuilder();
+      for(final String name : state.headerNames()) {
+        final TokenList list = new TokenList(1);
+        for(final String value : state.headers(name)) list.add(value);
+        map.put(name, StrSeq.get(list));
+      }
+      headers = map.map();
+    }
+    return headers;
+  }
+
+  /**
+   * Returns the query parameters as strings.
+   * @return parameters
+   * @throws QueryException query exception
+   */
+  public Map<String, String[]> queryStrings() throws QueryException {
+    final Map<String, String[]> strings = new HashMap<>();
+    queryValues().forEach((key, value) -> {
+      final StringList list = new StringList(value.size());
+      for(final Item item : value) list.add(((Atm) item).toJava());
+      strings.put(((Str) key).toJava(), list.finish());
+    });
+    return strings;
+  }
+
+  /**
+   * Returns the query parameters.
+   * @return parameters
+   * @throws QueryException query exception
+   */
+  public XQMap queryValues() throws QueryException {
+    if(values == null) {
+      final MapBuilder mb = new MapBuilder();
+      final String string = state.query();
+      if(string != null) addParams(string, mb);
+      values = mb.map();
+    }
+    return values;
+  }
+
+  /**
+   * Returns the form parameters.
+   * @param options main options
+   * @param qc query context
+   * @return parameters
+   * @throws IOException I/O exception
+   * @throws QueryException query exception
+   */
+  public XQMap formValues(final MainOptions options, final QueryContext qc)
+      throws QueryException, IOException {
+    if(form == null) {
+      // no live request (WebSocket connection, detached job): no form body
+      final MediaType mt = request != null ? state.mediaType() : null;
+      if(mt != null && mt.is(MediaType.MULTIPART_FORM_DATA)) {
+        // convert multipart parameters encoded in a form
+        try(InputStream is = body().inputStream()) {
+          form = new Payload(is, BodyMode.PARSE, null, options).multiForm(mt,
+              qc.resources.index(TempFiles.class));
+        }
+      } else if(mt != null && mt.is(MediaType.APPLICATION_X_WWW_FORM_URLENCODED)) {
+        // convert URL-encoded parameters
+        final MapBuilder mb = new MapBuilder();
+        addParams(Token.string(body().read()), mb);
+        form = mb.map();
+      } else {
+        form = XQMap.empty();
+      }
+    }
+    return form;
+  }
+
+  /**
+   * Returns the cached body.
+   * @return body
+   * @throws IOException I/O exception
+   */
+  public IO body() throws IOException {
+    if(body == null) {
+      final InputStream is = request.getInputStream();
+      // binary and multipart bodies are consumed as streams: spill large ones to disk
+      final MediaType mt = state.mediaType();
+      body = Payload.binary(mt) || mt.isMultipart() ? SpillOutput.read(is, null) :
+        new IOContent(BufferInput.get(is).content());
+    }
+    return body;
+  }
+
+  /**
+   * Discards the temporary file that the body was spilled to.
+   */
+  public void close() {
+    if(body instanceof final IOFile file) file.delete();
+  }
+
+  // PRIVATE FUNCTIONS ============================================================================
+
+  /**
+   * Adds URL-decoded parameters to the specified map.
+   * @param params parameters
+   * @param mb map builder
+   * @throws QueryException query exception
+   */
+  private static void addParams(final String params, final MapBuilder mb) throws QueryException {
+    final ItemObjectMap<ItemList> map = new ItemObjectMap<>();
+    for(final String param : Strings.split(params, '&')) {
+      final String[] parts = Strings.split(param, '=', 2);
+      if(parts.length == 2) {
+        final ItemList list = map.computeIfAbsent(Str.get(parts[0]), ItemList::new);
+        list.add(Atm.get(XMLToken.decodeUri(parts[1], true)));
+      }
+    }
+    // create final map
+    for(final Item key : map) mb.put(key, map.get(key).value());
+  }
+}

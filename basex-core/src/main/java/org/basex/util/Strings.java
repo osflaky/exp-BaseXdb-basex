@@ -1,0 +1,416 @@
+package org.basex.util;
+
+import java.net.*;
+import java.nio.charset.*;
+import java.security.*;
+import java.text.*;
+import java.util.*;
+
+import org.basex.core.*;
+import org.basex.query.*;
+import org.basex.util.list.*;
+import org.basex.util.similarity.*;
+
+/**
+ * <p>This class provides convenience operations for strings.</p>
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Strings {
+  /** CP437 charset. */
+  public static final Charset CP437 = Charset.forName("CP437");
+  /** UTF8 encoding string. */
+  public static final String UTF8 = "UTF-8";
+  /** UTF16 encoding string. */
+  public static final String UTF16 = "UTF-16";
+  /** UTF16BE encoding string. */
+  public static final String UTF16BE = "UTF-16BE";
+  /** UTF16 encoding string. */
+  public static final String UTF16LE = "UTF-16LE";
+  /** UTF16 encoding string. */
+  public static final String UTF32 = "UTF-32";
+
+  /** UTF8 encoding strings. */
+  private static final String[] ALL_UTF8 = { UTF8, "UTF8" };
+  /** UTF16-LE encoding strings. */
+  private static final String[] ALL_UTF16 = { UTF16, "UTF16" };
+  /** UTF32 encoding strings. */
+  private static final String[] ALL_UTF32 = { UTF32, "UTF32" };
+
+  /** Available encodings (can be {@code null}). */
+  private static String[] encodings;
+
+  /** Hidden constructor. */
+  private Strings() { }
+
+  /**
+   * Converts the specified string into a long value.
+   * @param string string to be converted
+   * @return resulting long value, or {@link Long#MIN_VALUE} if the input is invalid
+   */
+  public static long toLong(final String string) {
+    return Token.toLong(Token.token(string));
+  }
+
+  /**
+   * Converts the specified string into an integer value.
+   * @param string string to be converted
+   * @return resulting integer value, or {@link Integer#MIN_VALUE} if the input is invalid
+   */
+  public static int toInt(final String string) {
+    return Token.toInt(Token.token(string));
+  }
+
+  /**
+   * Converts the specified string to a boolean value.
+   * @param string string to be checked
+   * @return result of check, or {@code null} if the input is invalid
+   */
+  public static Boolean toBoolean(final String string) {
+    return isTrue(string) ? Boolean.TRUE : isFalse(string) ? Boolean.FALSE : null;
+  }
+
+  /**
+   * Checks if the specified string is "yes", "true", "on" or "1".
+   * @param string string to be checked (can be {@code null})
+   * @return result of check
+   */
+  public static boolean isTrue(final String string) {
+    return eqic(string, "1", Text.TRUE, Text.YES, Text.ON);
+  }
+
+  /**
+   * Checks if the specified string is "no", "false", "off" or "0".
+   * @param string string to be checked (can be {@code null})
+   * @return result of check
+   */
+  public static boolean isFalse(final String string) {
+    return eqic(string, Text.FALSE, Text.NO, Text.OFF, "0");
+  }
+
+  /**
+   * Compares two strings for equality.
+   * @param string1 first string (can be {@code null})
+   * @param string2 strings to be compared (can be {@code null})
+   * @return {@code true} if test is successful
+   */
+  public static boolean eq(final String string1, final String string2) {
+    return Objects.equals(string1, string2);
+  }
+
+  /**
+   * Compares several strings for equality.
+   * @param string first string (can be {@code null})
+   * @param strings strings to be compared (can contain {@code null} references)
+   * @return {@code true} if one test is successful
+   */
+  public static boolean eq(final String string, final String... strings) {
+    for(final String str : strings) {
+      if(Objects.equals(string, str)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Compares several strings for equality, ignoring the case.
+   * @param string first string (can be {@code null})
+   * @param strings strings to be compared (can contain {@code null} references)
+   * @return {@code true} if test is successful
+   */
+  public static boolean eqic(final String string, final String... strings) {
+    for(final String str : strings) {
+      if(string == null ? str == null : string.equalsIgnoreCase(str)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Splits a string around matches of the given separator.
+   * @param string string to be split
+   * @param separator separation character
+   * @return resulting strings
+   */
+  public static String[] split(final String string, final char separator) {
+    return split(string, separator, -1);
+  }
+
+  /**
+   * Splits a string around matches of the given separator.
+   * @param string string to be split
+   * @param separator separation character
+   * @param limit maximum number of strings (ignored if {@code -1})
+   * @return resulting strings
+   */
+  public static String[] split(final String string, final char separator, final int limit) {
+    final StringList sl = new StringList(Array.initialCapacity(limit));
+    final int tl = string.length();
+    int s = 0, c = 1;
+    final int l = limit >= 0 ? limit : Integer.MAX_VALUE;
+    for(int p = 0; p < tl && c < l; p++) {
+      if(string.charAt(p) == separator) {
+        sl.add(string.substring(s, p));
+        s = p + 1;
+        c++;
+      }
+    }
+    return sl.add(string.substring(s, tl)).finish();
+  }
+
+  /**
+   * Deletes a character from a string.
+   * @param string string
+   * @param ch character to be removed
+   * @return resulting token
+   */
+  public static String delete(final String string, final char ch) {
+    if(!contains(string, ch)) return string;
+
+    final int tl = string.length();
+    final StringBuilder sb = new StringBuilder(tl - 1);
+    for(int p = 0; p < tl; p++) {
+      final char c = string.charAt(p);
+      if(c != ch) sb.append(c);
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Checks if a string contains a character.
+   * @param string string
+   * @param ch character to search for
+   * @return result of check
+   */
+  public static boolean contains(final String string, final char ch) {
+    return string.indexOf(ch) != -1;
+  }
+
+  /**
+   * Returns an MD5 hash in lower case.
+   * @param string string to be hashed
+   * @return md5 hash
+   */
+  public static String md5(final String string) {
+    return hash(string, "MD5");
+  }
+
+  /**
+   * Returns an SHA256 hash in lower case.
+   * @param string string to be hashed
+   * @return sha256 hash
+   */
+  public static String sha256(final String string) {
+    return hash(string, "SHA-256");
+  }
+
+  /**
+   * Returns a hash in lower case.
+   * @param string string to be hashed
+   * @param algo hashing algorithm
+   * @return hash
+   */
+  public static String hash(final String string, final String algo) {
+    try {
+      final MessageDigest md = MessageDigest.getInstance(algo);
+      return Token.string(Token.hex(md.digest(Token.token(string)), false));
+    } catch(final Exception ex) {
+      throw Util.notExpected(ex);
+    }
+  }
+
+  /**
+   * Returns a unified representation of the specified encoding.
+   * @param encoding input encoding (can be {@code null})
+   * @param dflt return default values if supplied encoding is {@code null} or ambiguous
+   * @return encoding or {@code null}
+   */
+  public static String normEncoding(final String encoding, final boolean dflt) {
+    if(encoding == null) return dflt ? UTF8 : null;
+    final String e = encoding.toUpperCase(Locale.ENGLISH);
+    if(eq(e, ALL_UTF8)) return UTF8;
+    if(e.equals(UTF16LE)) return UTF16LE;
+    if(e.equals(UTF16BE)) return UTF16BE;
+    if(eq(e, ALL_UTF16))  return dflt ? UTF16BE : UTF16;
+    if(eq(e, ALL_UTF32))  return UTF32;
+    return encoding;
+  }
+
+  /**
+   * Checks if the specified encoding is supported.
+   * @param encoding encoding
+   * @return error message or {@code null}
+   */
+  public static String checkEncoding(final String encoding) {
+    try {
+      if(Charset.isSupported(encoding)) return null;
+    } catch(final IllegalArgumentException ignore) {
+      // encoding name is invalid
+    }
+    return "Unknown encoding: " + QueryError.similar(encoding,
+        Levenshtein.similar(Token.token(encoding), encodings())) + '.';
+  }
+
+  /**
+   * Capitalizes the first letter of a string.
+   * @param string input string
+   * @return capitalized string
+   */
+  public static String capitalize(final String string) {
+    final StringBuilder sb = new StringBuilder();
+    if(!string.isEmpty())
+      sb.append(Character.toUpperCase(string.charAt(0))).append(string.substring(1));
+    return sb.toString();
+  }
+
+  /**
+   * Returns a regular English singular/plural form for the specified noun.
+   * @param noun noun
+   * @param n number of entries
+   * @return string
+   */
+  public static String plural(final String noun, final long n) {
+    return n == 1 ? noun : noun + 's';
+  }
+
+  /**
+   * Checks if a string starts with the specified character.
+   * @param string string
+   * @param ch character to be found
+   * @return result of check
+   */
+  public static boolean startsWith(final String string, final char ch) {
+    return string.indexOf(ch) == 0;
+  }
+
+  /**
+   * Checks if a string ends with the specified character.
+   * @param string string
+   * @param ch character to be found
+   * @return result of check
+   */
+  public static boolean endsWith(final String string, final char ch) {
+    final int sl = string.length();
+    return sl > 0 && string.charAt(sl - 1) == ch;
+  }
+
+  /**
+   * Concatenates multiple objects.
+   * @param objects objects
+   * @return resulting string
+   */
+  public static String concat(final Object... objects) {
+    return Token.string(Token.concat(objects));
+  }
+
+  /**
+   * Returns a string array with all supported encodings.
+   * @return encodings
+   */
+  public static String[] encodings() {
+    if(encodings == null) encodings = Charset.availableCharsets().keySet().toArray(String[]::new);
+    return encodings;
+  }
+
+  /**
+   * Converts a string to camel case.
+   * @param string string to convert
+   * @return resulting string
+   */
+  public static String camelCase(final String string) {
+    final StringBuilder sb = new StringBuilder();
+    boolean upper = false;
+    final int sl = string.length();
+    for(int s = 0; s < sl; s++) {
+      final char ch = string.charAt(s);
+      if(ch == '-') {
+        upper = true;
+      } else if(upper) {
+        sb.append(Character.toUpperCase(ch));
+        upper = false;
+      } else {
+        sb.append(ch);
+      }
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Returns the title case of a hyphenated string: every word is capitalized, and the hyphens
+   * are replaced with spaces.
+   * @param string input string
+   * @return title case
+   */
+  public static String titleCase(final String string) {
+    final StringBuilder sb = new StringBuilder();
+    for(final String word : split(string, '-')) {
+      if(!sb.isEmpty()) sb.append(' ');
+      sb.append(capitalize(word));
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Converts the given string to a Java class name. Slashes will be replaced with dots, and
+   * the last package segment will be capitalized and camel-cased.
+   * @param string string to convert
+   * @return class name
+   */
+  public static String uriToClasspath(final String string) {
+    final String s = string.replace('/', '.');
+    final int c = s.lastIndexOf('.') + 1;
+    return s.substring(0, c) + capitalize(camelCase(s.substring(c)));
+  }
+
+  /**
+   * Converts a URI to a directory path.
+   * See https://docs.basex.org/wiki/Repository#URI_Rewriting for details.
+   * @param uri namespace URI
+   * @return converted path
+   */
+  public static String uri2path(final String uri) {
+    String path = uri;
+    try {
+      final URI u = new URI(uri);
+      final TokenBuilder tb = new TokenBuilder();
+      if(u.isOpaque()) {
+        tb.add(u.getScheme()).add('/').add(u.getSchemeSpecificPart().replace(':', '/'));
+      } else {
+        final String auth = u.getAuthority();
+        if(auth != null) {
+          // reverse authority, replace dots by slashes. example: basex.org → org/basex
+          final String[] comp = split(auth, '.');
+          for(int c = comp.length - 1; c >= 0; c--) tb.add('/').add(comp[c]);
+        }
+        // add remaining path
+        final String p = u.getPath();
+        tb.add(p == null || p.isEmpty() ? "/" : p.replace('.', '/'));
+      }
+      path = tb.toString();
+    } catch(final URISyntaxException ignore) {
+      // original path is used
+    }
+
+    // replace special characters with dashes; remove multiple slashes
+    path = path.replaceAll("[^\\w.-/]+", "-").replaceAll("//+", "/");
+    // add "index" string
+    if(endsWith(path, '/')) path += "index";
+    // remove heading slash
+    if(startsWith(path, '/')) path = path.substring(1);
+    return path;
+  }
+
+  /**
+   * Canonicalizes a string: heuristic CP437/UTF-8 mojibake fix followed by Unicode normalization.
+   * @param string raw string
+   * @return canonical string
+   */
+  public static String canonical(final String string) {
+    final byte[] bytes = string.getBytes(CP437);
+    String fixed = string;
+    if(string.equals(new String(bytes, CP437))) {
+      final String decoded = Token.string(bytes);
+      if(!contains(decoded, '\uFFFD')) fixed = decoded;
+    }
+    return Normalizer.normalize(fixed, Normalizer.Form.NFC);
+  }
+}

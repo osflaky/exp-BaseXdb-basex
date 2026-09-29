@@ -1,0 +1,154 @@
+package org.basex.gui.view;
+
+import static org.basex.data.DataText.*;
+
+import org.basex.data.*;
+import org.basex.gui.*;
+import org.basex.query.func.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+
+/**
+ * This class assembles some database access methods which are used
+ * in the same way by different visualizations. If more specific database
+ * access is needed, it is advisable to directly work on the {@link Data}
+ * class.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ViewData {
+  /** Preventing class instantiation. */
+  private ViewData() { }
+
+  /**
+   * Checks if the specified node is a text node.
+   * @param opts gui options
+   * @param data data reference
+   * @param pre PRE value
+   * @return result of check
+   */
+  public static boolean leaf(final GUIOptions opts, final Data data, final int pre) {
+    final int kind = data.kind(pre);
+    if(kind == Data.ATTR) return true;
+
+    final boolean atts = opts.get(GUIOptions.MAPATTS);
+    final int last = pre + (atts ? 1 : data.attSize(pre, kind));
+    return last == data.nodes() || data.parent(pre, kind) >=
+      data.parent(last, data.kind(last));
+  }
+
+  /**
+   * Returns path for the specified PRE value.
+   * @param data data reference (can be {@code null})
+   * @param pre PRE value
+   * @return current path
+   */
+  public static byte[] path(final Data data, final int pre) {
+    if(data == null || pre >= data.nodes()) return Token.EMPTY;
+
+    final IntList pres = new IntList();
+    int p = pre, k = data.kind(p);
+    while(k != Data.DOC) {
+      pres.add(p);
+      p = data.parent(p, k);
+      k = data.kind(p);
+    }
+
+    final TokenBuilder tb = new TokenBuilder();
+    tb.add(Function._DB_GET.args(data.meta.name, Token.string(data.text(p, true))).trim());
+    for(int i = pres.size() - 1; i >= 0; i--) {
+      p = pres.get(i);
+      k = data.kind(p);
+      final byte[] txt = switch(k) {
+        case Data.TEXT -> TEXT;
+        case Data.COMM -> COMMENT;
+        case Data.PI   -> PI;
+        case Data.ATTR -> Token.concat(XMLToken.AT, data.name(p, k));
+        default        -> data.name(p, k);
+      };
+      tb.add('/').add(txt);
+    }
+    return tb.finish();
+  }
+
+  /**
+   * Returns textual contents for the specified node.
+   * @param data data reference
+   * @param pre PRE value
+   * @return text
+   */
+  public static byte[] text(final Data data, final int pre) {
+    final int kind = data.kind(pre);
+    return switch(kind) {
+      case Data.ELEM -> data.name(pre, kind);
+      case Data.ATTR -> Token.concat(XMLToken.AT, data.name(pre, kind), XMLToken.ATT1,
+          data.text(pre, false), XMLToken.ATT2);
+      default        -> data.text(pre, true);
+    };
+  }
+
+  /**
+   * Returns a label for the specified node.
+   * @param opts gui options
+   * @param data data reference
+   * @param pre PRE value
+   * @return name
+   */
+  public static byte[] label(final GUIOptions opts, final Data data, final int pre) {
+    if(data.kind(pre) == Data.ELEM) {
+      final String labels = opts.get(GUIOptions.LABELS);
+      if(!labels.isEmpty()) {
+        final int id = labelID(data, labels);
+        if(id != 0) {
+          final byte[] value = data.attValue(id, pre);
+          if(value != null) return value;
+        }
+      }
+    }
+    return Token.chop(text(data, pre), 32);
+  }
+
+  /**
+   * Returns the name ID of the specified node.
+   * @param data data reference
+   * @param labels labels
+   * @return name ID, or {@code 0} if key does not exist
+   */
+  public static int labelID(final Data data, final String labels) {
+    for(final byte[] key : Token.split(Token.token(labels), ',')) {
+      final int id = data.attrNames.index(key);
+      if(id > 0) return id;
+    }
+    return 0;
+  }
+
+  /**
+   * Returns the size ID of the specified node.
+   * @param data data reference
+   * @return size ID, or {@code 0} if key does not exist
+   */
+  public static int sizeID(final Data data) {
+    return data.attrNames.index(T_SIZE);
+  }
+
+  /**
+   * Returns the parent for the specified node.
+   * @param data data reference
+   * @param pre child node
+   * @return parent node
+   */
+  public static int parent(final Data data, final int pre) {
+    return data.parent(pre, data.kind(pre));
+  }
+
+  /**
+   * Returns the size for the specified node.
+   * @param data data reference
+   * @param pre child node
+   * @return parent node
+   */
+  public static int size(final Data data, final int pre) {
+    return data.size(pre, data.kind(pre));
+  }
+}

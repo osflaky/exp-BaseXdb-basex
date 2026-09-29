@@ -1,0 +1,427 @@
+
+options {
+  STATIC = false;
+  USER_TOKEN_MANAGER = true;
+  GRAMMAR_ENCODING = "UTF-8";
+  JDK_VERSION = "1.8";
+}
+
+PARSER_BEGIN(RegExParser)
+
+package org.basex.query.util.regex.parse;
+
+import static org.basex.query.QueryError.*;
+
+import java.util.*;
+import java.util.regex.*;
+
+import org.basex.query.*;
+import org.basex.query.util.regex.*;
+import org.basex.util.*;
+import static org.basex.util.Token.*;
+import static java.util.regex.Pattern.*;
+
+/**
+ * A parser for XSD regular expressions.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+@SuppressWarnings("all")
+public class RegExParser {
+  /** Group counter. */
+  private int groups;
+  /** Closed groups. */
+  private final Map<Integer, Group> closed = new HashMap<Integer, Group>();
+  /** Numbers of closed named groups. */
+  private final Map<String, Integer> names = new HashMap<String, Integer>();
+  /** Path of current atom: sequence numbers of branches and atoms currently being processed. */ 
+  private Stack<Integer> atomPath = new Stack<Integer>();
+  /** If the wildcard {@code .} matches any character. */
+  private boolean dotAll;
+  /** Multi-line matching mode, {@code ^} and {@code $} match on line bounds. */
+  private boolean multiLine;
+  /** Case-insensitive matching mode. */
+  private boolean insensitive;
+
+  /**
+   * Constructor.
+   * @param regex regular expression to parse
+   * @param strip strip whitespace while lexing
+   * @param comments allow comments while lexing
+   * @param all dot matches all
+   * @param multi multi line search
+   * @param insens case-insensitive matching
+   */
+  public RegExParser(final byte[] regex, final boolean strip, final boolean comments,
+      final boolean all, final boolean multi, final boolean insens) {
+    this(new RegExLexer(regex, strip, comments));
+    dotAll = all;
+    multiLine = multi;
+    insensitive = insens;
+  }
+}
+
+PARSER_END(RegExParser)
+
+  /**
+   * Root production.
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  RegExp parse() : {
+    RegExp regex;
+  } {
+    regex = regExp(false) <EOF> {
+      return regex;
+    }
+  }
+
+  /**
+   * Parses the "regExp" rule.
+   * @param lookbehind flag indicating lookbehind expression
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  RegExp regExp(final boolean lookbehind) : {
+    final RegExpList brs = new RegExpList();
+    RegExp br;
+    atomPath.push(0);
+  } {
+    (
+      br = branch(lookbehind) { brs.add(br); }
+      (
+        <OR> { atomPath.push(atomPath.pop() + 1); }
+        br = branch(lookbehind) { brs.add(br); }
+      )*
+    ) {
+      atomPath.pop();
+      return brs.size() == 1 ? brs.get(0) : new Disjunction(brs.finish());
+    }
+  }
+
+  /**
+   * Parses the "branch" rule.
+   * Parses the "piece" rule.
+   * @param lookbehind flag indicating lookbehind expression
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  RegExp branch(final boolean lookbehind) : {
+    RegExp atom;
+    final RegExpList pieces = new RegExpList();
+    Quantifier qu = null;
+    atomPath.push(0);
+  } {
+    (
+      (
+        ( atom = atom(lookbehind) [ qu = quantifier() {
+            if(lookbehind) throw new ParseException("Lookbehind assertions must not contain quantifiers.");
+          } ] ) {
+            pieces.add(qu == null ? atom : new Piece(atom, qu));
+            qu = null;
+          }
+        | atom = assertion() {
+            if(lookbehind) throw new ParseException("Lookbehind assertions must not contain nested assertions.");
+            pieces.add(atom);
+          }
+        ) {
+          atomPath.push(atomPath.pop() + 1);
+        }
+    )* {
+      atomPath.pop();
+      return pieces.size() == 1 ? pieces.get(0) : new Branch(pieces.finish());
+    }
+  }
+
+  /**
+   * Parses the "quantifier" rule.
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  Quantifier quantifier() : {
+    int min = 0, max = 0;
+    boolean lazy = false;
+    int[] qu = null;
+  } {
+    ( <Q_MARK> { max = 1; }
+    | <STAR>   { max = -1; }
+    | <PLUS>   { min = 1; max = -1; }
+    | ( <QUANT_OPEN> qu = quantity() { min = qu[0]; max = qu[1]; } <QUANT_CLOSE> )
+    )
+    [ <Q_MARK> { lazy = true; } ]
+    {
+      return new Quantifier(min, max, lazy);
+    }
+  }
+
+  /**
+   * Parses the "quantity" rule.
+   * Parses the "quantRange" rule.
+   * Parses the "quantMin" rule.
+   * Parses the "quantExact" rule.
+   * @return quantity
+   * @throws ParseException parsing exception
+   */
+  int[] quantity() : {
+    final int[] qty = new int[2];
+  } {
+    <NUMBER> {
+      try {
+        qty[0] = qty[1] = Integer.parseInt((String) token.getValue());
+      } catch(final NumberFormatException ex) {
+        throw new ParseException("Number in quantifier is too large");
+      }
+    }
+    [
+      <COMMA> { qty[1] = -1; }
+      [ <NUMBER> {
+          try {
+            qty[1] = Integer.parseInt((String) token.getValue());
+          } catch(final NumberFormatException ex) {
+            throw new ParseException("Number in quantifier is too large");
+          }
+          if(qty[0] > qty[1]) throw new ParseException("Illegal quantifier: " +
+              qty[0] + " > " + qty[1]);
+        }
+      ]
+    ] {
+      return qty;
+    }
+  }
+
+  /**
+   * Parses the "atom" rule.
+   * @param lookbehind flag indicating lookbehind expression
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  RegExp atom(final boolean lookbehind) : {
+    RegExp nd = null;
+  } {
+    ( nd = Char()
+    | nd = charClass()
+    | (<NPAR_OPEN> nd = regExp(false) <PAR_CLOSE>) {
+        if(lookbehind) throw new ParseException("Lookbehind assertions must not contain parenthesized expressions.");
+        nd = new Group(nd, false, atomPath.toArray(new Integer[atomPath.size()]));
+      }
+    | (<PAR_OPEN> { final int grp = ++groups; }
+        nd = regExp(false)
+      <PAR_CLOSE>) {
+        if(lookbehind) throw new ParseException("Lookbehind assertions must not contain parenthesized expressions.");
+        final Group g = new Group(nd, true, atomPath.toArray(new Integer[atomPath.size()]));
+        closed.put(grp, g);
+        nd = g;
+      }
+    | (<NAMED_PAR_OPEN> { final int ngrp = ++groups; final String name = (String) token.getValue(); }
+        nd = regExp(false)
+      <PAR_CLOSE>) {
+        if(lookbehind) throw new ParseException("Lookbehind assertions must not contain parenthesized expressions.");
+        final Group g = new Group(nd, true, name, atomPath.toArray(new Integer[atomPath.size()]));
+        closed.put(ngrp, g);
+        names.put(name, ngrp);
+        nd = g;
+      }
+    | nd = backReference() {
+        if(lookbehind) throw new ParseException("Lookbehind assertions must not contain backward references.");
+      }
+    ) {
+      return nd;
+    }
+  }
+
+  /**
+   * Parses the "Char" rule.
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  Literal Char() : {
+  } {
+    ( <CHAR>
+    | <DIGIT>
+    )
+    { return new Literal(token.image.codePointAt(0)); }
+  }
+
+  /**
+   * Parses the "backReference" rule.
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  BackRef backReference() : {
+    int backref = 0;
+  } {
+    ( <BACK_REF> {
+        backref = token.image.charAt(1) - '0';
+      }
+      (
+        LOOKAHEAD(1, { 10 * backref + token.next.image.charAt(0) - '0' <= groups })
+        <DIGIT> {
+          backref = 10 * backref + token.image.charAt(0) - '0';
+        }
+      )*
+    | <NAMED_BACK_REF> {
+        final Integer num = names.get((String) token.getValue());
+        if(num == null) throw new ParseException("Illegal back-reference: " + token.image);
+        backref = num;
+      }
+    ) {
+      final Group g = closed.get(backref);
+      if(g == null)
+        throw new ParseException("Illegal back-reference: \\" + backref);
+      g.setHasBackRef();
+      int diff = 0;
+      while(atomPath.get(diff) == g.getAtomPath()[diff]) {
+        ++diff;
+      }
+      // If the atom paths of group and backref differ in a branch (even index), the backref is in
+      // a different branch than the group, so the backref can be flagged accordingly, and later be
+      // omitted at serialization time.
+      final boolean isDifferentBranch = (diff & 1) == 0;
+      return new BackRef(backref, isDifferentBranch);
+    }
+  }
+
+  /**
+   * Parses the "charClass" rule.
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  RegExp charClass() : {
+    RegExp nd = null;
+  } {
+    ( nd = charClassEsc()
+    | nd = charClassExpr()
+    | <WILDCARD>   { nd = Wildcard.get(dotAll); }
+    ) {
+      return nd;
+    }
+  }
+
+  /**
+   * Parses the "charClassEsc" rule.
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  RegExp charClassEsc() : { } {
+    ( <SINGLE_ESC>
+    | <MULTI_ESC>
+    | <CAT_ESC>
+    ) {
+      final RegExp esc = Escape.get(token.image);
+      if(esc == null) throw new ParseException("Unknown escape: " + token);
+      return insensitive && token.kind == CAT_ESC ? new CaseSensitive(esc) : esc;
+    }
+  }
+
+  /**
+   * Parses the "charClassExpr" rule.
+   * Parses the "charClassSub" rule.
+   * @return character class
+   * @throws ParseException parsing exception
+   */
+  CharClass charClassExpr() : {
+    CharGroup group = null;
+    CharClass sub = null;
+  } {
+    <BR_OPEN>
+      ( LOOKAHEAD(1) <NEG> group = posCharGroup() {
+          group.negative = true;
+        }
+      | group = posCharGroup()
+      )
+      [ <TO> sub = charClassExpr() ]
+    <BR_CLOSE> {
+      return new CharClass(group, sub);
+    }
+  }
+
+  /**
+   * Parses the "posCharGroup" rule.
+   * @return character group
+   * @throws ParseException parsing exception
+   */
+  CharGroup posCharGroup() : {
+    final RegExpList cg = new RegExpList();
+    RegExp sub = null;
+  } {
+    ( LOOKAHEAD(3) sub = charRange(cg.isEmpty()) { cg.add(sub); }
+    | (<SINGLE_ESC> | <MULTI_ESC>| <CAT_ESC>) {
+        for(final RegExp re : Escape.inGroup(token.image)) cg.add(re);
+      }
+    )+ {
+      return new CharGroup(cg.finish());
+    }
+  }
+
+  /**
+   * Parses the "charRange" rule.
+   * @return expression
+   * @throws ParseException parsing exception
+   */
+  RegExp charRange(boolean isBegin) : {
+    int a = -1, b = -1;
+  } {
+    ( LOOKAHEAD({ getToken(2).kind == CHAR && "-".equals(getToken(2).image)
+        && getToken(3).kind != BR_CLOSE && getToken(3).kind != EOF })
+      (a = charOrEsc() <CHAR> b = charOrEsc()) {
+        if(a > b) throw new ParseException("Illegal range: " +
+            Literal.escape(a) + " > " + Literal.escape(b));
+      }
+    | a = XmlChar() {
+        if(a == '-' && !isBegin && getToken(1).kind != BR_CLOSE && getToken(1).kind != EOF) throw new ParseException(
+          "The - character is a valid character range only at the beginning or end of a positive character group.");
+      }
+    ) {
+      return b == -1 ? new Literal(a) : new CharRange(a, b, insensitive);
+    }
+  }
+
+  /**
+   * Parses the "charOrEsc" rule.
+   * @return character
+   * @throws ParseException parsing exception
+   */
+  int charOrEsc() : {
+    int cp = -1;
+  } {
+    ( cp = XmlChar()
+    | <SINGLE_ESC> { cp = Escape.getCp(token.image); }
+    ) {
+      return cp;
+    }
+  }
+
+  /**
+   * Parses the "XmlChar" rule.
+   * @return character
+   * @throws ParseException parsing exception
+   */
+  int XmlChar() :  {} {
+    ( <CHAR>
+    | <DIGIT>
+    ) {
+      return token.image.codePointAt(0);
+    }
+  }
+
+  /**
+   * Parsers the "assertion" rule.
+   * @return expression
+   */
+  RegExp assertion(): {
+    RegExp re;
+    boolean behind, positive;
+  } {
+    ( <LINE_START>                      { re = LineBorder.get(true, multiLine); }
+    | <LINE_END>                        { re = LineBorder.get(false, multiLine); }
+    | <WORD_BOUNDARY>                   { re = WordBoundary.get(token.image, multiLine); }
+    | ( <POS_LOOKAHEAD>                 { behind = false; positive = true; }
+      | <NEG_LOOKAHEAD>                 { behind = false; positive = false; }
+      | <POS_LOOKBEHIND>                { behind = true;  positive = true; }
+      | <NEG_LOOKBEHIND>                { behind = true;  positive = false; }
+      ) re = regExp(behind) <PAR_CLOSE> { re = LookAround.get(behind, positive, re); }
+    ) {
+      return re;
+    }
+  }

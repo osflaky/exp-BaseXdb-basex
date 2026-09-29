@@ -1,0 +1,78 @@
+package org.basex.query.func.fn;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnData extends ContextFn {
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    return context(qc).atomIter(qc, info);
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return context(qc).atomValue(qc, info);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) {
+    final boolean context = contextAccess();
+    final Expr input = context ? cc.qc.focus.value : arg(0);
+
+    if(input != null) {
+      final SeqType st = input.seqType();
+      if(st.zero()) return input;
+      final BasicType type = st.type.atomic();
+      if(type == st.type) {
+        // data('x') → 'x'
+        // $string[data() = 'a'] → $string[. = 'a']
+        return context && cc.nestedFocus() ? ContextValue.get(cc, info) : input;
+      }
+      // ignore arrays: data((1 to 6) ! [ ., . ])
+      if(type != null) {
+        final boolean wrapped = st.mayBeWrapped();
+        exprType.assign(type.seqType(wrapped ? Occ.ZERO_OR_MORE : st.occ),
+            wrapped ? -1 : input.size());
+      }
+    }
+    return this;
+  }
+
+  @Override
+  protected void simplifyArgs(final CompileContext cc) throws QueryException {
+    // data(xs:untypedAtomic(E)) → data(E)
+    exprs = simplifyAll(Simplify.DATA, cc);
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    Expr expr = this;
+    final Expr input = contextAccess() ? ContextValue.get(cc, info) : arg(0);
+    // data(<a/>) = '' → <a/> = '', A[B ! data() = ''] → A[B ! . = '']
+    // count(data($x)) → count($x), string(data($node)) → string($node)
+    // arrays are excluded if the wrapper is not atomized: string(data([ 1 ]))
+    if(mode.atomizing() || mode.oneOf(Simplify.STRING_VALUE, Simplify.COUNT,
+        Simplify.EXISTENCE) && !input.seqType().mayBeWrapped()) {
+      expr = input;
+    } else if(mode.conditional()) {
+      // if(data($node)) → if($node/descendant::text())
+      expr = simplifyEbv(input, cc, null);
+    }
+    return cc.simplify(this, expr, mode);
+  }
+
+  @Override
+  public boolean inlineable() {
+    return contextAccess() || arg(contextIndex()) instanceof ContextValue;
+  }
+}

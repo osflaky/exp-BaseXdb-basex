@@ -1,0 +1,236 @@
+package org.basex.gui.dialog;
+
+import static org.basex.core.Text.*;
+
+import java.awt.*;
+import java.awt.event.*;
+
+import javax.swing.*;
+
+import org.basex.core.*;
+import org.basex.core.jobs.*;
+import org.basex.gui.*;
+import org.basex.gui.layout.*;
+import org.basex.util.*;
+
+/**
+ * Dialog window for displaying the progress of a command execution.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class DialogProgress extends BaseXDialog implements ActionListener {
+  /** Maximum value of progress bar. */
+  private static final int MAX = 600;
+  /** Refresh action. */
+  private final Timer timer = new Timer(100, this);
+  /** Information label. */
+  private BaseXLabel info;
+  /** Cancel button (can be {@code null}). */
+  private BaseXButton cancel;
+  /** Memory usage. */
+  private BaseXMem mem;
+  /** Executed job (can be {@code null}). */
+  private Job job;
+  /** Progress bar (can be {@code null}). */
+  private JProgressBar bar;
+
+  /**
+   * Default constructor.
+   * @param gui main window
+   * @param jb progress reference
+   */
+  private DialogProgress(final GUI gui, final Job jb) {
+    super(gui, "");
+    init(gui, jb);
+  }
+
+  /**
+   * Default constructor.
+   * @param dialog dialog window
+   * @param cmd progress reference
+   */
+  private DialogProgress(final BaseXDialog dialog, final Command cmd) {
+    super(dialog, "");
+    init(dialog, cmd);
+  }
+
+  /**
+   * Initializes all components.
+   * @param win window
+   * @param jb progress reference
+   */
+  private void init(final BaseXWindow win, final Job jb) {
+    info = new BaseXLabel(" ", true, true);
+    set(info, BorderLayout.NORTH);
+
+    if(jb.supportsProg()) {
+      bar = new JProgressBar(0, MAX);
+      set(bar, BorderLayout.CENTER);
+    } else {
+      bar = null;
+    }
+    BaseXLayout.setWidth(info, MAX);
+
+    final BaseXBack s = new BaseXBack(new BorderLayout()).border(10, 0, 0, 0);
+    final BaseXBack m = new BaseXBack(new ColumnLayout(5));
+    mem = new BaseXMem(this, false);
+    m.add(new BaseXLabel(MEMUSED_C));
+    m.add(mem);
+    s.add(m, BorderLayout.WEST);
+
+    if(jb.stoppable()) {
+      cancel = new BaseXButton(this, B_CANCEL);
+      s.add(cancel, BorderLayout.EAST);
+    }
+    set(s, BorderLayout.SOUTH);
+
+    job = jb;
+    timer.start();
+    pack();
+    setLocationRelativeTo(win.component());
+  }
+
+  @Override
+  public void cancel() {
+    if(cancel != null) cancel.setEnabled(false);
+    job.stop();
+  }
+
+  @Override
+  public void close() {
+    dispose();
+  }
+
+  @Override
+  public void dispose() {
+    timer.stop();
+    job = null;
+    super.dispose();
+  }
+
+  @Override
+  public void actionPerformed(final ActionEvent e) {
+    // refresh events can be queued before the dialog is disposed
+    if(job == null) return;
+    final Job active = job.active();
+    setTitle(active.shortInfo());
+    final String detail = active.detailedInfo();
+    info.setText(detail.isEmpty() ? " " : detail);
+    mem.repaint();
+    if(bar != null) bar.setValue((int) (active.progressInfo() * MAX));
+  }
+
+  /**
+   * Runs the specified job in a new thread, decorated by a progress dialog, and returns
+   * when the job has finished or was canceled.
+   * @param <J> job type
+   * @param gui reference to the main window
+   * @param job job to be run
+   */
+  public static <J extends Job & Runnable> void execute(final GUI gui, final J job) {
+    final DialogProgress wait = new DialogProgress(gui, job);
+    new Thread(() -> {
+      try {
+        job.run();
+      } finally {
+        // the dialog is disposed in the event queue: the job may end before it is made visible
+        EventQueue.invokeLater(wait::dispose);
+      }
+    }).start();
+    wait.setVisible(true);
+  }
+
+  /**
+   * Runs the specified commands, decorated by a progress dialog, and
+   * calls {@link BaseXDialog#action} if the dialog is closed.
+   * @param dialog reference to the dialog window
+   * @param cmds commands to be run
+   */
+  static void execute(final BaseXDialog dialog, final Command... cmds) {
+    execute(dialog, null, cmds);
+  }
+
+  /**
+   * Runs the specified commands, decorated by a progress dialog, and
+   * calls {@link BaseXDialog#action} if the dialog is closed.
+   * @param gui reference to the main window
+   * @param cmds commands to be run
+   */
+  public static void execute(final GUI gui, final Command... cmds) {
+    execute(gui, null, null, cmds);
+  }
+
+  /**
+   * Runs the specified commands, decorated by a progress dialog, and
+   * calls {@link BaseXDialog#action} if the dialog is closed.
+   * @param dialog reference to the calling dialog window
+   * @param post post-processing step
+   * @param cmds commands to be run
+   */
+  static void execute(final BaseXDialog dialog, final Runnable post, final Command... cmds) {
+    execute(dialog.gui(), dialog, post, cmds);
+  }
+
+  /**
+   * Runs the specified commands, decorated by a progress dialog, and calls
+   * {@link BaseXDialog#action} if the dialog is closed.
+   * @param gui reference to the main window
+   * @param dialog reference to the dialog window (can be {@code null})
+   * @param post post-processing step (can be {@code null})
+   * @param cmds commands to be run
+   */
+  private static void execute(final GUI gui, final BaseXDialog dialog, final Runnable post,
+      final Command... cmds) {
+
+    for(final Command cmd : cmds) {
+      // reset views
+      final boolean newData = cmd.newData(gui.context);
+      if(newData) gui.notify.init();
+
+      // create wait dialog
+      final DialogProgress wait = dialog != null ? new DialogProgress(dialog, cmd) :
+        new DialogProgress(gui, cmd);
+
+      // start command thread
+      new Thread(() -> {
+        // execute command
+        final Performance perf = new Performance();
+        gui.updating = cmd.updating(gui.context);
+        boolean ok = true;
+        String info;
+        try {
+          cmd.execute(gui.context);
+          info = cmd.info();
+        } catch(final BaseXException ex) {
+          Util.debug(ex);
+          ok = false;
+          info = Util.message(ex);
+        } finally {
+          gui.updating = false;
+        }
+
+        // return status information, close the progress window and report a failed command
+        final String time = perf.toString(), message = info;
+        final boolean success = ok;
+        EventQueue.invokeLater(() -> {
+          gui.info.setInfo(message, cmd, time, success, true);
+          gui.status.setText(cmd + ": " + time, true);
+          wait.dispose();
+          if(!success) BaseXDialog.error(gui,
+            message.equals(INTERRUPTED) ? COMMAND_CANCELED : message);
+        });
+      }).start();
+
+      // show progress windows until being disposed
+      wait.setVisible(true);
+
+      // initialize views if database was closed before
+      if(newData) gui.notify.init();
+      else if(cmd.updating(gui.context)) gui.notify.update();
+      gui.editor.refreshContextLabel();
+    }
+    if(dialog != null && dialog.isVisible()) dialog.action(dialog);
+    if(post != null) SwingUtilities.invokeLater(post);
+  }
+}

@@ -1,0 +1,46 @@
+package org.basex.util.options;
+
+import java.util.*;
+
+import org.basex.query.value.type.*;
+
+/**
+ * Option containing an strings array value.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class StringsOption extends Option<String[]> {
+  /** Default value. */
+  private final String[] value;
+
+  /**
+   * Default constructor.
+   * @param name name
+   * @param value value
+   */
+  public StringsOption(final String name, final String... value) {
+    super(name);
+    this.value = value;
+  }
+
+  @Override
+  public String[] value() {
+    return value;
+  }
+
+  @Override
+  public String[] copy() {
+    return value == null ? null : value.clone();
+  }
+
+  @Override
+  SeqType defaultType() {
+    return Types.STRING_ZM;
+  }
+
+  @Override
+  public String toString() {
+    return name() + Arrays.asList(value);
+  }
+}

@@ -1,0 +1,238 @@
+package org.basex.http.restxq;
+
+import static jakarta.servlet.http.HttpServletResponse.*;
+import static org.basex.http.web.WebText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.*;
+
+import org.basex.core.*;
+import org.basex.http.*;
+import org.basex.http.web.*;
+import org.basex.io.out.*;
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.util.http.*;
+
+/**
+ * This class creates a new HTTP response.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class RestXqResponse extends WebResponse {
+  /** HTTP connection. */
+  private final HTTPConnection conn;
+
+  /** Singleton (can be {@code null}). */
+  private RestXqSingleton singleton;
+  /** Function. */
+  private RestXqFunction func;
+  /** Status code (can be {@code null}). */
+  private Integer status;
+
+  /**
+   * Constructor.
+   * @param conn HTTP connection
+   */
+  public RestXqResponse(final HTTPConnection conn) {
+    super(conn.context);
+    this.conn = conn;
+  }
+
+  @Override
+  protected Expr[] init(final WebFunction function, final Object data)
+      throws QueryException, IOException {
+
+    qc = function.module.qc(ctx);
+    qc.jc().type(RESTXQ);
+    ctx.setExternal(conn.requestCtx);
+
+    final RestXqFunction rxf = (RestXqFunction) function;
+    func = new RestXqFunction(rxf.function, rxf.module, qc, rxf.index);
+    final MainOptions mopts = new MainOptions(ctx.options);
+    func.parseAnnotations(mopts);
+
+    if(func.singleton != null) {
+      singleton = new RestXqSingleton(conn, func.singleton, qc);
+    }
+    return func.bind(data, conn, qc, mopts);
+  }
+
+  @Override
+  public Response serialize(final boolean body) throws QueryException, IOException {
+    final ArrayOutput cache = singleton != null ? new ArrayOutput() : null;
+    boolean response;
+
+    qc.register(ctx);
+    try {
+      qc.optimize();
+
+      // evaluate query
+      final Iter iter = qc.iter();
+      Item item = iter.next();
+      response = item != null;
+
+      SerializerOptions so = func.sopts;
+      boolean head = true;
+
+      // handle special cases
+      if(response(item)) {
+        // custom response
+        so = build((XNode) item);
+        item = iter.next();
+        head = item != null;
+      }
+      if(head && func.methods.size() == 1 && func.methods.contains(Method.HEAD.name()))
+        throw func.error(HEAD_METHOD);
+      // materialized result (e.g. of updating queries): reject misplaced responses in advance
+      final Value value = iter.eagerValue();
+      if(value != null) {
+        final long size = value.size();
+        for(long i = 1; i < size; i++) {
+          if(response(value.itemAt(i))) throw func.error(RESPONSE_FIRST);
+        }
+      }
+
+      // initialize serializer
+      conn.sopts(so);
+      conn.initResponse();
+      if(cache == null) conn.timing(qc.info);
+
+      if(status != null) {
+        final int s = status;
+        final StringBuilder msg = new StringBuilder();
+        if(s == 302) {
+          if(!msg.isEmpty()) msg.append("; ");
+          msg.append(HTTPText.LOCATION + ": ").append(conn.response.getHeader(HTTPText.LOCATION));
+        }
+        conn.log(s, msg.toString());
+        conn.status(s, null);
+      }
+
+      // serialize result
+      if(item != null && body) {
+        final OutputStream out = cache != null ? cache : conn.response.getOutputStream();
+        try(Serializer ser = Serializer.get(out, so)) {
+          for(; item != null; item = qc.next(iter)) {
+            if(response(item)) throw func.error(RESPONSE_FIRST);
+            ser.serialize(item);
+          }
+        } catch(final IOException ex) {
+          // client has disconnected: stop the query
+          if(cache == null) qc.stop();
+          throw ex;
+        }
+      }
+    } finally {
+      if(cache != null) conn.timing(qc.info);
+    }
+
+    // write cached result
+    if(cache != null) {
+      final int size = (int) cache.size();
+      if(size > 0) conn.response.getOutputStream().write(cache.buffer(), 0, size);
+    }
+
+    return status != null ? Response.CUSTOM :
+      response ? Response.STANDARD : Response.NONE;
+  }
+
+  @Override
+  public void finish() {
+    if(qc != null) {
+      qc.close();
+      qc.unregister(ctx);
+    }
+    if(singleton != null) singleton.unregister();
+  }
+
+  /**
+   * Checks if the specified item is a response element.
+   * @param item item (can be {@code null})
+   * @return result of check
+   */
+  private static boolean response(final Item item) {
+    return item != null && item.type == NodeType.ELEMENT && T_REST_RESPONSE.matches((XNode) item);
+  }
+
+  /**
+   * Builds a response element and creates the serialization parameters.
+   * @param response response element
+   * @return serialization parameters
+   * @throws QueryException query exception
+   */
+  private SerializerOptions build(final GNode response) throws QueryException {
+    // don't allow attributes
+    final BasicNodeIter atts = response.attributeIter();
+    final GNode attr = atts.next();
+    if(attr != null) throw func.error(UNEXP_NODE_X, attr);
+
+    // parse response and serialization parameters
+    final SerializerOptions sopts = func.sopts;
+    String cType = null;
+    for(final GNode node : response.childIter()) {
+      // process http:response element
+      if(T_HTTP_RESPONSE.matches(node)) {
+        // check status and reason
+        byte[] sta = null;
+        for(final GNode a : node.attributeIter()) {
+          final QNm qnm = a.qname();
+          if(qnm.eq(Q_STATUS)) sta = a.string();
+          else if(qnm.eq(Q_REASON) || qnm.eq(Q_MESSAGE)); // ignored
+          else throw func.error(UNEXP_NODE_X, a);
+        }
+        if(sta != null) {
+          // the status code is validated as in web:error
+          final int code = toInt(sta);
+          if(code <= 0 || code > 999) throw QueryError.WEB_STATUS_X.get(func.function.info, sta);
+          status = code;
+        }
+
+        // remember header names to distinguish first occurrence from repetitions
+        final Set<String> seen = new HashSet<>();
+        for(final GNode gchild : node.childIter()) {
+          final XNode child = (XNode) gchild;
+          // process http:header elements
+          if(T_HTTP_HEADER.matches(child)) {
+            final byte[] name = child.attribute(Q_NAME), value = child.attribute(Q_VALUE);
+            if(name != null && value != null) {
+              final String n = string(name), v = string(value);
+              if(n.equalsIgnoreCase(HTTPText.CONTENT_TYPE)) {
+                cType = v;
+              } else {
+                final String hv = n.equalsIgnoreCase(HTTPText.LOCATION) ? conn.resolve(v) : v;
+                // multiple Set-Cookie headers must be added one by one
+                if(n.equalsIgnoreCase(HTTPText.SET_COOKIE) ||
+                    !seen.add(n.toLowerCase(Locale.ENGLISH))) {
+                  conn.response.addHeader(n, hv);
+                } else {
+                  conn.response.setHeader(n, hv);
+                }
+              }
+            }
+          } else {
+            throw func.error(UNEXP_NODE_X, child);
+          }
+        }
+      } else if(T_OUTPUT_SERIAL.matches(node)) {
+        // parse output:serialization-parameters
+        sopts.assign(node, func.function.info);
+      } else {
+        throw func.error(UNEXP_NODE_X, node);
+      }
+    }
+    if(status == null) status = SC_OK;
+
+    // set content type and serialize data
+    if(cType != null) sopts.set(SerializerOptions.MEDIA_TYPE, cType);
+    return sopts;
+  }
+}

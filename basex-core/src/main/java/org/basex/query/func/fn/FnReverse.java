@@ -1,0 +1,112 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.func.Function.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnReverse extends StandardFunc {
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    // value-based input: reverse value
+    if(eager()) return value(qc).iter();
+
+    // optimization: reverse sequence
+    final Iter iter = arg(0).iter(qc);
+
+    // materialize value if number of results is unknown
+    final long size = iter.size();
+    // no result: empty iterator
+    if(size == 0) return Empty.ITER;
+    // single result: iterator
+    if(size == 1) return iter;
+    // value-based iterator
+    final Value value = iter.eagerValue();
+    if(value != null) return value.reverse(qc).iter();
+
+    // size is known: create iterator
+    if(size > -1) return new Iter() {
+      long c = size;
+
+      @Override
+      public Item next() throws QueryException {
+        return --c >= 0 ? iter.get(c) : null;
+      }
+      @Override
+      public Item get(final long i) throws QueryException {
+        return iter.get(size - i - 1);
+      }
+      @Override
+      public long size() {
+        return size;
+      }
+    };
+    // standard implementation
+    return iter.value(qc, this).reverse(qc).iter();
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return arg(0).value(qc).reverse(qc);
+  }
+
+  @Override
+  public boolean eager() {
+    return arg(0).eager();
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = arg(0);
+    if(input.seqType().zeroOrOne()) return input;
+    if(input instanceof final Value value) return value.reverse(cc.qc);
+
+    // reverse(reverse(E)) → E
+    if(REVERSE.is(input)) return input.arg(0);
+    // reverse(tail(reverse(E)) → trunk(E)
+    if(TAIL.is(input) && REVERSE.is(input.arg(0)))
+      return cc.function(TRUNK, info, input.arg(0).args());
+    // reverse(trunk(reverse(E)) → tail(E)
+    if(TRUNK.is(input) && REVERSE.is(input.arg(0)))
+      return cc.function(TAIL, info, input.arg(0).args());
+    // reverse(replicate(ZOO, count)) → replicate(ZOO, count)
+    if(REPLICATE.is(input) && !input.has(Flag.NDT))
+      if(input.arg(0).seqType().zeroOrOne()) return input;
+
+    // reverse((E1, E2)) → reverse(E2), reverse(E1)
+    if(input instanceof List) {
+      final Expr[] args = input.args();
+      final int al = args.length;
+      final ExprList list = new ExprList(al);
+      for(int a = al - 1; a >= 0; a--) list.add(cc.function(REVERSE, info, args[a]));
+      return List.get(cc, input.info(info), list.finish());
+    }
+    // reverse(E[test]) → reverse(E)[test]
+    if(input instanceof final IterFilter filter) {
+      if(filter.root.size() != -1) return Filter.get(cc, info,
+          cc.function(REVERSE, filter.info(info), filter.root), filter.exprs);
+    }
+
+    adoptType(input);
+    return embed(cc, false);
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    return simplifyOrder(mode, cc);
+  }
+}

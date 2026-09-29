@@ -1,0 +1,83 @@
+package org.basex.query.func.ft;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.ft.FTFlag.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.ft.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+import org.basex.util.ft.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+abstract class FtAccessFn extends StandardFunc {
+  /**
+   * Parses and returns full-text options.
+   * @param opts options specified in the query
+   * @param parent options to be inherited for unspecified values
+   * @return options
+   * @throws QueryException query exception
+   */
+  final FTOpt ftOpt(final FtIndexOptions opts, final FTOpt parent) throws QueryException {
+    final FTOpt opt = new FTOpt();
+    final Boolean fuzzy = opts.get(FtFuzzyOptions.FUZZY);
+    if(fuzzy != null) opt.set(FZ, fuzzy);
+    final Boolean wildcards = opts.get(FtIndexOptions.WILDCARDS);
+    if(wildcards != null) opt.set(WC, wildcards);
+    if(opts.contains(FtFuzzyOptions.ERRORS)) opt.errors = opts.get(FtFuzzyOptions.ERRORS);
+    final String[] words = opts.get(FtIndexOptions.STOP_WORDS);
+    if(words != null) {
+      opt.sw = new StopWords();
+      for(final String word : words) opt.sw.add(Token.token(word));
+    }
+
+    opt.assign(parent);
+    if(opt.is(FZ) && opt.is(WC)) throw FT_OPTIONS.get(info);
+    return opt;
+  }
+
+  /**
+   * Parses full-text options and returns a full-text expression.
+   * @param expr full-text expression
+   * @param opts options specified in the query (can be {@code null})
+   * @return expression
+   */
+  final FTExpr ftExpr(final FTExpr expr, final FtIndexOptions opts) {
+    FTExpr ex = expr;
+    if(opts != null) {
+      if(opts.get(FtIndexOptions.ORDERED)) {
+        ex = new FTOrder(info, ex);
+      }
+      if(opts.contains(FtIndexOptions.DISTANCE)) {
+        final FTDistanceOptions fopts = opts.get(FtIndexOptions.DISTANCE);
+        final Itr min = Itr.get(fopts.get(FTDistanceOptions.MIN));
+        final Itr max = Itr.get(fopts.get(FTDistanceOptions.MAX));
+        final FTUnit unit = fopts.get(FTDistanceOptions.UNIT);
+        ex = new FTDistance(info, ex, min, max, unit);
+      }
+      if(opts.contains(FtIndexOptions.WINDOW)) {
+        final FTWindowOptions fopts = opts.get(FtIndexOptions.WINDOW);
+        final Itr size = Itr.get(fopts.get(FTWindowOptions.SIZE));
+        final FTUnit unit = fopts.get(FTWindowOptions.UNIT);
+        ex = new FTWindow(info, ex, size, unit);
+      }
+      if(opts.contains(FtIndexOptions.SCOPE)) {
+        final FTScopeOptions fopts = opts.get(FtIndexOptions.SCOPE);
+        final boolean same = fopts.get(FTScopeOptions.SAME);
+        final FTUnit unit = fopts.get(FTScopeOptions.UNIT).unit();
+        ex = new FTScope(info, ex, same, unit);
+      }
+      if(opts.contains(FtIndexOptions.CONTENT)) {
+        final FTContents content = opts.get(FtIndexOptions.CONTENT);
+        ex = new FTContent(info, ex, content);
+      }
+    }
+    return ex;
+  }
+}

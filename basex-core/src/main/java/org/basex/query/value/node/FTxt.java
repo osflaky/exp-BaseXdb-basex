@@ -1,0 +1,85 @@
+package org.basex.query.value.node;
+
+import java.util.function.*;
+
+import org.basex.data.*;
+import org.basex.query.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.w3c.dom.*;
+
+/**
+ * Text node fragment.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FTxt extends FNode {
+  /** Text value. */
+  private final byte[] value;
+
+  /**
+   * Constructor.
+   * @param value text value
+   */
+  public FTxt(final byte[] value) {
+    super(NodeType.TEXT);
+    this.value = value;
+  }
+
+  /**
+   * Constructor for a text child that has been materialized on demand.
+   * @param value text value
+   * @param parent parent element
+   * @param id pre-allocated node ID
+   */
+  FTxt(final byte[] value, final FElem parent, final int id) {
+    super(NodeType.TEXT, id);
+    this.value = value;
+    parent(parent);
+  }
+
+  /**
+   * Constructor.
+   * @param value text value
+   */
+  public FTxt(final String value) {
+    this(Token.token(value));
+  }
+
+  /**
+   * Constructor for creating a text from a DOM node.
+   * Originally provided by Erdal Karaca.
+   * @param txt DOM node
+   */
+  public FTxt(final Text txt) {
+    this(txt.getData());
+  }
+
+  @Override
+  public byte[] string() {
+    return value;
+  }
+
+  @Override
+  public FTxt materialize(final Predicate<Data> test, final boolean funcs, final InputInfo ii,
+      final QueryContext qc) {
+    return materialized(test, funcs, ii) ? this : new FTxt(value);
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final FTxt ftxt && Token.eq(value, ftxt.value) &&
+        super.equals(obj);
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this), value);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.quoted(value);
+  }
+}

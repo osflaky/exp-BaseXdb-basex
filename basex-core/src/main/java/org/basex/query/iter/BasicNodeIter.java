@@ -1,0 +1,62 @@
+package org.basex.query.iter;
+
+import java.util.*;
+
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+
+/**
+ * Basic node iterator, throwing no exceptions.
+ *
+ * This class also implements the {@link Iterable} interface, which is why all of its
+ * values can also be retrieved via enhanced for(for-each) loops. Note, however, that
+ * the {@link #next()} method will give you better performance.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class BasicNodeIter extends NodeIter implements Iterable<GNode> {
+  /** Empty iterator. */
+  public static final BasicNodeIter EMPTY = new BasicNodeIter() {
+    @Override
+    public GNode next() {
+      return null;
+    }
+    @Override
+    public long size() {
+      return 0;
+    }
+    @Override
+    public Empty eagerValue() {
+      return Empty.VALUE;
+    }
+  };
+
+  @Override
+  public abstract GNode next();
+
+  @Override
+  public final Iterator<GNode> iterator() {
+    return new Iterator<>() {
+      private GNode node;
+
+      @Override
+      public boolean hasNext() {
+        final GNode n = BasicNodeIter.this.next();
+        node = n;
+        return n != null;
+      }
+
+      @Override
+      public GNode next() {
+        return node;
+      }
+
+      @Override
+      public void remove() {
+        throw Util.notExpected();
+      }
+    };
+  }
+}

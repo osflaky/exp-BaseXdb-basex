@@ -1,0 +1,103 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.func.Function.*;
+
+import java.util.function.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.collation.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class FnLowest extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return value(true, qc);
+  }
+
+  /**
+   * Returns the lowest or highest results.
+   * @param min compute minimum or maximum
+   * @param qc query context
+   * @return result
+   * @throws QueryException query exception
+   */
+  final Value value(final boolean min, final QueryContext qc) throws QueryException {
+    final Iter input = arg(0).iter(qc);
+    final Collation collation = toCollation(arg(1), qc);
+    final FItem key = toFunctionOrNull(arg(2), 1, qc);
+
+    final HofArgs args = key != null ? new HofArgs(1) : null;
+    final ItemList result = new ItemList();
+    Value lowest = null;
+    for(Item item; (item = input.next()) != null;) {
+      final ValueBuilder vb = new ValueBuilder(qc);
+      final Value value = key != null ? invoke(key, args.set(0, item), qc) : item;
+      for(final Item it : value.atomValue(qc, info)) {
+        vb.add(it.type.isUntyped() ? Dbl.get(toDouble(it)) : it);
+      }
+      final Value low = vb.value();
+      int diff = SortFn.compare(lowest != null ? lowest : low, low, collation, qc, info);
+      if(min) diff = -diff;
+      if(diff > 0) continue;
+      if(diff < 0) result.reset();
+      result.add(item);
+      lowest = low;
+    }
+    return result.value(this);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    return opt(true, cc);
+  }
+
+  /**
+   * Optimizes the function.
+   * @param min compute minimum or maximum
+   * @param cc compilation context
+   * @return optimized or original expression
+   * @throws QueryException query exception
+   */
+  final Expr opt(final boolean min, final CompileContext cc) throws QueryException {
+    // optimize sort on sequences
+    final Expr input = arg(0);
+    final SeqType st = input.seqType();
+    if(st.zero()) return input;
+
+    if(defined(2)) {
+      arg(2, arg -> arg.refineFunc(cc, st.with(Occ.EXACTLY_ONE)));
+    } else if(!defined(1)) {
+      final Predicate<Type> noCheck = type -> type.isSortable() && !type.isUntyped();
+      if(st.zeroOrOne() && noCheck.test(st.type)) return input;
+
+      // lowest(1 to 10) → 1 to 10
+      if(input instanceof final RangeSeq rs) {
+        return (rs.ascending() ? rs : rs.reverse(null)).itemAt(min ? 0 : rs.size() - 1);
+      }
+      // lowest(ITEM) → ITEM
+      if(noCheck.test(st.type) && (st.one() || input instanceof final SingletonSeq ss &&
+          ss.singleItem())) return input;
+
+      // lowest(replicate(5, 2)) → replicate(5, 2)
+      if(REPLICATE.is(input) && ((FnReplicate) input).singleEval(false)) {
+        final SeqType ast = input.arg(0).seqType();
+        if(ast.zeroOrOne() && noCheck.test(ast.type)) return input;
+      }
+    }
+    exprType.assign(input, new long[] { st.oneOrMore() ? 1 : 0, input.size() });
+    return this;
+  }
+}

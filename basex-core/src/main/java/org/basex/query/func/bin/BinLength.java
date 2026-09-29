@@ -1,0 +1,19 @@
+package org.basex.query.func.bin;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class BinLength extends StandardFunc {
+  @Override
+  public Itr value(final QueryContext qc) throws QueryException {
+    final Bin value = toBin(arg(0), qc);
+    return Itr.get(value.binary(info).length);
+  }
+}

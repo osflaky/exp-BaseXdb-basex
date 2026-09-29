@@ -1,0 +1,101 @@
+package org.basex.io.serial.json;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import org.basex.*;
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.junit.jupiter.api.*;
+
+/**
+ * Tests for the {@link BaseXSerializer} classes.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class BaseXSerializerTest extends SandboxTest {
+  /**
+   * Tests for the 'basex' serialization method.
+   */
+  @Test public void serialize() {
+    // atomic items
+    serialize("()", "");
+    serialize("1", "1");
+    serialize("1, 2", "1\n2");
+    serialize("xs:double('-0'), xs:float('-0')", "-0\n-0");
+
+    // nodes
+    serialize("<x/>", "<x/>");
+    serialize("<x y='z'/>/@y", "y='z'");
+    serialize("namespace x { 'y' }", "xmlns:x='y'");
+
+    // function items
+    serialize("exists#1", "fn:exists#1");
+    serialize("fn:exists#1", "fn:exists#1");
+    serialize("Q{http://www.w3.org/2005/xpath-functions}exists#1", "fn:exists#1");
+    serialize("function($a) { $a }", "fn($a) as item()* { $a }");
+    serialize("exists(?)", "fn:exists#1");
+    serialize("exists#1(?)", "fn:exists#1");
+    serialize("true#0", "fn:true#0");
+    serialize("contains(?, 'x')", "fn($value) as xs:boolean { fn:contains#2($value, 'x') }");
+
+    // maps
+    serialize("{ 'x': 'y' }", "{'x':'y'}");
+    serialize("{ 'x': () }", "{'x':()}");
+    serialize("{ 'x': (1, 2) }", "{'x':(1,2)}");
+    serialize("{ 'x': true#0 }", "{'x':fn:true#0}");
+    serialize("{ 'x': (true#0, false#0) }", "{'x':(fn:true#0,fn:false#0)}");
+    serialize("{ xs:date('2001-01-01'): 'd', '2001-01-01': 'd' }",
+        "{'2001-01-01':'d','2001-01-01':'d'}");
+
+    // arrays
+    serialize("[ true#0 ]", "[fn:true#0]");
+    serialize("[ (true#0, false#0) ]", "[(fn:true#0,fn:false#0)]");
+    serialize("[ (1, 2) ]", "[(1,2)]");
+    serialize("[ () ]", "[()]");
+
+    serialize("[ <a/> ]", "[<a/>]");
+    serialize("[ <a/> update {} ]", "[<a/>]");
+    serialize("[ document { <a/> } ]", "[<a/>]");
+    serialize("[ document { <a/> } update {} ]", "[<a/>]");
+  }
+
+  /**
+   * Tests JNode serialization: root nodes keep their value, non-root nodes keep their key by
+   * being wrapped in their container (map entry, array member with dropped index).
+   */
+  @Test public void jnode() {
+    // root nodes: serialize the wrapped value
+    serialize("jtree({ 'x': 'y' })", "{'x':'y'}");
+    serialize("jtree([ 'x', 'y' ])", "['x','y']");
+
+    // map entries: key is preserved
+    serialize("jtree({ 'a': 1, 'b': 2 })/*", "{'a':1}\n{'b':2}");
+    serialize("jtree({ 'a': (1, 2) })/*", "{'a':(1,2)}");
+    serialize("jtree({ 'a': { 'b': 1 } })/*", "{'a':{'b':1}}");
+    // integer key: still a map entry, not an array member
+    serialize("jtree({ 1: 'x' })/*", "{1:'x'}");
+
+    // array members: index is dropped
+    serialize("jtree([ 'a', ('b', 'c') ])/*", "['a']\n[('b','c')]");
+    serialize("jtree([ { 'a': 1 } ])/*", "[{'a':1}]");
+
+    // one-level wrapping: deeper navigation drops outer keys
+    serialize("jtree({ 'a': { 'b': 1 } })/*/*", "{'b':1}");
+    serialize("jtree([ { 'a': 1 }, { 'b': 2 } ])/*/*", "{'a':1}\n{'b':2}");
+  }
+
+  /**
+   * Serializes the specified input as JSON.
+   * @param query query string
+   * @param expected expected result
+   */
+  private static void serialize(final String query, final String expected) {
+    try(QueryProcessor qp = new QueryProcessor(query, context)) {
+      final String result = normNL(qp.value().serialize().toString().replace("\"", "'"));
+      assertEquals(expected, result, "\n[E] " + expected + "\n[F] " + result + '\n');
+    } catch(final Exception ex) {
+      fail(ex.toString());
+    }
+  }
+}

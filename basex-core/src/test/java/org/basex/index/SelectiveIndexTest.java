@@ -1,0 +1,206 @@
+package org.basex.index;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.util.*;
+
+import org.basex.*;
+import org.basex.core.*;
+import org.basex.core.cmd.*;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Storage tests for the selective index feature (#59).
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class SelectiveIndexTest extends SandboxTest {
+  /** Test file. */
+  private static final String FILE = "src/test/resources/selective.xml";
+
+  /** Prepares a test. */
+  @BeforeEach public void before() {
+    set(MainOptions.STRIPWS, true);
+  }
+
+  /** Tests the text index. */
+  @Test public void textIndex() {
+    map().forEach((key, value) -> {
+      set(MainOptions.TEXTINCLUDE, key);
+      execute(new CreateDB(NAME, FILE));
+      final int size = context.data().textIndex.size();
+      assertEquals(value, size, "TextIndex: \"" + key + "\": ");
+    });
+  }
+
+  /** Tests the attribute index. */
+  @Test public void attrIndex() {
+    try {
+      map().forEach((key, value) -> {
+        set(MainOptions.ATTRINCLUDE, key);
+        execute(new CreateDB(NAME, FILE));
+        final int size = context.data().attrIndex.size();
+        assertEquals(value, size, "AttrIndex: \"" + key + "\": ");
+      });
+    } finally {
+      set(MainOptions.ATTRINCLUDE, "");
+    }
+  }
+
+  /** Tests the token index. */
+  @Test public void tokenIndex() {
+    set(MainOptions.TOKENINDEX, true);
+    try {
+      map().forEach((key, value) -> {
+        set(MainOptions.TOKENINCLUDE, key);
+        execute(new CreateDB(NAME, FILE));
+        final int size = context.data().tokenIndex.size();
+        assertEquals(value, size, "TokenIndex: \"" + key + "\": ");
+      });
+    } finally {
+      set(MainOptions.TOKENINCLUDE, "");
+      set(MainOptions.TOKENINDEX, false);
+    }
+  }
+
+  /** Tests the full-text index. */
+  @Test public void ftIndex() {
+    set(MainOptions.FTINDEX, true);
+    try {
+      map().forEach((key, value) -> {
+        set(MainOptions.FTINCLUDE, key);
+        execute(new CreateDB(NAME, FILE));
+        assertEquals((int) value, context.data().ftIndex.size(), "FTIndex: \"" + key + "\": ");
+      });
+    } finally {
+      set(MainOptions.FTINCLUDE, "");
+      set(MainOptions.FTINDEX, false);
+    }
+  }
+
+  /** Tests the full-text index for mixed content. */
+  @Test public void ftMixed() {
+    set(MainOptions.FTINDEX, true);
+    set(MainOptions.FTMIXED, true);
+    try {
+      // element names are required
+      assertThrows(BaseXException.class, () -> new CreateDB(NAME, FILE).execute(context));
+      // wildcards are permitted: all elements are indexed on all levels
+      set(MainOptions.FTINCLUDE, "*");
+      execute(new CreateDB(NAME, FILE));
+      assertTrue(context.data().meta.ftmixed);
+
+      // option is stored in the metadata, and retained by open and optimize calls
+      set(MainOptions.FTINCLUDE, "a");
+      execute(new CreateDB(NAME, FILE));
+      assertTrue(context.data().meta.ftmixed);
+      execute(new Close());
+      execute(new Open(NAME));
+      assertTrue(context.data().meta.ftmixed);
+      execute(new Optimize());
+      assertTrue(context.data().meta.ftmixed);
+      execute(new Close());
+      query("db:optimize('" + NAME + "', true())");
+      execute(new Open(NAME));
+      assertTrue(context.data().meta.ftmixed);
+
+      // option can be revoked, and the full-text index is rebuilt
+      query("db:optimize('" + NAME + "', false(), { 'ftmixed': false() })");
+      assertFalse(context.data().meta.ftmixed);
+
+      // a new index adopts the current option
+      set(MainOptions.FTMIXED, true);
+      execute(new CreateIndex(IndexType.FULLTEXT));
+      assertTrue(context.data().meta.ftmixed);
+      set(MainOptions.FTMIXED, false);
+      execute(new CreateIndex(IndexType.FULLTEXT));
+      assertFalse(context.data().meta.ftmixed);
+    } finally {
+      set(MainOptions.FTMIXED, false);
+      set(MainOptions.FTINCLUDE, "");
+      set(MainOptions.FTINDEX, false);
+    }
+  }
+
+  /** Tests the ID functions. */
+  @Test public void id() {
+    set(MainOptions.TOKENINDEX, true);
+    try {
+      final String idref = "idref=\"B C\"";
+      final String file = "<xml id=\"A\" " + idref + "/>";
+      final String[] includes = {
+        "", "*", "Q{}*", "Q{id}",
+        "Q{}id", "id", "*:id", "Q{}idref", "idref", "*:idref",
+        "Q{}x", "Q{}x", "x", "*:x", "Q{}x",
+        // does not work, as it would currently indicate that IDREF is included in the index
+        "Q{}ref", "ref", "*:ref",
+      };
+      for(final String include : includes) {
+        try {
+          set(MainOptions.ATTRINCLUDE, include);
+          set(MainOptions.TOKENINCLUDE, include);
+          execute(new CreateDB(NAME, file));
+          query("id('A', .)", file);
+          query("idref('B', .)", idref);
+        } catch(final AssertionError ae) {
+          throw new AssertionError(ae.getMessage() + "\nInclude: '" + include + '\'');
+        }
+      }
+
+      // diverging include filters: token-index completeness must be judged from TOKENINCLUDE,
+      // attribute-index completeness from ATTRINCLUDE (not both from ATTRINCLUDE)
+      set(MainOptions.ATTRINCLUDE, "");
+      set(MainOptions.TOKENINCLUDE, "excludeme");
+      execute(new CreateDB(NAME, file));
+      query("id('A', .)", file);
+      query("idref('B', .)", idref);
+
+      set(MainOptions.ATTRINCLUDE, "excludeme");
+      set(MainOptions.TOKENINCLUDE, "");
+      execute(new CreateDB(NAME, file));
+      query("id('A', .)", file);
+      query("idref('B', .)", idref);
+    } finally {
+      set(MainOptions.ATTRINCLUDE, "");
+      set(MainOptions.TOKENINCLUDE, "");
+      set(MainOptions.TOKENINDEX, false);
+    }
+  }
+
+  /** Tests the ID functions on a database with namespaces (index check unsupported: scan). */
+  @Test public void idNamespaces() {
+    set(MainOptions.TOKENINDEX, true);
+    try {
+      // include filter targets a namespaced attribute, so the no-namespace idref
+      // attributes are not indexed; namespaces must force a sequential scan
+      final String file = "<root xmlns:p='URI1'><p:dummy/>" +
+          "<a idref='AAA'/><b idref='BBB'/></root>";
+      set(MainOptions.ATTRINCLUDE, "Q{URI1}idref");
+      set(MainOptions.TOKENINCLUDE, "Q{URI1}idref");
+      execute(new CreateDB(NAME, file));
+      query("count(idref(('AAA', 'BBB'), .))", 2);
+    } finally {
+      set(MainOptions.ATTRINCLUDE, "");
+      set(MainOptions.TOKENINCLUDE, "");
+      set(MainOptions.TOKENINDEX, false);
+    }
+  }
+
+  /**
+   * Returns a map with name tests.
+   * @return map
+   */
+  private static HashMap<String, Integer> map() {
+    final LinkedHashMap<String, Integer> map = new LinkedHashMap<>();
+    map.put("", 5);
+    map.put("*", 5);
+    map.put("*:*", 5);
+    map.put("a", 1);
+    map.put("*:c", 2);
+    map.put("Q{ns}*", 2);
+    map.put("Q{ns}c", 1);
+    return map;
+  }
+}

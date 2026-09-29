@@ -1,0 +1,159 @@
+package org.basex.query.value.node;
+
+import static org.basex.util.Token.*;
+
+import org.basex.query.util.list.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Node builder.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FBuilder {
+  /** Empty namespace array. */
+  private static final Atts NO_NAMESPACES = new Atts(0);
+  /** Empty node array. */
+  private static final FNode[] NO_NODES = {};
+
+  /** Parent node (can be {@code null}). */
+  public FNode root;
+  /** Namespaces (can be {@code null}). */
+  public Atts namespaces;
+  /** Namespaces inherited from enclosing constructors (can be {@code null}). */
+  public Atts nsInherited;
+ /** Attributes (can be {@code null}). */
+  public GNodeList attributes;
+  /** Children (can be {@code null}). */
+  public GNodeList children;
+
+  /**
+   * Constructor.
+   */
+  public FBuilder() { }
+
+  /**
+   * Constructor.
+   * @param root root node
+   */
+  FBuilder(final FNode root) {
+    this.root = root;
+  }
+
+  /**
+   * Finalizes and adds a node.
+   * @param builder builder
+   * @return self reference
+   */
+  public FBuilder node(final FBuilder builder) {
+    return node(builder.finish());
+  }
+
+  /**
+   * Adds a node.
+   * @param node node to be added
+   * @return self reference
+   */
+  public FBuilder node(final GNode node) {
+    final boolean attr = node.kind() == Kind.ATTRIBUTE;
+    GNodeList nodes = attr ? attributes : children;
+    if(nodes == null) {
+      nodes = new GNodeList();
+      if(attr) attributes = nodes;
+      else children = nodes;
+    }
+    nodes.add(node);
+    ((XNode) node).parent(root);
+    return this;
+  }
+
+  /**
+   * Creates and adds a text node if the specified value is not {@code null} and non-empty.
+   * @param value value of text node (can be {@code null})
+   * @return self reference
+   */
+  public FBuilder text(final byte[] value) {
+    return value != null && value.length != 0 ? node(new FTxt(value)) : this;
+  }
+
+  /**
+   * Creates and adds a text node if the specified value is not {@code null} and non-empty.
+   * @param value value of text node (can be {@code null})
+   * @return self reference
+   */
+  public FBuilder text(final Object value) {
+    return value != null ? text(token(value.toString())) : this;
+  }
+
+  /**
+   * Creates and adds an attribute if the specified value is not {@code null}.
+   * @param name attribute name
+   * @param value attribute value (can be {@code null})
+   * @return self reference
+   */
+  public FBuilder attr(final QNm name, final byte[] value) {
+    return value != null ? node(new FAttr(name, value)) : this;
+  }
+
+  /**
+   * Creates and adds an attribute if the specified value is not {@code null}.
+   * @param name attribute name
+   * @param value attribute value (can be {@code null})
+   * @return self reference
+   */
+  public FBuilder attr(final QNm name, final Object value) {
+    return value != null ? attr(name, token(value.toString())) : this;
+  }
+
+  /**
+   * Adds a namespace declaration.
+   * @param prefix prefix
+   * @param uri URI
+   * @return self reference
+   */
+  public FBuilder ns(final byte[] prefix, final byte[] uri) {
+    if(namespaces == null) namespaces = new Atts();
+    namespaces.add(prefix, uri);
+    return this;
+  }
+
+  /**
+   * Renames the root element (namespace conflict).
+   * @param name new name
+   */
+  public void rename(final QNm name) {
+    ((FElem) root).rename(name);
+  }
+
+  /**
+   * Adds a namespace declaration for the QName of this element.
+   * @return self reference
+   */
+  public FBuilder ns() {
+    final QNm name = root.qname();
+    return ns(name.prefix(), name.uri());
+  }
+
+  /**
+   * Indicates if the node lists are empty.
+   * @return result of check
+   */
+  public boolean isEmpty() {
+    return attributes == null && children == null;
+  }
+
+  /**
+   * Finishes the node construction.
+   * @return constructed node
+   */
+  public FNode finish() {
+    final Atts ns = namespaces != null ? namespaces.optimize() : NO_NAMESPACES;
+    final GNode[] at = attributes != null ? attributes.finish() : NO_NODES;
+    final GNode[] ch = children != null ? children.finish() : NO_NODES;
+    return root instanceof final FElem felem ? felem.finish(ns, nsInherited, at, ch) :
+      ((FDoc) root).finish(ch);
+  }
+}

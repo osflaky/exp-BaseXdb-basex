@@ -1,0 +1,714 @@
+package org.basex.query.func.java;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+import static org.basex.util.Token.*;
+
+import java.lang.reflect.*;
+import java.lang.reflect.Array;
+import java.util.*;
+
+import javax.xml.datatype.*;
+import javax.xml.namespace.*;
+
+import org.basex.core.*;
+import org.basex.core.MainOptions.*;
+import org.basex.core.locks.*;
+import org.basex.core.users.*;
+import org.basex.query.*;
+import org.basex.query.QueryModule.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.util.pkg.*;
+import org.basex.query.value.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.query.value.type.Type;
+import org.basex.util.*;
+import org.basex.util.list.*;
+import org.basex.util.similarity.*;
+import org.w3c.dom.*;
+import org.w3c.dom.Text;
+
+/**
+ * This class contains common methods for executing Java code and mapping
+ * Java objects to XQuery values.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class JavaCall extends Arr {
+  /** Placeholder for invalid Java arguments. */
+  private static final Object INVALID = new Object();
+
+  /** Updating flag. */
+  public final boolean updating;
+  /** Permission. */
+  final Perm perm;
+  /** Indicates if function parameters are XQuery types (can be {@code null}). */
+  boolean[] xquery;
+
+  /**
+   * Constructor.
+   * @param args arguments
+   * @param perm required permission to run the function
+   * @param updating updating flag
+   * @param info input info (can be {@code null})
+   */
+  JavaCall(final Expr[] args, final Perm perm, final boolean updating, final InputInfo info) {
+    super(info, Types.ITEM_ZM, args);
+    this.updating = updating;
+    this.perm = perm;
+  }
+
+  @Override
+  public final Value value(final QueryContext qc) throws QueryException {
+    // check permission
+    if(!qc.user.has(perm)) throw BASEX_PERMISSION_X_X.get(info, perm, this);
+
+    final Value value = eval(qc, qc.context.options.get(MainOptions.WRAPJAVA));
+    if(!updating) return value;
+
+    // updating function: cache output
+    qc.updates().addOutput(value, qc);
+    return Empty.VALUE;
+  }
+
+  @Override
+  public final boolean accept(final ASTVisitor visitor) {
+    return visitor.javaCall(this) && super.accept(visitor);
+  }
+
+  /**
+   * Returns the result of the evaluated Java function.
+   * @param qc query context
+   * @param wrap wrap options
+   * @return result value
+   * @throws QueryException query exception
+   */
+  protected abstract Value eval(QueryContext qc, WrapOptions wrap) throws QueryException;
+
+  /**
+   * Evaluates the arguments.
+   * @param qc query context
+   * @return arguments
+   * @throws QueryException query exception
+   */
+  final Value[] values(final QueryContext qc) throws QueryException {
+    final ValueList list = new ValueList(exprs.length);
+    for(final Expr expr : exprs) list.add(expr.value(qc));
+    return list.finish();
+  }
+
+  /**
+   * Returns a candidate with function arguments if the XQuery arguments match the Java arguments.
+   * @param args arguments
+   * @param params expected parameters
+   * @param stat static flag
+   * @return candidate with Java arguments, or {@code null}
+   * @throws QueryException query exception
+   */
+  final JavaCandidate candidate(final Value[] args, final Class<?>[] params, final boolean stat)
+      throws QueryException {
+
+    // start with second argument if function is not static
+    final int s = stat ? 0 : 1, pl = params.length;
+    if(pl != args.length - s) return null;
+
+    // function arguments
+    final JavaCandidate jc = new JavaCandidate(pl);
+    for(int p = 0; p < pl; p++) {
+      final Value arg = args[p + s];
+      final Class<?> param = params[p];
+      final Object value = convert(arg, param, p);
+      if(value == INVALID) return null;
+
+      // check if parameter and argument types match exactly
+      jc.exact = jc.exact && JavaMapping.type(param, false) == arg.seqType().type;
+      jc.arguments[p] = value;
+    }
+    return jc;
+  }
+
+  /**
+   * Converts an XQuery value to a Java value.
+   * @param arg argument
+   * @param param expected parameter
+   * @param p parameter offset
+   * @return value or {@code null}
+   * @throws QueryException query exception
+   */
+  private Object convert(final Value arg, final Class<?> param, final int p) throws QueryException {
+    // XQuery expression: value must not be converted
+    if(param == Expr.class) return arg;
+
+    // argument to a Java object if a mapping entry exists
+    final Type type = JavaMapping.type(param, true);
+    if(type != null && arg.type.instanceOf(type)) return arg.toJava();
+
+    // convert empty array to target type
+    if(arg instanceof XQArray && arg.structSize() == 0 && param.isArray()) {
+      final Class<?> atype = param.getComponentType();
+      if(atype == boolean.class) return new boolean[0];
+      if(atype == byte.class) return new byte[0];
+      if(atype == short.class) return new short[0];
+      if(atype == char.class) return new char[0];
+      if(atype == int.class) return new int[0];
+      if(atype == long.class) return new long[0];
+      if(atype == float.class) return new float[0];
+      if(atype == double.class) return new double[0];
+      if(atype == String.class) return new String[0];
+      return new Object[0];
+    }
+
+    // convert empty number to the smallest type
+    if(arg instanceof final ANum num) {
+      final double d = num.dbl();
+      if((param == byte.class  || param == Byte.class)      && (byte)  d == d) return (byte)   d;
+      if((param == short.class || param == Short.class)     && (short) d == d) return (short)  d;
+      if((param == char.class  || param == Character.class) && (char)  d == d) return (char)   d;
+      if((param == int.class   || param == Integer.class)   && (int)   d == d) return (int)    d;
+      if((param == float.class || param == Float.class)     && (float) d == d) return (float)  d;
+      if(param == double.class || param == Double.class)                       return d;
+    }
+
+    // convert to Java object
+    // - if argument is a Java object wrapper, or
+    // - if function parameter is not a {@link Value} instance
+    final Object value = arg instanceof XQJava ||
+      !(xquery != null ? xquery[p] : Value.class.isAssignableFrom(param)) ? arg.toJava() : arg;
+
+    // return value
+    // - if argument is an instance of the function parameter, or
+    // - if value is null and parameter is not primitive
+    if(param.isInstance(value) || value == null && !param.isPrimitive()) return value;
+
+    // give up
+    return INVALID;
+  }
+
+  /**
+   * Finds the best candidate.
+   * Removes approximate candidates if some are exactly matching.
+   * @param candidates candidates
+   * @return best candidate, or {@code null} if multiple candidates are left
+   */
+  static JavaCandidate bestCandidate(final ArrayList<JavaCandidate> candidates) {
+    if(Checks.any(candidates, jc -> jc.exact)) {
+      for(int c = candidates.size() - 1; c >= 0; c--) {
+        if(!candidates.get(c).exact) candidates.remove(c);
+      }
+    }
+    return candidates.size() == 1 ? candidates.getFirst() : null;
+  }
+
+  /**
+   * Returns a Java execution error.
+   * @param th throwable
+   * @param args converted arguments
+   * @return exception
+   */
+  final QueryException executionError(final Throwable th, final Object... args) {
+    final Throwable root = Util.rootException(th);
+    return root instanceof final QueryException qe ? qe.info(info) :
+      JAVAEXEC_X_X_X.get(info, root, name(), JavaCall.argTypes(args));
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Converts the specified object to an XQuery value.
+   * @param object result object
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return value
+   * @throws QueryException query exception
+   */
+  public static Value toValue(final Object object, final QueryContext qc, final InputInfo info)
+      throws QueryException {
+    return toValue(object, qc, info, qc.context.options.get(MainOptions.WRAPJAVA));
+  }
+
+  /**
+   * Converts the specified object to an XQuery value.
+   * @param object result object (can be {@code null})
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @param wrap wrap options
+   * @return value
+   * @throws QueryException query exception
+   */
+  public static Value toValue(final Object object, final QueryContext qc, final InputInfo info,
+      final WrapOptions wrap) throws QueryException {
+
+    // return XQuery types unchanged
+    if(object instanceof final Value value) return value;
+    if(object instanceof final Iter iter) return iter.value(qc, null);
+
+    if(wrap != WrapOptions.ALL) {
+      // null values
+      if(object == null) return Empty.VALUE;
+
+      // values with XQuery types
+      final Type type = type(object);
+      if(type != null) return type.cast(object, qc, null);
+
+      // arrays
+      if(object.getClass().isArray()) {
+        // empty array
+        final int s = Array.getLength(object);
+        if(s == 0) return Empty.VALUE;
+
+        // primitive arrays
+        if(object instanceof final boolean[] values) return BlnSeq.get(values);
+        if(object instanceof final byte[] values)    return BytSeq.get(values);
+        if(object instanceof final short[] values)   return ShrSeq.get(values);
+        if(object instanceof final int[] values)     return IntSeq.get(values);
+        if(object instanceof final float[] values)   return FltSeq.get(values);
+        if(object instanceof final double[] values)  return DblSeq.get(values);
+        // char array
+        if(object instanceof final char[] values) {
+          final IntList list = new IntList(values.length);
+          for(final int value : values) list.add(value);
+          return IntSeq.get(list.finish(), BasicType.UNSIGNED_LONG);
+        }
+        // integer array
+        if(object instanceof final long[] values) return LongSeq.get(values);
+        // check for null values
+        for(final Object obj : (Object[]) object) {
+          if(obj == null) throw JAVANULL.get(info);
+        }
+        // string array
+        if(object instanceof final String[] values) {
+          final TokenList list = new TokenList(values.length);
+          for(final String string : values) list.add(string);
+          return StrSeq.get(list);
+        }
+        // any other array (including nested ones)
+        final Object[] array = (Object[]) object;
+        final ValueBuilder vb = new ValueBuilder(qc, array.length);
+        for(final Object value : array) vb.add(toValue(value, qc, info, wrap));
+        return vb.value();
+      }
+
+      // data structures
+      if(wrap == WrapOptions.NONE) {
+        final ValueBuilder vb = new ValueBuilder(qc);
+        if(object instanceof final Iterable iter) {
+          for(final Object obj : iter) vb.add(toValue(obj, qc, info, wrap));
+        } else if(object instanceof final Iterator ir) {
+          while(ir.hasNext()) vb.add(toValue(ir.next(), qc, info, wrap));
+        } else if(object instanceof Map) {
+          final MapBuilder mb = new MapBuilder();
+          for(final Map.Entry<?, ?> entry : ((Map<?, ?>) object).entrySet()) {
+            qc.checkStop();
+            final Item key = toValue(entry.getKey(), qc, info, wrap).item(qc, info);
+            final Value value = toValue(entry.getValue(), qc, info, wrap);
+            mb.put(key, value);
+          }
+          vb.add(mb.map());
+        } else {
+          vb.add(Str.get(object.toString()));
+        }
+        return vb.value();
+      }
+    }
+    // wrap Java object
+    return new XQJava(object);
+  }
+
+  /**
+   * Returns a new Java function instance.
+   * @param qname function name
+   * @param args arguments
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return Java function or {@code null}
+   * @throws QueryException query exception
+   */
+  public static JavaCall get(final QNm qname, final Expr[] args, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+
+    // rewrite function name, extract argument types
+    String name = Strings.camelCase(string(qname.local()));
+    String[] types = null;
+    final int n = name.indexOf('\u00b7');
+    if(n != -1) {
+      final StringList list = new StringList();
+      for(final String type : Strings.split(name.substring(n + 1), '\u00b7')) {
+        list.add(classPath(type.replace(DOTS, "[]")));
+      }
+      types = list.finish();
+      name = name.substring(0, n);
+    }
+    final String uri = string(qname.uri());
+    if(!uri.isEmpty()) {
+      // check if URI starts with "java:" prefix. if yes, skip rewritings
+      final boolean enforce = uri.startsWith(JAVA_PREFIX_COLON);
+      final String className = classPath(enforce ? uri.substring(JAVA_PREFIX_COLON.length()) :
+        Strings.uriToClasspath(Strings.uri2path(uri)));
+
+      // function in Java module imported by the calling module
+      final ModuleLoader modules = qc.resources.modules();
+      final Object module  = modules.findModule(className);
+      if(module != null && info.sc().imports.contains(qname.uri())) {
+        final Method meth = moduleMethod(module, name, args.length, types, qname, qc, info);
+        final Requires req = meth.getAnnotation(Requires.class);
+        final Perm perm = req == null ? Perm.ADMIN :
+          Enums.get(Perm.class, req.value().name().toLowerCase(Locale.ENGLISH));
+        final boolean updating = meth.getAnnotation(Updating.class) != null;
+        if(updating) qc.updating();
+        return new StaticJavaCall(module, meth, args, perm, updating, info);
+      }
+
+      /* skip Java class lookup if...
+       * - no java prefix was supplied, and
+       * - if URI equals namespace of library module or if it is globally declared
+       *
+       * examples:
+       * - declare function local:f($i) { if($i) then local:f($i - 1) else () }
+       * - module namespace _ = '_'; declare function _:_() { _:_() };
+       * - fn:does-not-exist(), util:not-available()
+       */
+      if(enforce || (info.sc().module == null || !eq(info.sc().module.uri(), qname.uri())) &&
+          NSGlobal.prefix(qname.uri()).length == 0) {
+
+        // Java constructor, function, or variable
+        Class<?> clazz = null;
+        try {
+          clazz = modules.findClass(className);
+        } catch(final ClassNotFoundException ignore) {
+          // class not found
+        } catch(final Throwable th) {
+          throw JAVAINIT_X_X.get(info, Util.className(th), th);
+        }
+
+        if(clazz == null) {
+          // class not found, java prefix was specified
+          if(enforce) throw JAVACLASS_X.get(info, className);
+        } else {
+          // constructor
+          if(name.equals(NEW)) {
+            final DynJavaConstr djc = new DynJavaConstr(clazz, types, args, info);
+            if(djc.init(enforce)) return djc;
+          }
+          // field or method
+          final DynJavaFunc djf = new DynJavaFunc(clazz, name, types, args, info);
+          if(djf.init(enforce)) return djf;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Gets the specified method from a query module.
+   * @param module query module object
+   * @param name method name
+   * @param arity number of arguments
+   * @param types types provided in the query (can be {@code null})
+   * @param qname original name
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return method if found
+   * @throws QueryException query exception
+   */
+  private static Method moduleMethod(final Object module, final String name, final int arity,
+      final String[] types, final QNm qname, final QueryContext qc, final InputInfo info)
+      throws QueryException {
+
+    // find method with identical name and arity
+    final IntList arities = new IntList();
+    final HashMap<String, ArrayList<Method>> allMethods = methods(module.getClass(), info);
+    final ArrayList<Method> candidates = candidates(allMethods, name, types, arity, arities, true);
+    final int cs = candidates.size();
+    if(cs == 0) {
+      final TokenList names = new TokenList();
+      for(final String method : allMethods.keySet()) names.add(method);
+      throw noMember(name, types, arity, arities, names.finish(), info, string(qname.string()));
+    }
+    if(cs > 1) throw JAVAMULTIPLE_X_X.get(info, qname.string(),
+        paramTypes(candidates.toArray(Executable[]::new), false));
+
+    // single method found: add module locks to query context
+    final Method method = candidates.getFirst();
+    final Lock lock = method.getAnnotation(Lock.class);
+    if(lock != null) qc.locks.add(Locking.BASEX_PREFIX + lock.value());
+    return method;
+  }
+
+  /**
+   * Returns an error message (no field or method could be chosen for execution).
+   * @param name name of field or method
+   * @param types types (can be {@code null})
+   * @param arity supplied arity
+   * @param arities arities of found methods
+   * @param names list of available names
+   * @param info input info (can be {@code null})
+   * @param member name of field or method (for error messages)
+   * @return exception
+   */
+  static QueryException noMember(final String name, final String[] types, final int arity,
+      final IntList arities, final byte[][] names, final InputInfo info, final String member) {
+    // functions with different arities
+    if(!arities.isEmpty()) return Functions.wrongArity(arity, arities, false, info, member);
+
+    // find similar field/method names
+    final byte[] nm = token(name);
+    final byte[] similar = Levenshtein.similar(nm, names);
+    if(similar != null && eq(nm, similar)) {
+      // if name is equal, no function was chosen via exact type matching
+      final StringJoiner sj = new StringJoiner(", ", "(", ")");
+      for(final String type : types) sj.add(className(type));
+      return JAVAARGS_X_X.get(info, member, sj);
+    }
+    return JAVAMEMBER_X.get(info, similar(member, similar));
+  }
+
+  /**
+   * Returns a map with all relevant methods for a class.
+   * @param clazz class
+   * @param info input info (can be {@code null})
+   * @return methods
+   * @throws QueryException query exception
+   */
+  static HashMap<String, ArrayList<Method>> methods(final Class<?> clazz, final InputInfo info)
+      throws QueryException {
+    final HashSet<String> names = new HashSet<>();
+    final HashMap<String, ArrayList<Method>> list = new HashMap<>();
+    try {
+      for(final boolean bridge : new boolean[] { false, true }) {
+        for(final Method method : clazz.getMethods()) {
+          if(bridge == method.isBridge()) {
+            final StringBuilder id = new StringBuilder(method.getName()).append('-');
+            for(final Class<?> type : method.getParameterTypes()) {
+              id.append(type.getName()).append('-');
+            }
+            if(names.add(id.toString())) {
+              list.computeIfAbsent(method.getName(), n -> new ArrayList<>(1)).add(method);
+            }
+          }
+        }
+      }
+    } catch(final LinkageError ex) {
+      // referenced class could not be linked (e.g. temporarily unavailable during a rebuild)
+      throw JAVAINIT_X_X.get(info, Util.className(ex), ex);
+    }
+    return list;
+  }
+
+  /**
+   * Returns the methods with the specified name.
+   * @param methods methods
+   * @param name name
+   * @param types types
+   * @param arity arity
+   * @param arities arities
+   * @param stat static calls
+   * @return methods
+   */
+  static ArrayList<Method> candidates(final HashMap<String, ArrayList<Method>> methods,
+      final String name, final String[] types, final int arity, final IntList arities,
+      final boolean stat) {
+    final ArrayList<Method> list = new ArrayList<>(1), mthds = methods.get(name);
+    if(mthds != null) {
+      for(final Method method : mthds) {
+        final Class<?>[] params = method.getParameterTypes();
+        final int al = params.length + (stat || isStatic(method) ? 0 : 1);
+        if(al == arity) {
+          if(typesMatch(params, types)) list.add(method);
+        } else {
+          arities.add(al);
+        }
+      }
+    }
+    return list;
+  }
+
+  /**
+   * Returns a fully qualified class name.
+   * @param name class string
+   * @return normalized name
+   */
+  public static String classPath(final String name) {
+    // prepend standard package if name starts with uppercase letter and has no dots
+    //   String → java.lang.String
+    //   char[] → char[]
+    return name.replaceAll("^([A-Z][^.]+)$", JAVA_LANG_DOT + "$1");
+  }
+
+  /**
+   * Returns a normalized class name without path to standard package.
+   * @param clazz class
+   * @return normalized name
+   */
+  static String className(final Class<?> clazz) {
+    return className(clazz.getCanonicalName());
+  }
+
+  /**
+   * Returns a normalized class name without path to standard package.
+   * @param name class string
+   * @return normalized name
+   */
+  static String className(final String name) {
+    return name.startsWith(JAVA_LANG_DOT) ? name.substring(JAVA_LANG_DOT.length()) : name;
+  }
+
+  /**
+   * Checks if the specified executable is static.
+   * Constructor is treated as static, as no instance reference exists.
+   * @param exec executable (constructor, method)
+   * @return result of check
+   */
+  static boolean isStatic(final Executable exec) {
+    return exec instanceof Constructor || Modifier.isStatic(exec.getModifiers());
+  }
+
+  /**
+   * Checks if the specified field is static.
+   * @param field field
+   * @return result of check
+   */
+  static boolean isStatic(final Field field) {
+    return Modifier.isStatic(field.getModifiers());
+  }
+
+  /**
+   * Returns parameters from the specified executables.
+   * @param execs executables
+   * @param xquery xquery include XQuery types
+   * @return string
+   */
+  static String paramTypes(final Executable[] execs, final boolean xquery) {
+    final StringJoiner sj = new StringJoiner(", ");
+    for(final Executable exec : execs) sj.add(paramTypes(exec, xquery));
+    return sj.toString();
+  }
+
+  /**
+   * Returns the parameters types from the specified executable.
+   * @param exec executable (constructor, method)
+   * @param xquery xquery include XQuery types
+   * @return string
+   */
+  static String paramTypes(final Executable exec, final boolean xquery) {
+    final StringJoiner sj = new StringJoiner(", ", "(", ")");
+    for(final Class<?> param : exec.getParameterTypes()) {
+      final Type type = xquery ? JavaMapping.type(param, false) : null;
+      sj.add(type != null ? type.toString() : className(param));
+    }
+    return sj.toString();
+  }
+
+  /**
+   * Returns a string representation of the XQuery or Java types from the specified arguments.
+   * @param args arguments
+   * @return types string
+   */
+  static String argTypes(final Object[] args) {
+    final StringJoiner sj = new StringJoiner(", ", "(", ")");
+    for(final Object arg : args) sj.add(argType(arg));
+    return sj.toString();
+  }
+
+  /**
+   * Returns a string representation of the XQuery or Java type from the specified argument.
+   * @param argument argument
+   * @return type string
+   */
+  static String argType(final Object argument) {
+    final Object object = argument instanceof final XQJava java ? java.toJava() : argument;
+    return object instanceof final Value value ? value.seqType().toString() :
+      object == null ? Util.info(null) :
+      Util.className(object);
+  }
+
+  /**
+   * Compares the types of method parameters with the specified types.
+   * @param pTypes parameter types
+   * @param qTypes query types (can be {@code null})
+   * @return result of check
+   */
+  static boolean typesMatch(final Class<?>[] pTypes, final String[] qTypes) {
+    // no query types: accept method
+    if(qTypes == null) return true;
+    // compare types
+    final int pl = pTypes.length;
+    if(pl != qTypes.length) return false;
+    for(int p = 0; p < pl; p++) {
+      if(!qTypes[p].equals(pTypes[p].getCanonicalName())) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Returns an appropriate XQuery type for the specified Java object.
+   * @param object object
+   * @return item type or {@code null} if no appropriate type was found
+   */
+  private static Type type(final Object object) {
+    final Type type = JavaMapping.type(object.getClass(), true);
+    if(type != null) return type;
+
+    if(object instanceof Element) return NodeType.ELEMENT;
+    if(object instanceof Document || object instanceof DocumentFragment) return NodeType.DOCUMENT;
+    if(object instanceof Attr) return NodeType.ATTRIBUTE;
+    if(object instanceof Comment) return NodeType.COMMENT;
+    if(object instanceof ProcessingInstruction) return NodeType.PROCESSING_INSTRUCTION;
+    if(object instanceof Text) return NodeType.TEXT;
+
+    if(object instanceof final Duration duration) {
+      return !duration.isSet(DatatypeConstants.YEARS) && !duration.isSet(DatatypeConstants.MONTHS)
+          ? BasicType.DAY_TIME_DURATION : !duration.isSet(DatatypeConstants.HOURS) &&
+          !duration.isSet(DatatypeConstants.MINUTES) && !duration.isSet(DatatypeConstants.SECONDS)
+          ? BasicType.YEAR_MONTH_DURATION : BasicType.DURATION;
+    }
+
+    if(object instanceof final XMLGregorianCalendar calendar) {
+      final QName qnm = calendar.getXMLSchemaType();
+      if(qnm == DatatypeConstants.DATE) return BasicType.DATE;
+      if(qnm == DatatypeConstants.DATETIME) return BasicType.DATE_TIME;
+      if(qnm == DatatypeConstants.TIME) return BasicType.TIME;
+      if(qnm == DatatypeConstants.GYEARMONTH) return BasicType.G_YEAR_MONTH;
+      if(qnm == DatatypeConstants.GMONTHDAY) return BasicType.G_MONTH_DAY;
+      if(qnm == DatatypeConstants.GYEAR) return BasicType.G_YEAR;
+      if(qnm == DatatypeConstants.GMONTH) return BasicType.G_MONTH;
+      if(qnm == DatatypeConstants.GDAY) return BasicType.G_DAY;
+    }
+    return null;
+  }
+
+  /**
+   * Returns an XQuery string representation of the Java entity of this expression.
+   * @return string
+   */
+  abstract String desc();
+
+  /**
+   * Returns the name of the Java entity.
+   * @return string
+   */
+  abstract String name();
+
+  @Override
+  public final String description() {
+    return desc() + "(...)";
+  }
+
+  @Override
+  public final void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this, NAME, name()), exprs);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.token(desc()).params(exprs);
+  }
+}

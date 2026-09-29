@@ -1,0 +1,185 @@
+package org.basex.query.expr.path;
+
+import java.util.*;
+import java.util.List;
+
+import org.basex.data.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.path.NameTest.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Abstract node test.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class Test extends ExprInfo {
+  /** Node kind. */
+  public final Kind kind;
+
+  /**
+   * Constructor.
+   * @param kind node kind
+   */
+  Test(final Kind kind) {
+    this.kind = kind;
+  }
+
+  /**
+   * Creates a new test.
+   * @param kind node kind (can be {@code null})
+   * @param qname node name (can be {@code null})
+   * @param scope scope (can be {@code null})
+   * @param ns default element namespace (used for optimizations, can be {@code null})
+   * @return test
+   */
+  public static Test get(final Kind kind, final QNm qname, final Scope scope, final byte[] ns) {
+    final QNm n = qname != null ? qname : QNm.EMPTY;
+    final Kind k = kind != null ? kind : Kind.NODE;
+    final Scope s = scope == Scope.FLEXIBLE && k.instanceOf(Kind.XNODE) ? Scope.FULL :
+      scope != null ? scope : k == Kind.PROCESSING_INSTRUCTION ? Scope.LOCAL : Scope.FULL;
+
+    if(k != Kind.NODE) {
+      // element(*), attribute(*), jnode(*)
+      if(s == Scope.ALL || n == QNm.EMPTY) return NodeTest.get(k);
+      // jnode(a)
+      if(s == Scope.FLEXIBLE && k == Kind.JNODE) return JNodeTest.get(JNodeTest.key(n), null);
+    }
+    return new NameTest(n, s, k, ns);
+  }
+
+  /**
+   * Creates a single test.
+   * @param tests tests to be merged (can contain {@code null} references)
+   * @return test, or {@code null} due to missing tests or {@code null} references
+   */
+  public static Test get(final List<Test> tests) {
+    final int ts = tests.size();
+    if(ts == 0) return null;
+    if(ts == 1) return tests.getFirst();
+
+    final List<Test> list = new ArrayList<>(ts);
+    for(final Test test : tests) {
+      if(test instanceof final UnionTest ut) {
+        for(final Test t : ut.tests) merge(t, list);
+      } else if(test != null) {
+        merge(test, list);
+      } else {
+        return null;
+      }
+    }
+    return list.size() == 1 ? list.getFirst() : new UnionTest(list.toArray(Test[]::new));
+  }
+
+  /**
+   * Merges a test into the union test list.
+   * @param test test to be merged
+   * @param list list
+   */
+  private static void merge(final Test test, final List<Test> list) {
+    final int ls = list.size();
+    for(int l = 0; l < ls; l++) {
+      final Test t = list.get(l);
+      // skip URI-based comparisons (may not be assigned yet at parse time)
+      if(test instanceof final NameTest ntest && t instanceof final NameTest nt && (
+          ntest.scope == NameTest.Scope.URI || nt.scope == NameTest.Scope.URI)) continue;
+      // * union A
+      if(test.instanceOf(t)) return;
+      // A union * → *
+      if(t.instanceOf(test)) {
+        list.set(l, test);
+        return;
+      }
+    }
+    // A union B → (A|B)
+    list.add(test);
+  }
+
+  /**
+   * Optimizes the test.
+   * @param kn kind of step input (can be {@code null})
+   * @param data data reference (can be {@code null}); used to test if the test may be successful
+   * @return resulting test, or {@code null} if the test yields no results
+   */
+  @SuppressWarnings("unused")
+  public Test optimize(final Kind kn, final Data data) {
+    return this;
+  }
+
+  /**
+   * Checks if the specified node matches the test.
+   * @param node node to be checked
+   * @return result of check
+   */
+  public abstract boolean matches(GNode node);
+
+  /**
+   * Returns the JNode key that is exclusively addressed by this test.
+   * @return key, or {@code null} if no or more than one key is addressed
+   */
+  public Item key() {
+    return null;
+  }
+
+  /**
+   * Checks whether the type of this test is a supertype of the specified type.
+   * The runtime type may be any of its subtypes.
+   * @param type type to check
+   * @return {@link Boolean#TRUE} if the type subsumes the specified type;
+   *         {@link Boolean#FALSE} if it does not;
+   *         {@code null}          if the relationship is unknown
+   */
+  public Boolean subsumes(@SuppressWarnings("unused") final Type type) {
+    return null;
+  }
+
+  /**
+   * Copies this test.
+   * @return deep copy
+   */
+  public abstract Test copy();
+
+  /**
+   * Checks if the current test is an instance of the specified test.
+   * @param test test to be checked
+   * @return result of check
+   */
+  public boolean instanceOf(final Test test) {
+    if(test instanceof final UnionTest ut) {
+      for(final Test t : ut.tests) {
+        if(instanceOf(t)) return true;
+      }
+      return false;
+    }
+    return test instanceof NodeTest && kind.instanceOf(test.kind);
+  }
+
+  /**
+   * Computes the intersection between two tests.
+   * @param test other test
+   * @return intersection if it exists, {@code null} otherwise
+   */
+  public abstract Test intersect(Test test);
+
+  /**
+   * Returns a string representation of this test.
+   * @param type include type information
+   * @return string
+   */
+  public abstract String toString(boolean type);
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    throw Util.notExpected();
+  }
+
+  @Override
+  public final void toString(final QueryString qs) {
+    qs.token(toString(true));
+  }
+}

@@ -1,0 +1,424 @@
+package org.basex.data;
+
+import static org.basex.core.Text.*;
+import static org.basex.data.DataText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+
+import org.basex.build.*;
+import org.basex.core.*;
+import org.basex.core.cmd.*;
+import org.basex.index.*;
+import org.basex.index.ft.*;
+import org.basex.index.name.*;
+import org.basex.index.path.*;
+import org.basex.index.value.*;
+import org.basex.io.*;
+import org.basex.io.in.DataInput;
+import org.basex.io.out.DataOutput;
+import org.basex.io.random.*;
+import org.basex.util.*;
+
+/**
+ * This class stores and organizes the database table and the index structures
+ * for textual content in a compressed disk structure.
+ * The table mapping is documented in {@link Data}.
+ *
+ * Texts may be inlined on disk. The bits of the first byte of the 5-byte text reference can be
+ * decoded as follows:
+ *
+ * <pre>
+ * Bit 0 [INLINED]    indicates if value is inlined in table or stored externally
+ * Bit 1 [COMPRESSED] indicates if value is compressed
+ * Bit 2 [STRING]     indicates if an inlined value is a string
+ *
+ * - INLINED (text is inlined):
+ *   - STRING (value is string):
+ *     - Bits 4-7 contain string length
+ *     - 32 remaining bits contain inlined string
+ *     - COMPRESSED: unpack and return inlined text
+ *     - NOT COMPRESSED: return text unchanged
+ *   - NOT STRING (value is integer):
+ *     - return 32 bits of remaining 4 bytes as integer
+ * - NOT INLINED (text is stored externally):
+ *   - 38 remaining bits contain text reference
+ *   - COMPRESSED: unpack and return external text
+ *   - NOT COMPRESSED: return external text unchanged
+ * </pre>
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ * @author Tim Petrowsky
+ */
+public final class DiskData extends Data {
+  /** Texts access file. */
+  private DataAccess texts;
+  /** Values access file. */
+  private DataAccess values;
+
+  /**
+   * Default constructor, called from {@link Open#open}.
+   * @param meta meta data
+   * @throws IOException I/O exception
+   */
+  public DiskData(final MetaData meta) throws IOException {
+    super(meta);
+
+    try(DataInput in = new DataInput(meta.dbFile(DATAINF))) {
+      meta.read(in);
+      while(true) {
+        final String k = string(in.readToken());
+        if(k.isEmpty()) break;
+        switch(k) {
+          case DBTAGS -> elemNames = new Names(in, meta);
+          case DBATTS -> attrNames = new Names(in, meta);
+          case DBPATH -> paths = new PathIndex(this, in);
+          case DBNS   -> nspaces = new Namespaces(in);
+          case DBNSC  -> nspaces = new Namespaces(in, meta.dbFile(DATANSP));
+          case DBDOCS -> resources.read(in);
+        }
+      }
+    }
+    lastid = meta.lastid;
+
+    // open data and indexes
+    init();
+    if(meta.updindex) {
+      idmap = new IdPreMap(meta.dbFile(DATAIDP));
+      if(meta.idplog != 0) idmap.replay(meta.dbFile(DATAIDPLOG), meta.idplog);
+      if(meta.textindex) textIndex = new SegmentedValues(this, IndexType.TEXT);
+      if(meta.attrindex) attrIndex = new SegmentedValues(this, IndexType.ATTRIBUTE);
+      if(meta.tokenindex) tokenIndex = new SegmentedValues(this, IndexType.TOKEN);
+    } else {
+      if(meta.textindex) textIndex = new DiskValues(this, IndexType.TEXT);
+      if(meta.attrindex) attrIndex = new DiskValues(this, IndexType.ATTRIBUTE);
+      if(meta.tokenindex) tokenIndex = new DiskValues(this, IndexType.TOKEN);
+    }
+    if(meta.ftindex) ftIndex = new FTIndex(this);
+  }
+
+  /**
+   * Internal database constructor, called from {@link DiskBuilder#build}.
+   * @param meta meta data
+   * @param elemNames element names
+   * @param attrNames attribute names
+   * @param paths path index
+   * @param nspaces namespaces
+   * @throws IOException I/O exception
+   */
+  public DiskData(final MetaData meta, final Names elemNames, final Names attrNames,
+      final PathIndex paths, final Namespaces nspaces) throws IOException {
+
+    super(meta);
+    this.elemNames = elemNames;
+    this.attrNames = attrNames;
+    this.paths = paths;
+    this.nspaces = nspaces;
+    paths.data(this);
+    if(meta.updindex) idmap = new IdPreMap(lastid);
+    init();
+  }
+
+  /**
+   * Initializes the database.
+   * @throws IOException I/O exception
+   */
+  private void init() throws IOException {
+    table = new TableDiskAccess(meta, meta.size, false);
+    texts = new DataAccess(meta.dbFile(DATATXT), true);
+    values = new DataAccess(meta.dbFile(DATAATV), true);
+  }
+
+  /**
+   * Writes all meta data to disk and deletes the files of outdated indexes.
+   * @param close database is closed
+   * @throws IOException I/O exception
+   */
+  private void write(final boolean close) throws IOException {
+    // close outdated indexes, delete their files after the meta data has been written
+    final IndexType[] types = IndexType.VALUE_INDEXES;
+    final Index[] outdated = new Index[types.length];
+    for(int t = 0; t < types.length; t++) {
+      final Index index = index(types[t]);
+      if(index != null && !meta.index(types[t])) {
+        outdated[t] = index;
+        close(types[t]);
+      }
+    }
+    // a closed database has no ID-PRE log
+    final boolean log = meta.idplog != 0;
+    if(close && log) meta.dirty = true;
+    if(!meta.dirty) return;
+    meta.size = nodes();
+    meta.lastid = lastid;
+
+    // the metadata contains the committed length of the log: write it last
+    meta.idplog = meta.updindex && idmap != null ? idmap.write(meta.dbFile(DATAIDP),
+        meta.dbFile(DATAIDPLOG), meta.idplog, close) : 0;
+    final boolean legacy = legacy();
+    try(DataOutput out = new DataOutput(meta.dbFile(DATAINF))) {
+      meta.write(out, legacy ? OLDSTORAGE : STORAGE);
+      out.writeToken(token(DBTAGS));
+      elemNames.write(out);
+      out.writeToken(token(DBATTS));
+      attrNames.write(out);
+      out.writeToken(token(DBPATH));
+      paths.write(out);
+      out.writeToken(token(legacy ? DBNS : DBNSC));
+      nspaces.write(out, legacy, meta.dbFile(DATANSP));
+      out.writeToken(token(DBDOCS));
+      resources.write(out);
+      out.write(0);
+    }
+    if(log && meta.idplog == 0) meta.dbFile(DATAIDPLOG).delete();
+    meta.dirty = false;
+    // files that cannot be deleted are ignored: they will be overwritten when an index is created
+    for(final Index index : outdated) {
+      if(index != null) index.drop();
+    }
+  }
+
+  /**
+   * Indicates if the database is stored in the old format, which older versions can read.
+   * @return result of check
+   */
+  private boolean legacy() {
+    return nspaces.legacy() && meta.legacy();
+  }
+
+  @Override
+  public synchronized void close() {
+    if(closed) return;
+    super.close();
+    try {
+      // flush the indexes first, as they may update the meta data
+      for(final ValueIndex index : valueIndexes()) index.flush(true);
+      write(true);
+      table.close();
+      texts.close();
+      values.close();
+      nspaces.close();
+      close(IndexType.TEXT);
+      close(IndexType.ATTRIBUTE);
+      close(IndexType.TOKEN);
+      close(IndexType.FULLTEXT);
+    } catch(final IOException ex) {
+      Util.stack(ex);
+    }
+  }
+
+  /**
+   * Closes the specified index.
+   * @param type index to be closed
+   */
+  private synchronized void close(final IndexType type) {
+    // close index and invalidate reference
+    final Index index = index(type);
+    if(index != null) {
+      index.close();
+      set(type, null);
+    }
+  }
+
+  @Override
+  public void createIndex(final IndexType type, final Command cmd) throws IOException {
+    // close and drop existing index
+    dropIndex(type);
+    final IndexBuilder ib = switch(type) {
+      case TEXT, ATTRIBUTE, TOKEN -> new DiskValuesBuilder(this, type);
+      case FULLTEXT               -> new FTBuilder(this);
+      default                     -> throw Util.notExpected();
+    };
+    try {
+      if(cmd != null) cmd.pushJob(ib);
+      set(type, ib.build());
+    } finally {
+      if(cmd != null) cmd.popJob();
+    }
+  }
+
+  @Override
+  public void dropIndex(final IndexType type) throws BaseXException {
+    // the reference is invalidated by close: retrieve it first
+    final Index index = index(type);
+    close(type);
+    if(index != null && !index.drop()) throw new BaseXException(INDEX_NOT_DROPPED_X, type);
+  }
+
+  /**
+   * Assigns the specified index.
+   * @param type index to be opened
+   * @param index index instance
+   */
+  private void set(final IndexType type, final ValueIndex index) {
+    meta.dirty = true;
+    switch(type) {
+      case TEXT      -> textIndex = index;
+      case ATTRIBUTE -> attrIndex = index;
+      case TOKEN     -> tokenIndex = index;
+      case FULLTEXT  -> ftIndex = index;
+      default        -> throw Util.notExpected();
+    }
+  }
+
+  @Override
+  public void startUpdate(final MainOptions opts) throws BaseXException {
+    if(!table.lock(true)) throw new BaseXException(DB_PINNED_X, meta.name);
+    if(opts.get(MainOptions.AUTOFLUSH)) {
+      final IOFile upd = meta.updateFile();
+      if(upd.exists()) throw new BaseXException(DB_UPDATED_X, meta.name);
+      if(!upd.touch()) throw Util.notExpected("%: could not create lock file.", meta.name);
+    }
+  }
+
+  @Override
+  public synchronized void finishUpdate(final MainOptions opts) {
+    // OPTIMIZE ALL will close the database before this function is called
+    if(closed) return;
+
+    for(final ValueIndex index : valueIndexes()) index.finishUpdate();
+    final boolean auto = opts.get(MainOptions.AUTOFLUSH);
+    flush(auto);
+
+    // remove updating file after all changes have been written
+    if(auto) {
+      final IOFile upd = meta.updateFile();
+      if(!upd.exists()) throw Util.notExpected("%: lock file does not exist.", meta.name);
+      if(!upd.delete()) throw Util.notExpected("%: could not delete lock file.", meta.name);
+    }
+    if(!table.lock(false)) throw Util.notExpected("Database '%': could not unlock.", meta.name);
+  }
+
+  @Override
+  public synchronized void flush(final boolean all) {
+    try {
+      table.flush(all);
+      if(all) {
+        // flush the indexes first, as they may update the meta data
+        for(final ValueIndex index : valueIndexes()) index.flush(false);
+        write(false);
+        texts.flush();
+        values.flush();
+      }
+    } catch(final IOException ex) {
+      Util.stack(ex);
+    }
+  }
+
+  @Override
+  public byte[] text(final int pre, final boolean text) {
+    final long value = textRef(pre);
+    return Inline.inlined(value) ? Inline.unpack(value) : txt(value, text);
+  }
+
+  @Override
+  public long textItr(final int pre, final boolean text) {
+    final long value = textRef(pre);
+    return Inline.inlined(value) ? Inline.unpackLong(value) : toLong(txt(value, text));
+  }
+
+  @Override
+  public double textDbl(final int pre, final boolean text) {
+    final long value = textRef(pre);
+    return Inline.inlined(value) ? Inline.unpackDouble(value) : toDouble(txt(value, text));
+  }
+
+  @Override
+  public int textLen(final int pre, final boolean text) {
+    final long value = textRef(pre);
+    if(Inline.inlined(value)) return Inline.unpackLength(value);
+
+    // if the text is compressed, the number of compressed bytes follows the original length;
+    // both values must be read in a single call, as the file cursor is shared
+    final DataAccess da = text ? texts : values;
+    return da.readNum(value & Compress.COMPRESS - 1, Compress.compressed(value));
+  }
+
+  @Override
+  public boolean validText(final int pre, final boolean text) {
+    final long value = textRef(pre);
+    return Inline.inlined(value) ||
+        (value & Compress.COMPRESS - 1) < (text ? texts : values).length();
+  }
+
+  /**
+   * Returns a text (text, comment, pi) or attribute value.
+   * @param offset text offset
+   * @param text text or attribute flag
+   * @return text
+   */
+  private byte[] txt(final long offset, final boolean text) {
+    final byte[] txt = (text ? texts : values).readToken(offset & Compress.COMPRESS - 1);
+    return Compress.compressed(offset) ? Compress.unpack(txt) : txt;
+  }
+
+  @Override
+  public boolean inMemory() {
+    return false;
+  }
+
+  // UPDATE OPERATIONS ============================================================================
+
+  @Override
+  protected void delete(final int pre, final boolean text) {
+    // old entry (offset or value)
+    final long old = textRef(pre);
+    // if old text was not inlined, fill unused space in text file with zero bytes
+    if(!Inline.inlined(old)) (text ? texts : values).free(old & Compress.COMPRESS - 1, 0);
+  }
+
+  @Override
+  protected void updateText(final int pre, final byte[] value, final int kind) {
+    // delete existing index entry
+    indexDelete(pre, -1, 1);
+
+    // reference to heap file
+    final DataAccess store = kind == ATTR ? values : texts;
+    // old entry (offset or value)
+    final long oldRef = textRef(pre);
+
+    // check if new entry can be inlined
+    final long v = Inline.packInt(value);
+    if(v != -1) {
+      // invalidate old entry if it was not inlined
+      if(!Inline.inlined(oldRef)) store.free(oldRef & Compress.COMPRESS - 1, 0);
+      // inline integer value
+      textRef(pre, v);
+    } else {
+      // otherwise, try to compress new value
+      final byte[] val = Compress.pack(value);
+
+      // choose inserting position
+      final long off;
+      if(Inline.inlined(oldRef)) {
+        // old entry was inlined: append new entry to heap file
+        off = store.length();
+      } else {
+        // otherwise, compute inserting position and invalidate old entry
+        final int vl = val.length;
+        off = store.free(oldRef & Compress.COMPRESS - 1, vl + Num.length(vl));
+      }
+
+      store.writeToken(off, val);
+      textRef(pre, val == value ? off : off | Compress.COMPRESS);
+    }
+
+    // insert new entries
+    indexAdd(pre, -1, 1, null);
+  }
+
+  @Override
+  protected long textRef(final byte[] value, final boolean text) {
+    // try to inline value
+    final long inlined = Inline.pack(value);
+    if(inlined != 0) return inlined;
+
+    // store text in heap file
+    final byte[] packed = Compress.pack(value);
+    final DataAccess store = text ? texts : values;
+    final long offset = store.length();
+    store.writeToken(offset, packed);
+    return packed == value ? offset : Compress.COMPRESS | offset;
+  }
+}

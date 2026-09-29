@@ -1,0 +1,213 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.value.type.BasicType.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Gunther Rademacher
+ */
+public class FnSchemaType extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final QNm name = toQNm(arg(0).atomItem(qc, info));
+    Type type = get(name, true);
+    if(type == null) type = ListType.get(name);
+    return annotate(qc, info, type);
+  }
+
+  /**
+   * Creates a sequence of type annotations for the specified atomic types.
+   * @param qc query context
+   * @param info input info
+   * @param types types to be annotated
+   * @return type annotation sequence
+   * @throws QueryException query exception
+   */
+  protected static Value annotate(final QueryContext qc, final InputInfo info, final Type... types)
+      throws QueryException {
+
+    final ValueBuilder vb = new ValueBuilder(qc);
+    for(final Type type : types) {
+      final QNm name;
+      final BasicType baseType;
+      final Variety variety;
+      BasicType primType = null;
+      FuncItem members = null;
+      FuncItem matches = null;
+      boolean constructor = false;
+      if(type instanceof final ListType listType) {
+        name = listType.qname();
+        baseType = ANY_SIMPLE_TYPE;
+        variety = Variety.list;
+        members = TypeAnnotation.funcItem(info, listType.atomic());
+        constructor = true;
+      } else if(type instanceof final BasicType BasicType) {
+        name = BasicType.qname();
+        if(BasicType.atomic() != null) matches = Matches.funcItem(BasicType, qc, info);
+        switch(BasicType) {
+          case ANY_TYPE -> {
+            baseType = null;
+            variety = Variety.mixed;
+          }
+          case UNTYPED -> {
+            baseType = ANY_TYPE;
+            variety = Variety.mixed;
+          }
+          case ANY_SIMPLE_TYPE -> {
+            baseType = ANY_TYPE;
+            variety = null;
+          }
+          case ANY_ATOMIC_TYPE -> {
+            baseType = ANY_SIMPLE_TYPE;
+            variety = Variety.atomic;
+          }
+          case NUMERIC -> {
+            baseType = ANY_SIMPLE_TYPE;
+            variety = Variety.union;
+            members = TypeAnnotation.funcItem(info, DOUBLE, FLOAT, DECIMAL);
+            constructor = true;
+          }
+          default -> {
+            final BasicType parent = BasicType.parent();
+            baseType = parent == NUMERIC ? ANY_ATOMIC_TYPE : parent;
+            variety = Variety.atomic;
+            for(primType = BasicType; !primType.parent().oneOf(ANY_ATOMIC_TYPE, NUMERIC, null);)
+              primType = primType.parent();
+            constructor = !type.oneOf(QNAME, NOTATION);
+          }
+        }
+      } else {
+        return Empty.VALUE;
+      }
+      vb.add(XQMap.get(Records.SCHEMA_TYPE.get(),
+        name,
+        Bln.get(!type.oneOf(ANY_TYPE, UNTYPED)),
+        baseType == null ? TypeAnnotation.funcItem(info) : TypeAnnotation.funcItem(info, baseType),
+        primType != null ? TypeAnnotation.funcItem(info, primType) : Empty.VALUE,
+        variety != null ? Types.SCHEMA_TYPE_RECORD_VARIETY.cast(Str.get(variety.name()), qc, info) :
+          Empty.VALUE,
+        members != null ? members : Empty.VALUE,
+        Empty.VALUE,
+        matches != null ? matches : Empty.VALUE,
+        constructor ? FuncType.get(Types.ANY_ATOMIC_TYPE_ZM, Types.ANY_ATOMIC_TYPE_ZO).cast(
+            (FuncItem) Functions.item(name, 1, true, info, qc), qc, info) : Empty.VALUE));
+    }
+    return vb.value();
+  }
+
+  /** The variety of a type. */
+  private enum Variety {
+    /** Mixed.  */ mixed,
+    /** List.   */ list,
+    /** Atomic. */ atomic,
+    /** Union.  */ union
+  }
+
+  /**
+   * Function creating the type annotations for given atomic types.
+   */
+  private static final class TypeAnnotation extends FuncItemBody {
+    /** Sequence type. */
+    private final SeqType seqType;
+    /** The types to be annotated. */
+    private final BasicType[] types;
+
+    /**
+     * Constructor.
+     * @param seqType sequence type of the function item
+     * @param info input info
+     * @param types types to be annotated
+     */
+    private TypeAnnotation(final SeqType seqType, final InputInfo info, final BasicType... types) {
+      super(info, seqType, Function.SCHEMA_TYPE);
+      this.seqType = seqType;
+      this.types = types;
+    }
+
+    /**
+     * Create a function item for a new instance.
+     * @param info input info
+     * @param types types to be annotated
+     * @return function item
+     */
+    public static FuncItem funcItem(final InputInfo info, final BasicType... types) {
+      final SeqType st = SeqType.get(Records.SCHEMA_TYPE.get(),
+          Occ.get(types.length, types.length));
+      return new FuncItem(info, new TypeAnnotation(st, info, types), new Var[] { },
+          AnnList.EMPTY, FuncType.get(st), 0, null);
+    }
+
+    @Override
+    public Value value(final QueryContext qc) throws QueryException {
+      return annotate(qc, info, types);
+    }
+
+    @Override
+    public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+      return new TypeAnnotation(seqType, info, types);
+    }
+  }
+
+  /**
+   * Function checking if an item matches a given type.
+   */
+  private static final class Matches extends FuncItemBody {
+    /** Function type. */
+    private static final FuncType FUNC_TYPE = FuncType.get(Types.BOOLEAN_O,
+        Types.ANY_ATOMIC_TYPE_O);
+    /** The type to be matched. */
+    final BasicType type;
+
+    /**
+     * Constructor.
+     * @param info input info
+     * @param type type to be matched
+     * @param args arguments
+     */
+    private Matches(final InputInfo info, final BasicType type, final Expr... args) {
+      super(info, Types.BOOLEAN_O, Function.SCHEMA_TYPE, args);
+      this.type = type;
+    }
+
+    /**
+     * Create a function item for a new instance.
+     * @param type type to be matched
+     * @param qc query context
+     * @param info input info
+     * @return function item
+     */
+    public static FuncItem funcItem(final BasicType type, final QueryContext qc,
+        final InputInfo info) {
+      final Var var = new VarScope().addNew(new QNm("value"), Types.ANY_ATOMIC_TYPE_O, qc, info);
+      final Var[] params = { var };
+      return new FuncItem(info, new Matches(info, type, new VarRef(info, var)), params,
+          AnnList.EMPTY, FUNC_TYPE, params.length, null);
+    }
+
+    @Override
+    public Bln value(final QueryContext qc) throws QueryException {
+      final Item value = toAtomItem(arg(0), qc);
+      return Bln.get(value.type.instanceOf(type));
+    }
+
+    @Override
+    public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+      return new Matches(info, type, copyAll(cc, vm, args()));
+    }
+  }
+}

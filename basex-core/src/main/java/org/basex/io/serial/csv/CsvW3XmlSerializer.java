@@ -1,0 +1,84 @@
+package org.basex.io.serial.csv;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+
+import org.basex.io.parse.csv.*;
+import org.basex.io.serial.*;
+import org.basex.query.util.ft.*;
+import org.basex.query.value.item.*;
+import org.basex.util.list.*;
+
+/**
+ * This class serializes items as CSV.
+ *
+ * @author BaseX Team, BSD License
+ * @author Gunther Rademacher
+ */
+public final class CsvW3XmlSerializer extends CsvSerializer {
+  /** Names of header elements. */
+  private final TokenList headers;
+  /** Contents of current row. */
+  private TokenList data;
+
+  /**
+   * Constructor.
+   * @param os output stream
+   * @param sopts serialization parameters
+   * @throws IOException I/O exception
+   */
+  public CsvW3XmlSerializer(final OutputStream os, final SerializerOptions sopts)
+      throws IOException {
+    super(os, sopts);
+    headers = header ? new TokenList() : null;
+  }
+
+  @Override
+  protected void startOpen(final QNm name) {
+    if(level == 2) data = new TokenList();
+  }
+
+  @Override
+  protected void finishEmpty() throws IOException {
+    finishOpen();
+    switch(level) {
+      case 2 -> {
+        if(header && elem.eq(CsvW3XmlConverter.Q_FN_COLUMN)) headers.add(EMPTY);
+      }
+      case 3 -> data.add(EMPTY);
+      default -> { }
+    }
+    finishClose();
+  }
+
+  @Override
+  protected void text(final byte[] value, final FTPos ftp) {
+    switch(level) {
+      case 3 -> {
+        if(header && elem.eq(CsvW3XmlConverter.Q_FN_COLUMN)) headers.add(value);
+      }
+      case 4 -> data.add(value);
+      default -> { }
+    }
+  }
+
+  @Override
+  protected void finishClose() throws IOException {
+    if(level != 2 || !elem.eq(CsvW3XmlConverter.Q_FN_ROW)) return;
+    if(header) {
+      record(headers, false);
+      header = false;
+    }
+    record(data);
+  }
+
+  @Override
+  protected void attribute(final byte[] name, final byte[] value, final boolean standalone)
+      throws IOException {
+    if(headers == null || !eq(name, CsvW3XmlConverter.Q_COLUMN.local())) return;
+    if(data.size() < headers.size() && eq(value, headers.get(data.size()))) return;
+    throw CSV_SERIALIZE_X_X.getIO("Unexpected column", value);
+  }
+}

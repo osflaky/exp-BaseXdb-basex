@@ -1,0 +1,28 @@
+package org.basex.query.func.prof;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ProfSleep extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final long ms = toLong(arg(0), qc);
+
+    // allow interruption of long sleeps; abort loop if maximum sleep time has been reached
+    final Performance perf = new Performance();
+    for(int m = 0; m < ms && perf.nanoRuntime(false) / 1000000 < ms; m++) {
+      Performance.sleep(1);
+      qc.checkStop();
+    }
+    return Empty.VALUE;
+  }
+}

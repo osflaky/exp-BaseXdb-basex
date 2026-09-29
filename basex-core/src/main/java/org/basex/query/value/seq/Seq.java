@@ -1,0 +1,314 @@
+package org.basex.query.value.seq;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+
+import java.io.*;
+import java.util.function.*;
+
+import org.basex.core.*;
+import org.basex.core.jobs.*;
+import org.basex.data.*;
+import org.basex.io.in.DataInput;
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+
+/**
+ * Sequence, containing at least two items.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class Seq extends Value {
+  /** Length. */
+  protected long size;
+
+  /**
+   * Constructor, specifying a type.
+   * @param size size
+   * @param type exact type, {@code item()*} otherwise
+   */
+  protected Seq(final long size, final Type type) {
+    super(type);
+    this.size = size;
+  }
+
+  @Override
+  public final long size() {
+    return size;
+  }
+
+  @Override
+  public final Item item(final QueryContext qc, final InputInfo ii) throws QueryException {
+    throw typeError(this, BasicType.ITEM, ii);
+  }
+
+  @Override
+  public final boolean ebv(final QueryContext qc, final InputInfo ii) throws QueryException {
+    if(itemAt(0) instanceof GNode) return true;
+    throw testError(this, false, ii);
+  }
+
+  @Override
+  public boolean predicate(final QueryContext qc, final InputInfo ii, final long pos)
+      throws QueryException {
+
+    // non-numeric sequences: compute effective boolean value
+    if(!(itemAt(0) instanceof ANum)) return ebv(qc, ii);
+
+    for(final Item item : this) {
+      if(!(item instanceof ANum)) throw testError(this, true, ii);
+      if(item.predicate(qc, ii, pos)) return true;
+    }
+    return false;
+  }
+
+  @Override
+  public BasicIter<Item> iter() {
+    return new BasicIter<>(size) {
+      @Override
+      public Item get(final long i) {
+        return itemAt(i);
+      }
+      @Override
+      public Seq eagerValue() {
+        return Seq.this;
+      }
+    };
+  }
+
+  @Override
+  public boolean ddo() {
+    return false;
+  }
+
+  @Override
+  protected Value subSeq(final long pos, final long length, final Job job) {
+    job.checkStop();
+    return new SubSeq(this, pos, length);
+  }
+
+  @Override
+  public Value insertValue(final long pos, final Value value, final Job job) {
+    return toTree(job).insertValue(pos, value, job);
+  }
+
+  @Override
+  public Value removeItem(final long pos, final Job job) {
+    return toTree(job).removeItem(pos, job);
+  }
+
+  /**
+   * Creates a tree-based version of this sequence.
+   * @param job interruptible job
+   * @return value
+   */
+  private Value toTree(final Job job) {
+    final ValueBuilder vb = new ValueBuilder(job, size).tree(1);
+    for(final Item item : this) vb.add(item);
+    return vb.value(type);
+  }
+
+  @Override
+  public Value reverse(final Job job) {
+    final ValueBuilder vb = new ValueBuilder(job, size);
+    for(long i = size - 1; i >= 0; i--) vb.add(itemAt(i));
+    return vb.value(type);
+  }
+
+  @Override
+  public final void refineType(final Expr expr) {
+    final Type tp = expr.seqType().type.intersect(type);
+    if(tp != null) type = tp;
+  }
+
+  @Override
+  public final SeqType seqType() {
+    return type.seqType(Occ.ONE_OR_MORE);
+  }
+
+  @Override
+  public Value atomValue(final QueryContext qc, final InputInfo ii) throws QueryException {
+    if(type.instanceOf(BasicType.ANY_ATOMIC_TYPE)) return this;
+
+    final ValueBuilder vb = new ValueBuilder(qc, size);
+    for(final Item item : this) vb.add(item.atomValue(qc, ii));
+    return vb.value(BasicType.ANY_ATOMIC_TYPE);
+  }
+
+  @Override
+  public Value unwrappedValue(final QueryContext qc) {
+    if(type.instanceOf(BasicType.ANY_ATOMIC_TYPE)) return this;
+
+    for(final Item item : this) {
+      if(item instanceof JNode) {
+        final ValueBuilder vb = new ValueBuilder(qc, size);
+        for(final Item it : this) vb.add(it.unwrappedValue(qc));
+        return vb.value();
+      }
+    }
+    return this;
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    Expr expr = this;
+    if(mode.oneOf(Simplify.STRING, Simplify.STRING_VALUE) && type.instanceOf(NodeType.XNODE)) {
+      final TokenList list = new TokenList(size);
+      for(final Item item : atomValue(cc.qc, null)) list.add(item.string(null));
+      expr = StrSeq.get(list);
+    } else if(mode.atomizing()) {
+      final Type at = type.atomic();
+      if(at != null && at != type) {
+        expr = atomValue(cc.qc, null);
+      }
+    }
+    return cc.simplify(this, expr, mode);
+  }
+
+  @Override
+  public void cache(final boolean lazy, final InputInfo ii) throws QueryException {
+    for(final Item item : this) item.cache(lazy, ii);
+  }
+
+  @Override
+  public Value materialize(final Predicate<Data> test, final boolean funcs, final InputInfo ii,
+      final QueryContext qc) throws QueryException {
+
+    if(materialized(test, funcs, ii)) return this;
+
+    final ValueBuilder vb = new ValueBuilder(qc, size);
+    for(final Item item : this) vb.add(item.materialize(test, funcs, ii, qc));
+    return vb.value(type);
+  }
+
+  @Override
+  public boolean materialized(final Predicate<Data> test, final boolean funcs, final InputInfo ii)
+      throws QueryException {
+    if(!type.instanceOf(BasicType.ANY_ATOMIC_TYPE)) {
+      for(final Item item : this) {
+        if(!item.materialized(test, funcs, ii)) return false;
+      }
+    }
+    return true;
+  }
+
+  @Override
+  public boolean refineType() {
+    boolean same = true;
+    if(type.refinable()) {
+      Type refined = null;
+      for(final Item item : this) {
+        final Type tp = item.type;
+        if(refined == null) {
+          refined = tp;
+        } else {
+          same &= refined.eq(tp);
+          refined = refined.union(tp);
+          if(refined.eq(type)) return same;
+        }
+      }
+      type = refined;
+    }
+    return same;
+  }
+
+  @Override
+  protected final Value rebuild(final QueryContext qc) throws QueryException {
+    final ValueBuilder vb = new ValueBuilder(qc, size());
+    for(final Item item : this) vb.add(item.shrink(qc));
+    return vb.value(type);
+  }
+
+  @Override
+  public Object toJava() throws QueryException {
+    // determine type (static or exact)
+    refineType();
+
+    // shortcut for strings (avoid intermediate token representation)
+    final int sz = (int) size;
+    if(type == BasicType.STRING) {
+      final StringList list = new StringList(sz);
+      for(final Item item : this) list.add(item.string(null));
+      return list.finish();
+    }
+    int a = 0;
+    final Object[] array = new Object[sz];
+    for(final Item item : this) array[a++] = item.toJava();
+    return array;
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    if(this == obj) return true;
+    if(!(obj instanceof final Seq s) || size != s.size) return false;
+    final BasicIter<Item> iter1 = iter(), iter2 = s.iter();
+    for(Item item1; (item1 = iter1.next()) != null;) {
+      if(!item1.equals(iter2.next())) return false;
+    }
+    return true;
+  }
+
+  @Override
+  public String description() {
+    return type == BasicType.ITEM ? SEQUENCE : type + " " + SEQUENCE;
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    final int max = (int) Math.min(size, 5);
+    final ExprList list = new ExprList(max);
+    for(long i = 0; i < max; i++) list.add(itemAt(i));
+    plan.add(plan.create(this), list.finish());
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    final TokenBuilder tb = new TokenBuilder().add('(');
+    for(int i = 0; i < size && tb.moreInfo(); i++) {
+      if(i > 0) tb.add(SEP);
+      final Item item = itemAt(i);
+      tb.add(qs.error() ? item.toErrorString() : item.toString());
+    }
+    qs.token(tb.add(')').finish());
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Creates a value from the input stream.
+   * Called from {@link Stores#read(DataInput, QueryContext)}.
+   * @param in data input
+   * @param type type
+   * @param qc query context
+   * @return value
+   * @throws IOException I/O exception
+   * @throws QueryException query exception
+   */
+  @SuppressWarnings("unused")
+  public static Value read(final DataInput in, final Type type, final QueryContext qc)
+      throws IOException, QueryException {
+    throw Util.notExpected();
+  }
+
+  /**
+   * Returns an initial array capacity for the expected result size.
+   * Throws an exception if the requested size will take too much memory.
+   * @param size expected result size
+   * @return capacity
+   * @throws QueryException query exception
+   */
+  public static int initialCapacity(final long size) throws QueryException {
+    if(size > Array.MAX_SIZE) throw MAX_SIZE_X_X.get(null, Array.MAX_SIZE, size);
+    return Array.initialCapacity(size);
+  }
+}

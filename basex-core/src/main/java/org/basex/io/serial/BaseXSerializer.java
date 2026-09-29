@@ -1,0 +1,78 @@
+package org.basex.io.serial;
+
+import static org.basex.query.value.type.BasicType.*;
+
+import java.io.*;
+
+import org.basex.io.in.*;
+import org.basex.query.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+
+/**
+ * This class serializes items in a project-specific mode.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class BaseXSerializer extends AdaptiveSerializer {
+  /** Binary. */
+  private final boolean binary;
+
+  /**
+   * Constructor, specifying serialization options.
+   * @param os output stream
+   * @param sopts serialization parameters
+   * @throws IOException I/O exception
+   */
+  BaseXSerializer(final OutputStream os, final SerializerOptions sopts) throws IOException {
+    super(os, sopts, false);
+    binary = sopts.yes(SerializerOptions.BINARY);
+  }
+
+  @Override
+  protected void atomic(final Item item) throws IOException {
+    // top level: raw binaries, unquoted booleans; everything else is inherited
+    if(depth == 0 && !expression) {
+      try {
+        if(binary && item instanceof Bin) {
+          try(BufferInput bi = item.input(null)) {
+            for(int b; (b = bi.read()) != -1;) out.write(b);
+          }
+          return;
+        }
+        if(item.type == BOOLEAN) {
+          printChars(item.string(null));
+          return;
+        }
+      } catch(final QueryException ex) {
+        throw new QueryIOException(ex);
+      }
+    }
+    super.atomic(item);
+  }
+
+  @Override
+  protected Type constructor(final Type type) {
+    return expression ? super.constructor(type) : null;
+  }
+
+  @Override
+  protected void jnode(final JNode jnode) throws IOException {
+    final XQStruct container = jnode.container();
+    if(container instanceof XQMap) {
+      map(XQMap.get(jnode.key, jnode.value));
+    } else if(container instanceof XQArray) {
+      array(XQArray.get(jnode.value));
+    } else {
+      // root nodes and items of a sequence have no container
+      reset();
+      for(final Item item : jnode.value) {
+        serialize(item);
+      }
+    }
+  }
+}

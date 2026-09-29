@@ -1,0 +1,241 @@
+package org.basex.query.func;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.query.*;
+import org.basex.query.ann.*;
+import org.basex.query.expr.*;
+import org.basex.query.scope.*;
+import org.basex.query.util.*;
+import org.basex.query.util.hash.*;
+import org.basex.query.util.parse.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Function call for user-defined functions.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class StaticFuncCall extends FuncCall {
+  /** Function name. */
+  final QNm name;
+  /** Function reference (can be {@code null}). */
+  StaticFunc func;
+
+  /** Keywords (can be {@code null}, will be dropped after parsing). */
+  QNmMap<Expr> keywords;
+  /** Placeholder for an external call (if not {@code null}, will be returned by the compiler). */
+  ParseExpr external;
+
+  /**
+   * Function call constructor.
+   * @param name function name
+   * @param args positional arguments
+   * @param keywords keyword arguments (can be {@code null})
+   * @param info input info (can be {@code null})
+   */
+  public StaticFuncCall(final QNm name, final Expr[] args, final QNmMap<Expr> keywords,
+      final InputInfo info) {
+    this(name, args, (StaticFunc) null, info);
+    this.keywords = keywords;
+  }
+
+  /**
+   * Copy constructor.
+   * @param name function name
+   * @param args arguments
+   * @param func referenced function (can be {@code null})
+   * @param info input info (can be {@code null})
+   */
+  private StaticFuncCall(final QNm name, final Expr[] args, final StaticFunc func,
+      final InputInfo info) {
+    super(info, args);
+    this.name = name;
+    this.func = func;
+  }
+
+  @Override
+  public Expr compile(final CompileContext cc) throws QueryException {
+    // return external function call
+    if(external != null) return external.compile(cc);
+
+    // compile arguments and function
+    super.compile(cc);
+    func.compile(cc);
+
+    // try to inline the function
+    if(!selfRecursive()) {
+      final Expr inlined = func.inline(exprs, cc);
+      if(inlined != null) return inlined;
+    }
+
+    exprType.assign(func.seqType());
+    return this;
+  }
+
+  /**
+   * Checks if the function is self-recursive.
+   * @return result of check
+   */
+  private boolean selfRecursive() {
+    final ASTVisitor visitor = new ASTVisitor() {
+      @Override
+      public boolean staticFuncCall(final StaticFuncCall call) {
+        return call.func != func;
+      }
+      @Override
+      public boolean subScope(final Scope scope) {
+        return scope.visit(this);
+      }
+      @Override
+      public boolean funcItem(final FuncItem fi) {
+        for(final Expr expr : exprs) {
+          if(expr == fi) return false;
+        }
+        return fi != func.expr;
+      }
+    };
+    for(final Expr expr : exprs) {
+      if(!expr.accept(visitor)) return true;
+    }
+    return !func.expr.accept(visitor);
+  }
+
+  @Override
+  public StaticFuncCall optimize(final CompileContext cc) {
+    // do not inline a static function after compilation as it must be recursive
+    return this;
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return evalFunc(func, qc, tco);
+  }
+
+  @Override
+  public StaticFuncCall copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new StaticFuncCall(name, Arr.copyAll(cc, vm, exprs), func, info));
+  }
+
+  /**
+   * Assigns the function to be called and evaluates keyword arguments.
+   * @param sf static function
+   * @throws QueryException query exception
+   */
+  public void setFunc(final StaticFunc sf) throws QueryException {
+    func = sf;
+
+    // assign keywords arguments
+    final int arity = sf.arity();
+    if(keywords != null) {
+      final QNm[] names = new QNm[arity];
+      for(int n = 0; n < arity; n++) names[n] = sf.paramName(n);
+      exprs = Functions.prepareArgs(new FuncBuilder(info, exprs, keywords), names, arity,
+          (Supplier<byte[]>) name::prefixId);
+      keywords = null;
+    }
+    // mark arguments that will be replaced with default expressions
+    if(arity > exprs.length) exprs = Arrays.copyOf(exprs, arity);
+    for(int a = arity - 1; a >= 0; a--) {
+      if(exprs[a] == null) {
+        if(sf.defaults[a] == null) throw PARAMMISSING_X_X.get(info, name.prefixId(),
+            sf.paramName(a).prefixString());
+        exprs[a] = Empty.UNDEFINED;
+      }
+    }
+    // check visibility
+    if(sf.anns.contains(Annotation.PRIVATE) &&
+        !Token.eq(QNm.uri(sf.sc.module), QNm.uri(sc().module))) {
+      throw FUNCPRIVATE_X.get(info, name.string());
+    }
+  }
+
+  /**
+   * Adopts the default expressions of the called function.
+   */
+  void assignDefaults() {
+    final int arity = func.arity();
+    for(int a = 0; a < arity; a++) {
+      // fn:current in a default value refers to the context value of this call
+      if(exprs[a] == Empty.UNDEFINED) exprs[a] = CurrentValue.get(func.defaults[a], info);
+    }
+  }
+
+  /**
+   * Returns the function arity.
+   * @return function arity
+   */
+  public int arity() {
+    return exprs.length + (keywords != null ? keywords.size() : 0);
+  }
+
+  /**
+   * Assigns an external function call.
+   * @param ext external function call
+   */
+  public void setExternal(final ParseExpr ext) {
+    external = ext;
+  }
+
+  /**
+   * Returns the called function if already known.
+   * @return function or {@code null}
+   */
+  public StaticFunc func() {
+    return func;
+  }
+
+  @Override
+  public boolean vacuous() {
+    return func != null && func.vacuousBody() || external != null && external.vacuous();
+  }
+
+  @Override
+  public boolean has(final Flag... flags) {
+    if(external != null) return external.has(flags);
+
+    // check arguments, which will be evaluated previous to the function body
+    if(super.has(flags)) return true;
+    // function code: check for updates
+    if(Flag.UPD.oneOf(flags) && func != null && func.updating()) return true;
+    // check remaining flags; position and context references of the body have no effect
+    final Flag[] flgs = Flag.remove(flags, Flag.POS, Flag.CTX, Flag.UPD);
+    return flgs.length != 0 && func != null && func.has(flgs);
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return visitor.staticFuncCall(this) && super.accept(visitor);
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final StaticFuncCall call && name.eq(call.name) &&
+        (func == call.func || external == call.external) && super.equals(obj);
+  }
+
+  @Override
+  public String description() {
+    return "function";
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this, NAME, name.string(), TAILCALL, tco), exprs);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.token(name.prefixId()).params(exprs);
+  }
+}

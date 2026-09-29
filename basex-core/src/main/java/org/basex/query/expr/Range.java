@@ -1,0 +1,185 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryText.*;
+
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.func.Function;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Range expression.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Range extends Arr {
+  /** Dummy value for representing the last item in a sequence. */
+  private static final long LAST = 1L << 52;
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param range (min/max) expressions
+   */
+  public Range(final InputInfo info, final Expr... range) {
+    super(info, Types.INTEGER_ZM, range);
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) throws QueryException {
+    exprs = simplifyAll(Simplify.NUMBER, cc);
+
+    Expr expr = emptyExpr();
+    if(expr == this) {
+      if(values(false, cc)) return cc.preEval(this);
+
+      final Expr min = exprs[0], max = exprs[1];
+      if(!min.has(Flag.NDT)) {
+        final boolean one = min.seqType().one();
+        if(min.equals(max)) {
+          // identical operands: $int to $int
+          exprType.assign(one ? Occ.EXACTLY_ONE : Occ.ZERO_OR_ONE);
+          if(integers()) expr = min;
+        } else if(max instanceof final Arith arith && min.equals(max.arg(0))) {
+          if(arith.calc.oneOf(Calc.ADD, Calc.SUBTRACT) && arith.arg(1) instanceof final Itr itr) {
+            // known result size: . to . + 10
+            final long n = (arith.calc == Calc.ADD ? itr.itr() : -itr.itr()) + 1;
+            if(n < 1) {
+              expr = Empty.VALUE;
+            } else if(one) {
+              exprType.assign(seqType(), n);
+            }
+          }
+        }
+      }
+    }
+    return cc.replaceWith(this, expr);
+  }
+
+  /**
+   * Indicates if the range operands are known to return single integers.
+   * @return result of check
+   */
+  boolean integers() {
+    final SeqType st1 = exprs[0].seqType(), st2 = exprs[1].seqType();
+    return st1.instanceOf(Types.INTEGER_O) && st2.instanceOf(Types.INTEGER_O);
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Item min = exprs[0].atomItem(qc, info);
+    if(min == Empty.VALUE) return Empty.VALUE;
+    final Item max = exprs[1].atomItem(qc, info);
+    if(max == Empty.VALUE) return Empty.VALUE;
+    final long mn = toLong(min), mx = toLong(max);
+    // min smaller than max: empty sequence
+    if(mn > mx) return Empty.VALUE;
+    // max smaller than min: create range
+    final long size = mx - mn + 1;
+    // too large range: assign maximum
+    return RangeSeq.get(mn, size <= 0 ? Long.MAX_VALUE : size, true);
+  }
+
+  @Override
+  public Range copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new Range(info, copyAll(cc, vm, exprs)));
+  }
+
+  @Override
+  public Expr optimizePos(final CmpOp op, final CompileContext cc) throws QueryException {
+    final Predicate<Expr> type = e -> {
+      final SeqType st = e.seqType();
+      return st.one() && (st.type.instanceOf(BasicType.INTEGER) || st.type.isUntyped());
+    };
+    if(!type.test(exprs[0]) || !type.test(exprs[1])) return this;
+
+    final Expr[] minMax = exprs.clone();
+    final double mn = pos(minMax[0]), mx = pos(minMax[1]);
+    if(mx < mn) return Bln.FALSE;
+
+    final boolean results = mn <= mx;
+    switch(op) {
+      case EQ -> {
+        if(mn <= 1 && mx >= LAST) return Bln.TRUE;
+        if(mn > LAST || mx < 1) return Bln.FALSE;
+        if(mn < 1) minMax[0] = Itr.ONE;
+        if(mn == LAST && mx > mn) minMax[1] = cc.function(Function.LAST, info);
+        if(mn < LAST && mx >= LAST) minMax[1] = Itr.MAX;
+      }
+      case NE -> {
+        if(mn <= 1 && mx >= LAST) return Bln.FALSE;
+        if(results && (mn > LAST || mx < 1)) return Bln.TRUE;
+        if(mn < 1) minMax[0] = Itr.ONE;
+        if(mn == LAST && mx > mn) minMax[1] = cc.function(Function.LAST, info);
+        if(mn < LAST && mx >= LAST) minMax[1] = Itr.MAX;
+      }
+      case LE -> {
+        if(mx < 1) return Bln.FALSE;
+        if(results && mx >= LAST) return Bln.TRUE;
+        if(mn < 1) minMax[0] = Itr.ONE;
+      }
+      case LT -> {
+        if(mx <= 1) return Bln.FALSE;
+        if(results && mx > LAST) return Bln.TRUE;
+      }
+      case GE -> {
+        if(mn > LAST) return Bln.FALSE;
+        if(results && mx <= 1) return Bln.TRUE;
+      }
+      case GT -> {
+        if(mn >= LAST) return Bln.FALSE;
+        if(results && mx < 1) return Bln.TRUE;
+      }
+    }
+    if(Arrays.equals(exprs, minMax)) return this;
+    final Expr ex = new Range(info, minMax).optimize(cc);
+    return ex == Empty.VALUE ? Bln.FALSE : ex;
+  }
+
+  /**
+   * Returns a static positional value for the specified expression.
+   * @param expr expression
+   * @return positional value or {@code Double#NaN}
+   */
+  private static double pos(final Expr expr) {
+    if(expr instanceof final Itr itr) return itr.itr();
+    if(Function.LAST.is(expr)) return LAST;
+    if(expr instanceof final Arith arth && Function.LAST.is(expr.arg(0))) {
+      final double l = expr.arg(1) instanceof final Itr itr ? itr.itr() : 0;
+      if(l != 0) return switch(arth.calc) {
+        case ADD      -> LAST + l;
+        case SUBTRACT -> LAST - l;
+        case MULTIPLY -> LAST * l;
+        case DIVIDE   -> LAST / l;
+        default       -> Double.NaN;
+      };
+    }
+    return Double.NaN;
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof Range && super.equals(obj);
+  }
+
+  @Override
+  public String description() {
+    return "range expression";
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.tokens(exprs, ' ' + TO + ' ', true);
+  }
+}

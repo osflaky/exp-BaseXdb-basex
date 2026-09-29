@@ -1,0 +1,406 @@
+package org.basex.core.jobs;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+
+import java.math.*;
+import java.time.*;
+import java.util.*;
+import java.util.Map.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+
+import org.basex.core.*;
+import org.basex.core.locks.*;
+import org.basex.core.users.*;
+import org.basex.query.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.log.*;
+
+/**
+ * Scheduled XQuery job.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class QueryJob extends Job implements Runnable {
+  /** Result. */
+  private final QueryJobResult result = new QueryJobResult(this);
+  /** Job specification. */
+  private final QueryJobSpec job;
+  /** Notify function (can be {@code null}). */
+  private final Consumer<QueryJobResult> notify;
+  /** Locks held by a caller that waits for this job; {@code null} if not applicable. */
+  private final Locks callerLocks;
+  /** Input info of the calling expression (for error reporting). */
+  private final InputInfo info;
+
+  /** Permissions granted to the query. */
+  private final Perm perm;
+
+  /** Query processor (can be {@code null}). */
+  private QueryProcessor qp;
+  /** Remove flag. */
+  private boolean remove;
+  /** Running flag. */
+  private final AtomicBoolean running = new AtomicBoolean(false);
+
+  /**
+   * Constructor, which creates and registers the specified job.
+   * @param job job info
+   * @param context database context
+   * @param info input info (can be {@code null})
+   * @param notify notify function (ignored if {@code null})
+   * @param callerLocks locks held by a caller that waits for this job (can be {@code null})
+   * @throws QueryException query exception
+   */
+  public QueryJob(final QueryJobSpec job, final Context context, final InputInfo info,
+      final Consumer<QueryJobResult> notify, final Locks callerLocks) throws QueryException {
+
+    this.job = job;
+    this.notify = notify;
+    this.callerLocks = callerLocks;
+    this.info = info;
+    jc().context = context;
+
+    // permissions must not be escalated
+    final JobOptions opts = job.options;
+    perm = opts.get(JobOptions.PERMISSION);
+    if(!context.user().has(perm)) throw JOBS_PERM_X.get(info, perm);
+
+    // check when job is to be started
+    final Item start = toTime(opts.get(JobOptions.START), info);
+    long delay = start == null ? 0 : toDelay(start, 0, info);
+
+    // check when job is to be repeated
+    long interval = 0;
+    Cron cron = null;
+    LocalDateTime first = null;
+    final boolean cache = opts.get(JobOptions.CACHE) == Boolean.TRUE;
+    final String cr = opts.get(JobOptions.CRON), inter = opts.get(JobOptions.INTERVAL);
+    final boolean repeat = inter != null && !inter.isEmpty();
+    if(cr != null && !cr.isEmpty()) {
+      final String cn = JobOptions.CRON.name();
+      if(repeat) throw JOBS_OPTIONS_X_X.get(info, cn, JobOptions.INTERVAL.name());
+      if(start != null) throw JOBS_OPTIONS_X_X.get(info, cn, JobOptions.START.name());
+      if(cache) throw JOBS_OPTIONS_X_X.get(info, cn, JobOptions.CACHE.name());
+      cron = toCron(cr, info);
+      final ZoneId zone = ZoneId.systemDefault();
+      final Instant now = Instant.now();
+      first = cron.next(LocalDateTime.ofInstant(now, zone));
+      if(first == null) throw JOBS_CRON_X_X.get(info, cron, "will never match a date");
+      delay = Duration.between(now, first.atZone(zone).toInstant()).toMillis();
+    } else if(repeat) {
+      final String in = JobOptions.INTERVAL.name();
+      if(cache) throw JOBS_OPTIONS_X_X.get(info, in, JobOptions.CACHE.name());
+      interval = new DTDur(token(inter), info).ms(info);
+      if(interval < 1000) throw JOBS_RANGE_X.get(info, inter);
+      // shift a start time in the past forward to the first future repetition
+      if(delay < 0) delay = Math.floorMod(delay, interval);
+    }
+    if(delay < 0) throw JOBS_RANGE_X.get(info, start);
+
+    // check when job is to be stopped
+    final Item end = toTime(opts.get(JobOptions.END), info);
+    final long duration = end == null ? Long.MAX_VALUE : toDelay(end, delay, info);
+    if(duration <= delay) throw JOBS_RANGE_X.get(info, end);
+
+    // number of scheduled and active tasks must not exceed limit
+    final JobPool jobs = context.jobs;
+    if(jobs.tasks.size() + jobs.active.size() >= JobPool.MAX_REGISTERED)
+      throw JOBS_OVERFLOW1_X.get(info, JobPool.MAX_REGISTERED);
+
+    synchronized(jobs.tasks) {
+      // custom job ID: check if it is invalid or has already been assigned
+      String id = opts.get(JobOptions.ID);
+      if(id != null) {
+        if(JobContext.generated(id)) throw JOBS_ID_INVALID_X.get(info, id);
+        if(jobs.tasks.containsKey(id) || jobs.active.containsKey(id) ||
+           jobs.results.containsKey(id)) throw JOBS_ID_EXISTS_X.get(info, id);
+        jc().id(id);
+      } else {
+        id = jc().id();
+      }
+      if(cache) {
+        // check if too many query results are cached
+        if(jobs.results.size() >= JobPool.MAX_CACHED) {
+          throw JOBS_OVERFLOW2_X.get(info, JobPool.MAX_CACHED);
+        }
+        jobs.results.put(id, result);
+      }
+
+      // create and schedule job task
+      final QueryJobTask qjt = new QueryJobTask(this, jobs, delay, interval, cron, first, duration);
+      jobs.tasks.put(id, qjt);
+      boolean scheduled = false;
+      try {
+        qjt.schedule();
+        scheduled = true;
+      } finally {
+        // a job that was never scheduled must leave no trace of its ID
+        if(!scheduled) {
+          jobs.tasks.remove(id);
+          jobs.results.remove(id);
+        }
+      }
+    }
+  }
+
+  /**
+   * Converts the specified start/end time to an item.
+   * @param string start (integer, dayTimeDuration, dateTime, time); can be {@code null}
+   * @param info input info (can be {@code null})
+   * @return item or {@code null}
+   * @throws QueryException query exception
+   */
+  public static Item toTime(final String string, final InputInfo info) throws QueryException {
+    // undefined
+    if(string == null || string.isEmpty()) return null;
+    // integer
+    if(string.matches("^\\d+$")) return Itr.get(Itr.parse(token(string), info));
+    // dayTimeDuration
+    if(Dur.DTD.matcher(string).matches()) return new DTDur(token(string), info);
+    // time
+    if(ADate.TIME.matcher(string).matches()) return new Tim(token(string), info);
+    // dateTime
+    return new Dtm(token(string), BasicType.DATE_TIME, info);
+  }
+
+  /**
+   * Parses a cron expression.
+   * @param string cron expression
+   * @param info input info (can be {@code null})
+   * @return cron expression
+   * @throws QueryException query exception
+   */
+  public static Cron toCron(final String string, final InputInfo info) throws QueryException {
+    try {
+      return new Cron(string);
+    } catch(final BaseXException ex) {
+      throw JOBS_CRON_X_X.get(info, string, ex.getLocalizedMessage()).cause(ex);
+    }
+  }
+
+  /**
+   * Returns the bindings for a query.
+   * @return bindings
+   */
+  public HashMap<String, Value> bindings() {
+    return job.bindings;
+  }
+
+  /**
+   * Returns a delay.
+   * @param start start (integer, dayTimeDuration, dateTime, time)
+   * @param min minimum time
+   * @param info input info (can be {@code null})
+   * @return milliseconds to wait
+   * @throws QueryException query exception
+   */
+  public static long toDelay(final Item start, final long min, final InputInfo info)
+      throws QueryException {
+
+    final QueryDateTime qdt = new QueryDateTime();
+    // time (minutes past the hour)
+    if(start instanceof final Itr itr) {
+      long ms = itr.itr() * 60000;
+      ms -= qdt.time.daySeconds(qdt.zone).multiply(Dec.BD_1000).longValue();
+      while(ms <= min) ms += 3600000;
+      return ms;
+    }
+    // dayTimeDuration: relative offset from now, i.e. a real-time delay
+    if(start instanceof final DTDur dur) return dur.ms(info);
+    // absolute wall-clock target: reproject the delta through the time zone so DST is respected
+    long ms;
+    if(start instanceof final Dtm dtm) {
+      ms = new DTDur(dtm, qdt.datm, null, info).ms(info);
+    } else {
+      ms = new DTDur((Tim) start, qdt.time, null, info).ms(info);
+      while(ms <= min) ms += 86400000;
+    }
+    final ZoneId zone = ZoneId.systemDefault();
+    final Instant now = Instant.now();
+    final LocalDateTime target = LocalDateTime.ofInstant(now, zone).plus(Duration.ofMillis(ms));
+    return Duration.between(now, target.atZone(zone).toInstant()).toMillis();
+  }
+
+  /**
+   * Removes the job from the task list as soon as it has been activated.
+   */
+  void remove() {
+    remove = true;
+  }
+
+  /**
+   * Starts the job if it is not currently running.
+   */
+  void startIfNotRunning() {
+    if(running.compareAndSet(false, true)) jc().context.jobs.execute(this);
+  }
+
+  @Override
+  public void run() {
+    // clear a possibly stale interrupt status
+    Thread.interrupted();
+    try {
+      result.init();
+
+      final JobContext jc = jc();
+      final String id = jc.id();
+      final Context ctx = jc.context;
+      final JobOptions opts = job.options;
+
+      String log = opts.get(JobOptions.LOG);
+      if(log != null && log.isEmpty()) log = null;
+      if(log != null) ctx.log.write(LogType.REQUEST, log, null, "JOB:" + id, ctx);
+
+      final Performance perf = new Performance();
+      final QueryInfo qi = opts.get(JobOptions.INFO) ? new QueryInfo(ctx, true) : null;
+      qp = new QueryProcessor(job.query, opts.get(JobOptions.BASE_URI), ctx, qi);
+      // modules of the calling application are resolved as they were for the caller
+      if(job.resolver != null) qp.uriResolver(job.resolver);
+      qp.qc.user = new User(ctx.user()).permission(perm);
+      boolean registered = false;
+      try {
+        // the job may have been stopped before its execution started
+        checkStop();
+        // parse, push and register query. order is important!
+        if(job.function != null) {
+          qp.assign(job.function, job.args);
+          // a function job is not repeated: release the compiled body and its arguments
+          job.function = null;
+          job.args = null;
+        } else {
+          for(final Entry<String, Value> binding : job.bindings.entrySet()) {
+            final String key = binding.getKey();
+            final Value value = binding.getValue();
+            if(key.isEmpty()) qp.context(value);
+            else qp.variable(key, value);
+          }
+          qp.parse();
+        }
+        updating = qp.updating;
+        qp.compile();
+        result.time = perf.nanoRuntime();
+
+        // fail instead of blocking if a caller waiting for this job holds conflicting locks
+        if(callerLocks != null && callerLocks.locking()) {
+          qp.addLocks();
+          final Locks required = qp.jc().locks.finish(ctx);
+          if(callerLocks.conflicts(required)) throw JOBS_DEADLOCK_X.get(info, required);
+        }
+
+        // register job
+        pushJob(qp);
+        registered = true;
+        register(ctx);
+        // limit memory consumption
+        final long mb = opts.get(JobOptions.MEMORY);
+        if(mb != 0) ctx.jobs.watchMemory(this, mb);
+        // limit execution time
+        final long ms = ((ANum) opts.get(JobOptions.TIMEOUT)).dec(info).
+            multiply(BigDecimal.valueOf(1000)).longValue();
+        if(ms > 0) startTimeout(ctx, ms);
+        // reset timer
+        perf.nanoRuntime();
+        if(remove) ctx.jobs.tasks.remove(id);
+
+        // retrieve result; copy persistent database nodes
+        result.value = qp.value().materialize(TransferVisitor.SHAREABLE, null, qp.qc);
+      } catch(final JobException ex) {
+        // query was interrupted: report exceeded limits, discard result of a stopped query
+        Util.debug(ex);
+        final QueryError error = state == JobState.TIMEOUT ? XQUERY_TIMEOUT :
+          state == JobState.MEMORY ? XQUERY_MEMORY : null;
+        if(error != null) result.exception = error.get(info);
+        else ctx.jobs.results.remove(id);
+      } catch(final QueryException ex) {
+        result.exception = ex;
+      } catch(final Throwable ex) {
+        result.exception = XQUERY_UNEXPECTED_X.get(null, ex);
+      } finally {
+        // nested blocks: a failing step must not skip the release of the job
+        try {
+          // stop watching before the state is updated, so that a finished job is never stopped
+          ctx.jobs.unwatchMemory(this);
+
+          // collect query information before the job is marked as finished
+          if(qi != null && qp != null) {
+            try {
+              final Value value = result.value;
+              result.info = qi.toMap(qp, value != null ? value.size() : 0, jc.locks);
+            } catch(final QueryException ex) {
+              // the information is dropped; it must not replace the outcome of the query
+              Util.debug(ex);
+            }
+          }
+        } finally {
+          try {
+            // close and invalidate query after result has been assigned. order is important!
+            if(opts.get(JobOptions.CACHE) == Boolean.TRUE) {
+              ctx.jobs.scheduleResult(this);
+              state(JobState.CACHED);
+            } else {
+              state(JobState.SCHEDULED);
+            }
+
+            if(qp != null) {
+              qp.close();
+              if(registered) {
+                unregister(ctx);
+                popJob();
+                // no measurement if the job failed to start
+                if(jc.performance != null) result.time += jc.performance.nanoRuntime();
+              }
+              qp = null;
+            }
+
+            // write concluding log entry
+            if(log != null) {
+              final LogType type;
+              String msg = null;
+              if(result.exception != null) {
+                type = LogType.ERROR;
+                msg = result.exception.getMessage();
+              } else {
+                type = LogType.OK;
+              }
+              ctx.log.write(type, msg, perf, "JOB:" + id, ctx);
+            }
+          } finally {
+            // invalidate performance measurements
+            jc.performance = null;
+
+            if(remove) ctx.jobs.tasks.remove(id);
+            ctx.jobs.notifyChange();
+            // an empty result is dropped, unless query information is attached to it
+            if(result.value != null && result.value.isEmpty() && result.info == null)
+              ctx.jobs.results.remove(id);
+            if(notify != null) notify.accept(result);
+          }
+        }
+      }
+    } finally {
+      running.set(false);
+    }
+  }
+
+  @Override
+  public boolean inheritsSlot() {
+    return callerLocks != null && callerLocks.locking();
+  }
+
+  @Override
+  public void addLocks() {
+    qp.addLocks();
+  }
+
+  @Override
+  public String toString() {
+    return job.simple ? job.query : job.options.get(JobOptions.BASE_URI);
+  }
+}

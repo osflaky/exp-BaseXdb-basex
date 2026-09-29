@@ -1,0 +1,48 @@
+package org.basex.query.func.map;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.util.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class MapContains extends MapFn {
+  @Override
+  public Bln value(final QueryContext qc) throws QueryException {
+    return Bln.get(ebv(qc));
+  }
+
+  @Override
+  protected boolean ebv(final QueryContext qc) throws QueryException {
+    final XQMap map = toMap(arg(0), qc);
+    final Item key = toAtomItem(arg(1), qc);
+    return map.contains(key);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr map = arg(0), key = arg(1);
+    // map:contains({}, $key) → false()
+    if(map == XQMap.empty()) return Bln.FALSE;
+
+    if(!map.has(Flag.NDT)) {
+      final MapTypeInfo mti = MapTypeInfo.get(map).key(key);
+      if(mti.index != 0) {
+        return Bln.TRUE;
+      } else if(mti.validKey) {
+        return Bln.FALSE;
+      }
+      if(mti.mapType != null) {
+        // map:contains({ 1: 1 }, 'string') → false()
+        if(mti.keyMismatch) return Bln.FALSE;
+      }
+    }
+    return this;
+  }
+}

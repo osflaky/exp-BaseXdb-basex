@@ -1,0 +1,47 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnChar extends StandardFunc {
+  @Override
+  public Str value(final QueryContext qc) throws QueryException {
+    final Item value = arg(0).atomItem(qc, info);
+
+    if(value instanceof Itr) {
+      // codepoint integer
+      final long cp = toLong(value, 1);
+      if(cp > 0 && cp <= Integer.MAX_VALUE && XMLToken.valid11((int) cp))
+        return Str.get((int) cp);
+    } else {
+      // codepoint string
+      final byte[] token = toToken(value);
+      final int nl = token.length;
+      if(nl == 2 && token[0] == '\\') {
+        // backslash-escape sequence
+        final int cp = token[1];
+        if(cp == 'b') return Str.get('\b');
+        if(cp == 'f') return Str.get('\f');
+        if(cp == 'n') return Str.get('\n');
+        if(cp == 'r') return Str.get('\r');
+        if(cp == 't') return Str.get('\t');
+      } else if(nl > 0) {
+        // HTML character reference name
+        final byte[] result = XMLToken.getEntity(token);
+        if(result != null) return Str.get(result);
+        throw CHARINV_X.get(info, similar(token, XMLToken.similarEntity(token)));
+      }
+    }
+    throw CHARINV_X.get(info, value);
+  }
+}

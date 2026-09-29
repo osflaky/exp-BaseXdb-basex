@@ -1,0 +1,595 @@
+package org.basex.query.ast;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.func.Function.*;
+
+import org.basex.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.junit.jupiter.api.*;
+
+/**
+ * Tests for compiling function items.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public final class FuncItemTest extends SandboxTest {
+  /** Resets optimizations. */
+  @BeforeEach public void init() {
+    inline(true);
+  }
+
+  /** Function items that access the focus. */
+  @Test public void focus() {
+    query("declare context item := 0; last#0()", 1);
+    query("declare context item := 1; let $f := last#0 return (2, 3)[$f()]", 2);
+  }
+
+  /** Checks that a named function reference captures the query focus. */
+  @Test public void focusLiteral() {
+    query("(1, 2, 3)[let $f := last#0 return $f()]", 3);
+    query("string-join((7, 8, 9)[let $f := position#0 return $f() = 2])", 8);
+    query("let $f := <b/>/name#0 return <a/>/$f()", "b");
+    query("for $f in (1 to 3) ! xs:double#0 return $f()", "1\n2\n3");
+    query("string('00' ! function-lookup(xs:QName('xs:hexBinary'), 0)())", "00");
+    // the body of an inline function is evaluated without a focus
+    error("let $f := fn() { . } return (1, 2)[$f()]", NOCTX_X);
+    // errors are raised when the function item is created, not when it is called
+    error("23 ! xs:error#0", FUNCCAST_X_X);
+  }
+
+  /** Checks that captured focuses are compared by fn:deep-equal. */
+  @Test public void focusLiteralEquality() {
+    query("let $f := (1, 1) ! xs:string#0 return deep-equal($f[1], $f[2])", true);
+    query("let $f := (1 to 2) ! xs:string#0 return deep-equal($f[1], $f[2])", false);
+    query("let $f := (<a/>, <b/>) ! name#0 return deep-equal($f[1], $f[2])", false);
+  }
+
+  /** Checks that a dynamically looked up function reference keeps its type. */
+  @Test public void focusLiteralType() {
+    query("let $n := xs:QName(('fn:last')[" + _RANDOM_DOUBLE.args() + " < 1]) "
+        + "return function-lookup($n, 0) instance of fn() as xs:integer", true);
+  }
+
+  /** Coercion error in a function call: the variable stack must stay intact. */
+  @Test public void coercionError() {
+    query("declare function local:x($x as xs:integer) { $x }; "
+        + "let $a := 0, $b := 1 return try { local:x( (1 to 20) ) } catch * { $a, $b }", "0\n1");
+  }
+
+  /** Checks if the identity function is pre-compiled. */
+  @Test public void idTest() {
+    check("function($x) { $x }(42)",
+        42,
+        empty(Closure.class)
+    );
+  }
+
+  /** Checks if a function literal is pre-compiled. */
+  @Test public void literalTest() {
+    check("lower-case#1('FooBar')",
+        "foobar",
+        empty(Closure.class)
+    );
+  }
+
+  /** Checks if a partial application is pre-compiled. */
+  @Test public void partAppTest() {
+    check("starts-with('foobar', ?)('foo')",
+        true,
+        empty(PartFunc.class)
+    );
+  }
+
+  /** Checks if a partial application with non-empty closure is rewritten to a closure. */
+  @Test public void partApp2Test() {
+    check("for $sub in ('a', 'b', 'c', 'd', 'e', 'f')" +
+        "return starts-with(?, $sub)('a')",
+        "true\nfalse\nfalse\nfalse\nfalse\nfalse",
+        empty(PartFunc.class)
+    );
+  }
+
+  /** Checks that partial functions can use default parameters with context value. */
+  @Test public void partAppContextDefault() {
+    query("declare function f($a, $b:= current()) { $a + $b }; 1!f(?)(2)", 3);
+    query("declare function f($a, $b:= 3 + current()) { $a + $b }; 1!f(?)(2)", 6);
+    query("declare function f($a, $b:= 'x' || string(current())) { $a || $b }; 1!f(?)('a')", "ax1");
+    query("declare function f($a, $b:= current()) { $a + $b }; "
+        + "let $v := 1!f(?) return 2!$v(3)", 4);
+
+    error("declare function f($a, $b:= current()) { $a + $b }; f(?)(2)", NOCTX_X);
+    error("declare function f() {.}; 1!f() ", NOCTX_X);
+    error("declare function g($x := current()) { $x }; "
+        + "let $f := fn() { g() } return 1!$f()", NOCTX_X);
+    // all other defaults are evaluated with the focus of the query prolog
+    error("declare function f($a, $b:= .) { $a + $b }; 1!f(?)(2)", NOCTX_X);
+    error("declare function f($a, $b:= 3 + .) { $a + $b }; 1!f(?)(2)", NOCTX_X);
+  }
+
+  /** Checks that partial application supports function sequences. */
+  @Test public void partAppSequence() {
+    query("let $f := ()(12, ?) return $f(5)", "");
+    query("let $f := (op('+'), 42, op('-'))[. instance of fn(*)](12, ?) return $f(5)", "17\n7");
+    query("declare function a($x, $y as xs:integer) {$y};\n"
+        + "declare function b($y, $z as xs:decimal) {$z};\n"
+        + "(((a#2, b#2)((), ?)(text{'3'}))) =!> type-of()\n",
+        "xs:integer\nxs:decimal");
+
+    error("let $f := (op('+'), 42, op('-'))(12, ?) return $f(5)", INVTYPE_X);
+  }
+
+  /** Checks that a partial application is rewritten to a closure and inlined. */
+  @Test public void partAppClosure() {
+    check("declare function local:f($a as xs:integer, $b as xs:integer) { $a + $b };" +
+        "for $i in 1 to 2 return local:f(?, $i)(1)",
+        "2\n3",
+        empty(PartFunc.class),
+        empty(Util.className(DynFuncCall.class))
+    );
+  }
+
+  /** Checks that a partial application is not rewritten if an argument must be coerced. */
+  @Test public void partAppCoercion() {
+    // supplied arguments are coerced when the function item is created, not when it is called
+    query("let $data := if(current-date() gt xs:date('2000-01-01')) then 23 else 'x' " +
+        "return try { contains(?, $data) } catch * { string($err:code) }", "err:XPTY0004");
+    query("let $data := if(current-date() gt xs:date('2000-01-01')) then 23 else 'x' " +
+        "return try { partial-apply(contains#2, { 2: $data }) } catch * { string($err:code) }",
+        "err:XPTY0004");
+  }
+
+  /** Checks that a partial application preserves the annotations of the target function. */
+  @Test public void partAppAnnotations() {
+    final String decl = "declare %basex:lazy function local:f($a, $b) { $a };";
+    query(decl + "string-join(function-annotations(local:f(?, 1)) ! map:keys(.) ! string())",
+        "basex:lazy");
+    query(decl + "string-join(function-annotations(partial-apply(local:f#2, { 2: 1 })) ! " +
+        "map:keys(.) ! string())", "basex:lazy");
+  }
+
+  /** Checks that a partial application with only placeholders returns the original function. */
+  @Test public void partAppIdentity() {
+    check("declare function local:f($a, $b) { $a }; local:f(?, ?)(1, 2)",
+        1,
+        empty(PartFunc.class)
+    );
+    query("contains(substring := ?, value := ?)('bar', 'foobar')", true);
+  }
+
+  /** Checks that fn:partial-apply supports maps and arrays. */
+  @Test public void partialApplyStructures() {
+    query("partial-apply({ 'a': 1, 'b': 2 }, {})('b')", 2);
+    query("partial-apply([ 10, 20, 30 ], { 1: 2 })()", 20);
+  }
+
+  /** Checks that the Y combinator is pre-compiled. */
+  @Test public void yCombinatorTest() {
+    check("function($f) {" +
+        "  let $loop := function($x) { $f(function() { $x($x) }) }" +
+        "  return $loop($loop)" +
+        "}(function($f) { 42 })",
+        42,
+        // both outer inline functions are pre-compiled
+        empty(Closure.class),
+        "/*/" + Util.className(Itr.class) + " = '42'"
+    );
+  }
+
+  /** Checks if statically unused functions are compiled at runtime. */
+  @Test public void compStatUnusedTest() {
+    check("declare function local:foo() { abs(?) };" +
+        "function-lookup(xs:QName(('local:foo')[" + _RANDOM_DOUBLE.args() + " < 1]), 0)()(-42)",
+        42,
+        empty(Util.className(StaticFuncs.class) + "/*")
+    );
+  }
+
+  /**
+   * Checks if statically used functions are compiled at compile time.
+   */
+  @Test public void gh382() {
+    check("declare function local:a() { local:b() };" +
+        "declare function local:b() { 42 };" +
+        "local:a#0()",
+        42,
+        empty(Closure.class)
+    );
+  }
+
+  /** Checks for circular references leading to stack overflows. */
+  @Test public void noLoopTest() {
+    check("declare function local:Y($f) { $f(function() { $f }) };" +
+        "let $f := local:Y(function($x) { $x() }) return exists($f ! .)",
+        true,
+        exists(FuncItem.class)
+    );
+  }
+
+  /** Checks for circular references leading to stack overflows. */
+  @Test public void noLoopTest2() {
+    check("declare function local:Y($f) { $f(function() { $f }) };" +
+        "for-each(function($x) { $x() }, local:Y#1)[2]",
+        "",
+        empty()
+    );
+  }
+
+  /** Checks for circular references leading to stack overflows. */
+  @Test public void noLoopTest3() {
+    check("declare function local:Y($f) { $f(function() { $f }) };" +
+        "let $f := for-each(function($x) { $x() }, local:Y#1) return $f[2]",
+        "",
+        empty()
+    );
+  }
+
+  /** Checks for circular references leading to stack overflows. */
+  @Test public void noLoopTest4() {
+    check("declare function local:foo($x) { function($f) { $f($x) } };" +
+        "declare function local:bar($f) { $f(function($_) { $f }) };" +
+        "let $a := local:foo(local:foo(function($e) { $e() })) " +
+        "let $b := local:bar($a) " +
+        "return exists($b ! .)",
+        true,
+        exists(FuncItem.class)
+    );
+  }
+
+  /** Checks for circular references leading to stack overflows. */
+  @Test public void noLoopTest5() {
+    check("declare function local:foo($f) { $f($f) };" +
+        "let $id := local:foo(function($g) { $g })" +
+        "return $id(42)",
+        42,
+        "//*/" + Util.className(Itr.class) + " = '42'"
+    );
+  }
+
+  /** Checks that recursive function items are not inlined. */
+  @Test public void noLoopTest6() {
+    check("let $f := function($f) { $f($f) } return $f($f)",
+        null,
+        exists(FuncItem.class)
+    );
+  }
+
+  /** Checks in non-recursive function items are inlined. */
+  @Test public void funcItemInlining() {
+    check("let $fold-left := function($f, $start, $seq) {\n" +
+        "  let $go :=\n" +
+        "    function($go, $acc, $xs) {\n" +
+        "      if(empty($xs)) then $acc\n" +
+        "      else $go($go, $f($acc, head($xs)), tail($xs))\n" +
+        "    }\n" +
+        "  return $go($go, $start, $seq)\n" +
+        "}\n" +
+        "return $fold-left(function($a, $b) { $a + $b }, 0, 1 to 100000)",
+
+        5000050000L,
+
+        // all inline functions are pre-compiled
+        empty(Closure.class),
+        // the addition function was inlined
+        count(Util.className(DynFuncCall.class), 3),
+        // the outer function item was inlined and removed
+        "every $f in //" + Util.className(FuncItem.class) + " satisfies $f/*[1]/@name = '$go'",
+        // there are only three variables left
+        "count(distinct-values(//" + Util.className(Var.class) + "/@id)) = 3"
+    );
+  }
+
+  /**
+   * GH-796: inlining a higher-order function whose typed parameter captures a closure used to
+   * raise a compile-time "Improper use?" exception.
+   */
+  @Test public void gh796() {
+    query("declare function local:f($x as item()) { function() { $x } };" +
+        "declare function local:g($f, $x) {if(fn:empty($f())) then local:f($x) else local:f(())};" +
+        "declare variable $x := local:g(function() { () }, function() { () });" +
+        "fn:count($x())",
+        1);
+    // captured closure returns more than one item (original report)
+    query("declare function local:f($x as item()) { function() { $x } };" +
+        "declare function local:g($f, $x) {if(fn:empty($f())) then local:f($x) else local:f(())};" +
+        "declare variable $x := local:g(function() { () }, function() { (), () });" +
+        "fn:count($x())",
+        1);
+    // no type annotation on the captured parameter
+    query("declare function local:f($x) { function() { $x } };" +
+        "declare function local:g($f, $x) {if(fn:empty($f())) then local:f($x) else local:f(())};" +
+        "declare variable $x := local:g(function() { () }, function() { () });" +
+        "fn:count($x())",
+        1);
+  }
+
+  /** Tests for coercion of function items. */
+  @Test public void funcItemCoercion() {
+    error("let $f := function($g as function() as item()) { $g() }" +
+        "return $f(function() { 1, 2 })", INVTYPE_X);
+    error("let $x as fn (xs:byte) as item() := fn($x as item()) { $x } return $x(384)", INVTYPE_X);
+    error("let $x as fn(xs:anyAtomicType) as xs:string? := { 1:'A', 'x':'B' } return $x?*",
+        LOOKUP_X);
+    error("let $x as fn(xs:integer) as xs:integer := [1, 2] return $x?*", LOOKUP_X);
+    error("let $x as fn(*) := { 1:'A', 'x':'B' } return $x?*", LOOKUP_X);
+    error("let $x as fn(*) := [1, 2] return $x?*", LOOKUP_X);
+    error("declare variable $f as fn(xs:integer) as xs:string := string#1; $f('x')",
+        INVTYPE_X);
+
+    query("let $f as fn() as xs:anyAtomicType := fn() { <a/> } " +
+      "return $f() ! (. = ('1', '2'))", "false");
+  }
+
+  /** Checks if nested closures are inlined. */
+  @Test public void nestedClosures() {
+    check("for $i in 1 to 6 "
+        + "let $f := function($x) { $i * $x },"
+        + "    $g := function($y) { 2 * $f($y) }"
+        + "return $g($g(42))",
+        "168\n672\n1512\n2688\n4200\n6048",
+        count(Util.className(Closure.class), 1)
+    );
+  }
+
+  /** Tests if all functions are compiled when reflection takes places. */
+  @Test public void gh839() {
+    check("declare function local:f() { function() { () } };"
+        + "function-lookup(xs:QName('local:f'), 0)()(),"
+        + "inspect:functions()()()", "");
+  }
+
+  /** Tests if recursive function items are inlined only once. */
+  @Test public void gh879() {
+    check("declare function local:foo($root) {" +
+        "  let $go :=" +
+        "    function($go, $e) {" +
+        "      fold-left(" +
+        "        $e/foo, (), function($acc, $e) {" +
+        "          ($acc, xs:string($e/@ID), $go($go, $e))" +
+        "        }" +
+        "      )" +
+        "    }" +
+        "  return $go($go, $root)" +
+        "};" +
+        "local:foo(document { <foo ID=\"a\"><foo ID=\"b\"/></foo> })",
+        "a\nb",
+        empty(StaticFuncCall.class),
+        exists(DynFuncCall.class),
+        exists(FuncItem.class)
+    );
+  }
+
+  /** Tests if recursive function items are inlined only once. */
+  @Test public void gh2033() {
+    check("let $p := function($c, $q) { $c/* ! $q(?, $q)(.) } return $p((), $p)",
+        "",
+        empty()
+    );
+    // GH-2324
+    query("declare variable $f := {"
+        + "  'A': function($r, $f) { $r/x ! $f?B(., $f) },"
+        + "  'B': function($r, $f) { $r/x ! $f?A(., $f) }"
+        + "};"
+        + "$f?A(<a/>, $f)", "");
+    query("let $even := fn($n, $self, $odd) {"
+        + "  $n = 0 and $odd($n - 1, $odd, $self)"
+        + "}"
+        + "let $odd := fn($n, $self, $even) {"
+        + "  $n != 0 or $even($n - 1, $even, $self)"
+        + "}"
+        + "return $even(1, $even, $odd)", false);
+  }
+
+  /** Tests if not-yet-known function references are parsed correctly. */
+  @Test public void gh953() {
+    check("declare function local:go ($n) { $n, for-each($n/*, local:go(?)) };" +
+        "let $source := <a><b/></a> return local:go($source)",
+        "<a><b/></a>\n<b/>"
+    );
+  }
+
+  /** Tests if {@code fn:error()} is allowed with impossible types. */
+  @Test public void gh958() {
+    error("declare function local:f() as item()+ { error() }; local:f()", FUNERR1);
+    error("function() as item()+ { error() }()", FUNERR1);
+  }
+
+  /** Checks that runtime values are not inlined into the static AST. */
+  @Test public void gh1023() {
+    check("for $n in (<a/>, <b/>)"
+        + "let $f := function() as element()* { trace($n) }"
+        + "return $f()",
+        "<a/>\n<b/>");
+  }
+
+  /** Checks that functions circularly referenced through function literals are compiled. */
+  @Test public void gh1038() {
+    check("declare function local:a() { let $a := local:c() return () };"
+        + "declare function local:b() { let $a := function() { local:a() } return () };"
+        + "declare function local:c() { local:b#0() };"
+        + "local:c() ",
+        "",
+        empty());
+  }
+
+  /** Static typing. */
+  @Test public void gh1649() {
+    check("function($v) { if($v = 0) then () else $v }(<x>0</x>)",
+        "",
+        root(IterFilter.class));
+  }
+
+  /** Simplification of map/array arguments. */
+  @Test public void simplify() {
+    check("[0](data(<_>1</_>))", 0, empty(DATA));
+    check("{ 'a': 0 }(data(<_>a</_>))", 0, empty(DATA));
+    check("{ 1: 0 }(data(<_>1</_>))", "", empty(DATA));
+  }
+
+  /** Fold optimizations. */
+  @Test public void fold() {
+    // all expressions will have a terrible runtime when the optimization fails
+    inline(true);
+
+    final String seq = " 1 to 1_000_000_000_000_000_000";
+
+    // return unchanged result
+    check(FOLD_LEFT.args(seq, 456, " fn($r, $i) { $r }"), 456, root(Itr.class));
+    check(FOLD_RIGHT.args(seq, 456, " fn($i, $r) { $r }"), 456, root(Itr.class));
+
+    // return constant value
+    check(FOLD_LEFT.args(seq, 1, " fn($r, $i) { 123 }"), 123, root(Itr.class));
+    check(FOLD_RIGHT.args(seq, 1, " fn($i, $r) { 123 }"), 123, root(Itr.class));
+
+    // exit early if result will not change anymore
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { if($r < 100) then $r + $i else $r }"),
+        106);
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { if($r > 100) then $r + $i else $r }"),
+        1);
+    query(FOLD_RIGHT.args(seq, 1, " fn($i, $r) { if($r < 10) then $r + $i else $r }"),
+        1000000000000000001L);
+    query(FOLD_RIGHT.args(seq, 1, " fn($i, $r) { if($r > 10) then $r else $r + $i }"),
+        1000000000000000001L);
+
+    query(FOLD_LEFT.args(seq, 0, " fn($r, $i) { if($r eq 10) then 10 else $r + $i }"),
+        10);
+    query(FOLD_RIGHT.args(" reverse(" + seq + ")", 0,
+        " fn($i, $r) { if($r eq 10) then 10 else $r + $i }"),
+        10);
+    query(FOLD_LEFT.args(seq, 0, " fn($r, $i) { if($r = 10) then 10 else $r + $i }"),
+        10);
+    query(FOLD_RIGHT.args(" reverse(" + seq + ")", 0,
+        " fn($i, $r) { if($r = 10) then 10 else $r + $i }"),
+        10);
+    query(FOLD_LEFT.args(seq, '0', " fn($r, $i) { if($r = '9') then '9' else string($i) }"),
+        9);
+    query(FOLD_RIGHT.args(" reverse(" + seq + "), '0', "
+        + "fn($i, $r) { if($r = '9') then '9' else string($i) }"),
+        9);
+
+    // bug fix
+    query(FOLD_RIGHT.args(" 1 to 100000", 1,
+        " fn($a, $b) { if($b > 10000000) then $b else $a + $b }"),
+        10094951);
+
+    // return unchanged result
+    final String array = " array { 1 to 100000 }";
+    check(_ARRAY_FOLD_LEFT.args(array, 456, " fn($r, $i) { $r }"), 456, root(Itr.class));
+    check(_ARRAY_FOLD_RIGHT.args(array, 456, " fn($i, $r) { $r }"), 456, root(Itr.class));
+
+    query(FOLD_LEFT.args(seq, 1, " fn() { () }"), "");
+    query(FOLD_LEFT.args(seq, 1, " fn() { 1 }"), 1);
+    query(FOLD_LEFT.args(seq, 1, " fn() { 1, 2, 3 }"), "1\n2\n3");
+
+    query(FOLD_LEFT.args(seq, 1, " fn { . }"), 1);
+    query(FOLD_LEFT.args(seq, 1, " fn { 1 }"), 1);
+    query(FOLD_LEFT.args(seq, 1, " fn { if(.) then . else 123 }"), 1);
+
+    query(FOLD_LEFT.args(seq, 1, " fn($r) { $r }"), 1);
+    query(FOLD_LEFT.args(seq, 1, " fn($r) { 1 }"), 1);
+    query(FOLD_LEFT.args(seq, 1, " fn($r) { if($r) then $r else 123 }"), 1);
+
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { $r }"), 1);
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { 1 }"), 1);
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { if($r) then $r else 123 }"), 1);
+
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { if($r > 10) then $r else $i }"), 11);
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { if($r < 10) then $i else $r }"), 10);
+
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { if($r = 12) then 12 else $i }"), 12);
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { if($r != 12) then $i else 12 }"), 12);
+
+    query(FOLD_LEFT.args(seq, 1, " fn($r, $i) { $i }"), 1000000000000000000L);
+    query(FOLD_RIGHT.args(seq, 1, " fn($i, $r) { $i }"), 1L);
+
+    query(FOLD_LEFT.args(seq, false, " fn($r, $i) { $r or $i > 10 }"), true);
+    query(FOLD_LEFT.args(seq, true,  " fn($r, $i) { $r or $i > 10 }"), true);
+    query(FOLD_LEFT.args(seq, false, " fn($r, $i) { $r and $i < 10 }"), false);
+    query(FOLD_LEFT.args(seq, true,  " fn($r, $i) { $r and $i < 10 }"), false);
+
+    query(FOLD_LEFT.args(seq, false, " fn($r, $i) { $i > 10 or $r }"), true);
+    query(FOLD_LEFT.args(seq, true,  " fn($r, $i) { $i > 10 or $r }"), true);
+    query(FOLD_LEFT.args(seq, false, " fn($r, $i) { $i < 10 and $r }"), false);
+    query(FOLD_LEFT.args(seq, true,  " fn($r, $i) { $i < 10 and $r }"), false);
+
+    // bug fix
+    query(_ARRAY_FOLD_RIGHT.args(array, 1,
+        " fn($a, $b) { if($b > 10000000) then $b else $a + $b }"),
+        10094951);
+  }
+
+  /** Checks order of keyword placeholder parameters of partially evaluated function. */
+  @Test public void placeholderOrder() {
+    query("declare function local:f($s as xs:string, $i as xs:integer) { $s, $i }; "
+        + "let $result := local:f(i := ?, s := ?)(4.0, xs:anyURI('XQuery'))"
+        + "return ($result[1] instance of xs:string, $result[2] instance of xs:integer)",
+        "true\ntrue");
+  }
+
+  /** Variable declarations with function-lookup. */
+  @Test public void gh2324() {
+    query("declare variable $a := function-lookup(xs:QName('local:f'), 0);"
+        + "declare variable $b := $a;"
+        + "declare function local:f() { $b };"
+        + "local:f() => function-name()",
+        "#local:f");
+  }
+
+  /** Circular default parameters: stack overflow. */
+  @Test public void gh2525() {
+    query("declare record local:rec(i, inc := fn { local:rec(?i + 1) }); local:rec(2)?i", 2);
+    query("""
+      declare record local:rec(i as xs:integer, inc as fn(local:rec) as local:rec := function ($r) {
+        local:rec($r?i + 1)
+      });
+      local:rec(2)?i""", 2);
+
+    query("declare function local:f($x := local:f#0) { $x }; local:f()", "local:f#0");
+    query("declare function f($a := fn() { f() } ) {}; f()", "");
+    query("""
+      declare function f($a := fn() { g() } ) {};
+      declare function g($a := fn() { f() } ) {};
+      f()""", "");
+    query("""
+      declare function f($a := fn() { g() } ) {};
+      declare function g($a := fn() { f() } ) { f() };
+      f(), g()""", "");
+    query("""
+      declare function f($a := fn() { g() } ) { $a() };
+      declare function g($a := fn() { h() } ) { $a() };
+      declare function h() { 1 };
+      f()""", 1);
+  }
+
+  /** Self-referencing default arguments. */
+  @Test public void gh2745() {
+    error("declare function f($f := f()) {}; f()", CIRCDFLT_X_X);
+    error("declare function f($f := g()) {}; declare function g($g := f()) {}; f()", CIRCDFLT_X_X);
+    error("declare record r(a := r()?a); r()?a", CIRCDFLT_X_X);
+
+    query("declare function f($x as xs:int, $y as xs:int := f(3, 4)) { $x + $y }; f(3)", 10);
+    query("declare function f($x as xs:int, $y as xs:int := g(3)) { $x + $y };"
+        + "declare function g($x as xs:int, $y as xs:int := f(3, 4)) { $x + $y }; f(5)", 15);
+  }
+
+  /** Function call, wrong argument type. */
+  @Test public void gh2526() {
+    query("{1: 2}(<x>1</x>)", "");
+
+    error("""
+      declare %basex:inline(0) function local:self($f as fn(xs:string) as item()*) {
+        $f(1.1)
+      };
+      local:self(identity#1)""", INVTYPE_X);
+  }
+
+  /** Map lookup causing double to integer comparison; StructFilter context setting. */
+  @Test public void gh2546() {
+    query("let $m := { 1: 0 } return $m({ \"x\": 1e0 }?x)", "0");
+    query("let $m := { 1: 0 } return $m(1e0)", "0");
+  }
+}

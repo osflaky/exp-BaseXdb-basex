@@ -1,0 +1,33 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+
+import java.math.*;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnDivideDecimals extends StandardFunc {
+  @Override
+  public XQMap value(final QueryContext qc) throws QueryException {
+    final BigDecimal value = checkType(arg(0), BasicType.DECIMAL, qc).dec(info);
+    final BigDecimal divisor = checkType(arg(1), BasicType.DECIMAL, qc).dec(info);
+    final Item precision = arg(2).atomItem(qc, info);
+    if(divisor.signum() == 0) throw DIVZERO_X.get(info, value);
+
+    final int scale = precision.isEmpty() ? 0 : (int) Math.max(-1 << 20,
+        Math.min(1 << 20, toLong(precision)));
+    final BigDecimal quotient = value.divide(divisor, scale, RoundingMode.DOWN);
+    final BigDecimal remainder = value.subtract(quotient.multiply(divisor));
+    return XQMap.get(Records.DIVISION.get(), Dec.get(quotient), Dec.get(remainder));
+  }
+}

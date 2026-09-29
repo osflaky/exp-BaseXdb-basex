@@ -1,0 +1,108 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryText.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.func.fn.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Cast expressions.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+abstract class Convert extends Single {
+  /** Target sequence type. */
+  final SeqType seqType;
+
+  /**
+   * Function constructor.
+   * @param info input info (can be {@code null})
+   * @param expr expression
+   * @param seqType target sequence type
+   * @param targetType static type of this expression
+   */
+  Convert(final InputInfo info, final Expr expr, final SeqType seqType, final SeqType targetType) {
+    super(info, expr, targetType);
+    this.seqType = seqType;
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) throws QueryException {
+    // only atomizing casts benefit from string simplification (not item(), arrays, maps, records)
+    final Type dt = TypeRef.deref(seqType.type);
+    if(dt != BasicType.ITEM && !(dt instanceof FType)) {
+      expr = expr.simplifyFor(Simplify.STRING, cc);
+    }
+    return this;
+  }
+
+  /**
+   * Returns a stricter cast type.
+   * @return sequence type
+   */
+  public final SeqType castType() {
+    final SeqType est = expr.seqType();
+    Type type = seqType.type;
+    Occ occ = seqType.occ;
+    if(type instanceof ListType) {
+      type = type.atomic();
+      occ = Occ.ZERO_OR_MORE;
+    } else if(occ == Occ.ZERO_OR_ONE && est.oneOrMore() && !est.mayBeWrapped()) {
+      occ = Occ.EXACTLY_ONE;
+    }
+    return SeqType.get(type, occ);
+  }
+
+  /**
+   * Checks if the expression can be cast to the specified type.
+   * @param castType type to cast to
+   * @return result of check or {@code null}
+   */
+  final Boolean castable(final SeqType castType) {
+    final SeqType est = expr.seqType();
+    if(!est.mayBeWrapped()) {
+      // the input cardinality is constrained by the target type, also for list types
+      final long es = expr.size();
+      if(es != -1 && !seqType.occ.check(es)) return false;
+
+      final Type et = est.type;
+      if(et.instanceOf(castType.type) && est.occ.instanceOf(castType.occ) &&
+          (et.eq(castType.type) || castType.type == BasicType.NUMERIC) &&
+          castType.type != BasicType.ERROR) return true;
+    }
+    return null;
+  }
+
+  /**
+   * Checks if the argument can be simplified.
+   * @param castType type to cast to
+   * @param cc compilation context
+   * @return simplified argument or {@code null}
+   */
+  final Expr simplify(final SeqType castType, final CompileContext cc) {
+    final SeqType est = expr.seqType();
+    Expr arg = null;
+    if(est.one() && !est.mayBeWrapped() && castType.type.instanceOf(BasicType.NUMERIC)) {
+      // xs:int(string(I))
+      // xs:int(xs:double(I)) → xs:int(I)
+      arg = FnNumber.simplify(expr, cc);
+      if(arg == null && expr instanceof final Cast cast && (
+        castType.type.instanceOf(est.type) ||
+        castType.type.instanceOf(BasicType.INT) && est.type == BasicType.DOUBLE ||
+        castType.type.instanceOf(BasicType.SHORT) && est.type == BasicType.FLOAT
+      )) {
+        arg = cast.expr;
+      }
+    }
+    return arg;
+  }
+
+  @Override
+  public final void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this, AS, seqType), expr);
+  }
+}

@@ -1,0 +1,122 @@
+package org.basex.index.ft;
+
+import static org.basex.util.Token.*;
+
+import java.io.*;
+
+import org.basex.data.*;
+import org.basex.index.*;
+import org.basex.io.random.*;
+
+/**
+ * This class provides temporary access to sorted list data.
+ *
+ * @author BaseX Team, BSD License
+ * @author Sebastian Gath
+ */
+final class FTList implements SegmentReader {
+  /** Empty integer array. */
+  private static final int[] NOINTS = {};
+
+  /** Storing PRE and POS values for each token. */
+  private final DataAccess dat;
+  /** Wasted flag. */
+  private boolean wasted;
+
+  /** Token positions. */
+  private final int[] tp;
+  /** Pointer on current token length. */
+  private int ctl;
+  /** Pointer on next token length. */
+  private int ntl;
+  /** Number of written bytes for tokens. */
+  private int ptok;
+
+  /** Indexed tokens. */
+  private final DataAccess str;
+
+  /** Current data size. */
+  private int size;
+  /** Next token. */
+  private byte[] token;
+  /** Next PRE values. */
+  private int[] prv;
+  /** Next pos values. */
+  private int[] pov;
+
+  /**
+   * Constructor, initializing the index structure.
+   * @param data data
+   * @param prefix file prefix of the index structure
+   * @throws IOException I/O exception
+   */
+  FTList(final Data data, final String prefix) throws IOException {
+    str = new DataAccess(data.meta.dbFile(prefix + 'y'));
+    dat = new DataAccess(data.meta.dbFile(prefix + 'z'));
+    tp = FTSegment.positions(data, prefix, str.length());
+    next();
+  }
+
+  @Override
+  public byte[] key() {
+    return token.length == 0 ? null : token;
+  }
+
+  @Override
+  public int[] ids() {
+    return prv;
+  }
+
+  @Override
+  public int[] poss() {
+    return pov;
+  }
+
+  @Override
+  public void next() {
+    if(wasted) return;
+
+    token = token();
+    if(token.length == 0) {
+      prv = NOINTS;
+      pov = NOINTS;
+      close();
+    } else {
+      prv = new int[size];
+      pov = new int[size];
+      for(int j = 0; j < size; j++) {
+        prv[j] = dat.readNum();
+        pov[j] = dat.readNum();
+      }
+    }
+  }
+
+  @Override
+  public void close() {
+    if(wasted) return;
+    wasted = true;
+    str.close();
+    dat.close();
+  }
+
+  /**
+   * Returns next token.
+   * @return byte[] token
+   */
+  private byte[] token() {
+    if(tp[tp.length - 1] == ptok) return EMPTY;
+    if(tp[ntl] == ptok || ntl == 0) {
+      do ++ctl; while(tp[ctl] == -1);
+      ntl = ctl + 1;
+      while(tp[ntl] == -1) ++ntl;
+    }
+    if(ctl == tp.length) return EMPTY;
+
+    final byte[] t = str.readBytes(ptok, ctl);
+    // skip pointer
+    size = str.read4(str.cursor() + 5);
+    // position will always fit in an integer...
+    ptok = (int) str.cursor();
+    return t;
+  }
+}

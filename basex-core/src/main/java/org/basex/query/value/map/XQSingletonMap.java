@@ -1,0 +1,88 @@
+package org.basex.query.value.map;
+
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Map with a single entry.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class XQSingletonMap extends XQMap {
+  /** Key. */
+  private final Item k;
+  /** Value. */
+  private Value v;
+
+  /**
+   * Constructor.
+   * @param key key
+   * @param value value
+   */
+  XQSingletonMap(final Item key, final Value value) {
+    super(MapType.get(key.type, value.seqType()));
+    k = key;
+    v = value;
+  }
+
+  @Override
+  public long structSize() {
+    return 1;
+  }
+
+  @Override
+  public Value getOrNull(final Item key) throws QueryException {
+    return key.atomicEqual(k) ? v : null;
+  }
+
+  @Override
+  public Value keys() {
+    return k;
+  }
+
+  @Override
+  public Item keyAt(final long index) {
+    return k;
+  }
+
+  @Override
+  public Value valueAt(final long index) {
+    return v;
+  }
+
+  @Override
+  public XQMap put(final Item key, final Value value) throws QueryException {
+    if(key.atomicEqual(k)) return putAt(0, value);
+    return empty().put(k, v).put(key, value);
+  }
+
+  @Override
+  public XQMap putAt(final int index, final Value value) {
+    return value == v ? this : new XQSingletonMap(k, value);
+  }
+
+  @Override
+  public XQMap remove(final Item key) throws QueryException {
+    return key.atomicEqual(k) ? empty() : this;
+  }
+
+  @Override
+  public void forEach(final QueryBiConsumer<Item, Value> func) throws QueryException {
+    func.accept(k, v);
+  }
+
+  @Override
+  public boolean test(final QueryBiPredicate<Item, Value> func) throws QueryException {
+    return func.test(k, v);
+  }
+
+  @Override
+  public Item shrink(final QueryContext qc) throws QueryException {
+    v = v.shrink(qc);
+    refineType();
+    return this;
+  }
+}

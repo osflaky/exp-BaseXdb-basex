@@ -1,0 +1,330 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryText.*;
+
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Switch expression.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Switch extends ParseExpr {
+  /** Condition. */
+  private Expr cond;
+  /** Case groups. */
+  private SwitchGroup[] groups;
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param cond condition
+   * @param groups case groups (last one is default case)
+   */
+  public Switch(final InputInfo info, final Expr cond, final SwitchGroup[] groups) {
+    super(info, Types.ITEM_ZM);
+    this.cond = cond;
+    this.groups = groups;
+  }
+
+  @Override
+  public boolean navigational() {
+    for(final SwitchGroup group : groups) {
+      if(!group.rtrn().navigational()) return false;
+    }
+    return true;
+  }
+
+  @Override
+  public void checkUp() throws QueryException {
+    checkNoUp(cond);
+    for(final SwitchGroup group : groups) group.checkUp();
+    // check if none or all return expressions are updating
+    final ExprList rtrns = new ExprList(groups.length);
+    for(final SwitchGroup group : groups) rtrns.add(group.rtrn());
+    checkAllUp(rtrns.finish());
+  }
+
+  @Override
+  public Expr compile(final CompileContext cc) throws QueryException {
+    cond = cond.compile(cc);
+    for(final SwitchGroup group : groups) group.compile(cc);
+    return optimize(cc);
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) throws QueryException {
+    cond = cond.simplifyFor(Simplify.STRING, cc);
+
+    // check if expression can be pre-evaluated
+    final Expr expr = opt(cc);
+    if(expr != this) return cc.replaceWith(this, expr);
+
+    // combine types of return expressions
+    exprType.assign(SeqType.union(groups, true)).data(groups);
+
+    return this;
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    boolean changed = false;
+    for(final SwitchGroup group : groups) {
+      changed |= group.simplifyFor(mode, cc) == null;
+    }
+    return changed ? optimize(cc) : super.simplifyFor(mode, cc);
+  }
+
+  /**
+   * Optimizes the expression.
+   * @param cc compilation context
+   * @return optimized or original expression
+   * @throws QueryException query exception
+   */
+  private Expr opt(final CompileContext cc) throws QueryException {
+    final ExprList cases = new ExprList();
+    Item cnd = cond instanceof Value ? cond.atomItem(cc.qc, info) : null;
+    final ArrayList<SwitchGroup> tmpGroups = new ArrayList<>();
+    for(final SwitchGroup group : groups) {
+      final int el = group.exprs.length;
+      final ExprList list = new ExprList(el).add(group.rtrn());
+      for(int e = 1; e < el; e++) {
+        final Expr expr = group.exprs[e];
+        // check if same case expression exists more than once
+        // (nondeterministic duplicates are kept, as they would otherwise lose their side effects)
+        boolean remove = cases.contains(expr) && !expr.has(Flag.NDT);
+        if(!remove && cnd != null) {
+          // pre-evaluate values; skip remaining checks if match is found
+          if(expr instanceof Value) {
+            if(group.match(cnd, e, cc.qc)) return group.rtrn();
+            remove = true;
+          } else {
+            // value unknown at compile: perform no further compile-time checks
+            cnd = null;
+          }
+        }
+        if(remove) {
+          cc.info(OPTREMOVE_X_X, expr, (Supplier<?>) this::description);
+        } else {
+          cases.add(expr);
+          list.add(expr);
+        }
+      }
+      // build list of branches (add those with case left, or the default branch)
+      if(list.size() > 1 || el == 1) {
+        group.exprs = list.finish();
+        tmpGroups.add(group);
+      }
+    }
+
+    // merge branches with identical return path
+    for(int g = 0; g < tmpGroups.size(); g++) {
+      final SwitchGroup group1 = g > 0 ? tmpGroups.get(g - 1) : null, group2 = tmpGroups.get(g);
+      if(g > 0 && group1.rtrn().equals(group2.rtrn())) {
+        if(g + 1 == tmpGroups.size() && !group1.has(Flag.NDT)) {
+          tmpGroups.set(g - 1, group2);
+        } else {
+          final ExprList list = new ExprList(group1.exprs.length + group2.exprs.length - 1);
+          list.add(group1.exprs).add(Arrays.copyOfRange(group2.exprs, 1, group2.exprs.length));
+          tmpGroups.set(g - 1, new SwitchGroup(group1.info, list.finish()).optimize(cc));
+        }
+        tmpGroups.remove(g--);
+      }
+    }
+
+    // update branches
+    if(tmpGroups.size() != groups.length) {
+      groups = tmpGroups.toArray(SwitchGroup[]::new);
+      cc.info(OPTSIMPLE_X_X, (Supplier<?>) this::description, this);
+    }
+
+    Expr expr = toBranch();
+    if(expr == this) expr = toIf(cc);
+    return expr;
+  }
+
+  /**
+   * Rewrites a switch with identical branches to a single branch.
+   * @return new or original expression
+   */
+  private Expr toBranch() {
+    // only the default branch may be left at this stage
+    final Expr expr = groups[0].rtrn();
+    for(int g = groups.length - 1; g >= 1; g--) {
+      if(!expr.equals(groups[g].rtrn())) return this;
+    }
+    return expr;
+  }
+
+  /**
+   * Rewrites the switch to an if expression.
+   * @param cc compilation context
+   * @return new or original expression
+   * @throws QueryException query exception
+   */
+  private Expr toIf(final CompileContext cc) throws QueryException {
+    if(groups.length != 2) return this;
+
+    final SeqType st = cond.seqType();
+    final boolean string = st.type.isStringOrUntyped(), dec = st.type.instanceOf(BasicType.DECIMAL);
+    if(!st.one() || !(string || dec)) return this;
+
+    final Expr[] exprs = groups[0].exprs;
+    for(int e = exprs.length - 1; e >= 1; e--) {
+      final SeqType est = exprs[e].seqType();
+      if(!est.oneOrMore() || !(
+        string && est.type.isStringOrUntyped() ||
+        dec && est.type.instanceOf(BasicType.DECIMAL)
+      )) return this;
+    }
+
+    // switch($c) case 'a' return B default return C → if($c = 'a') then B else C
+    final Expr list = List.get(cc, groups[0].info, Arrays.copyOfRange(exprs, 1, exprs.length));
+    final CmpG cmp = new CmpG(groups[0].info, cond, list, CmpOp.EQ);
+    return new If(info, cmp.optimize(cc), groups[0].rtrn(), groups[1].rtrn()).optimize(cc);
+  }
+
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    return expr(qc).iter(qc);
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return expr(qc).value(qc);
+  }
+
+  @Override
+  protected boolean ebv(final QueryContext qc) throws QueryException {
+    return expr(qc).ebv(qc, info);
+  }
+
+  @Override
+  public boolean eager() {
+    return Checks.all(groups, group -> group.rtrn().eager());
+  }
+
+  /**
+   * Tests the conditions and returns the expression to evaluate.
+   * @param qc query context
+   * @return case expression
+   * @throws QueryException query exception
+   */
+  private Expr expr(final QueryContext qc) throws QueryException {
+    final Item item = cond.atomItem(qc, info);
+    for(final SwitchGroup group : groups) {
+      if(group.match(item, qc)) return group.rtrn();
+    }
+    throw Util.notExpected();
+  }
+
+  @Override
+  public boolean vacuous() {
+    return Checks.all(groups, group -> group.rtrn().vacuous());
+  }
+
+  @Override
+  public boolean ddo() {
+    return Checks.all(groups, group -> group.rtrn().ddo());
+  }
+
+  @Override
+  public boolean has(final Flag... flags) {
+    for(final SwitchGroup group : groups) {
+      if(group.has(flags)) return true;
+    }
+    return cond.has(flags);
+  }
+
+  @Override
+  public boolean inlineable(final InlineContext ic) {
+    for(final SwitchGroup group : groups) {
+      if(!group.inlineable(ic)) return false;
+    }
+    return cond.inlineable(ic);
+  }
+
+  @Override
+  public VarUsage count(final Var var) {
+    VarUsage max = VarUsage.NEVER, uses = VarUsage.NEVER;
+    for(final SwitchGroup cs : groups) {
+      uses = uses.plus(cs.countCases(var));
+      max = max.max(uses.plus(cs.count(var)));
+    }
+    return max.plus(cond.count(var));
+  }
+
+  @Override
+  public Expr inline(final InlineContext ic) throws QueryException {
+    boolean changed = ic.inline(groups, true);
+    final Expr inlined = cond.inline(ic);
+    if(inlined != null) {
+      changed = true;
+      cond = inlined;
+    }
+    return changed ? optimize(ic.cc) : null;
+  }
+
+  @Override
+  public Expr inlineTypeCheck(final TypeCheck tc, final CompileContext cc) throws QueryException {
+    // (switch(C) case X return A default return B) coerce to T →
+    //   switch(C) case X return (A coerce to T) default return (B coerce to T)
+    boolean changed = false;
+    for(final SwitchGroup group : groups) {
+      changed |= group.inlineTypeCheck(tc, cc) != null;
+    }
+    return changed ? optimize(cc) : this;
+  }
+
+  @Override
+  public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new Switch(info, cond.copy(cc, vm), Arr.copyAll(cc, vm, groups)));
+  }
+
+  @Override
+  public void markTailCalls(final CompileContext cc) {
+    for(final SwitchGroup group : groups) group.markTailCalls(cc);
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return cond.accept(visitor) && visitAll(visitor, groups);
+  }
+
+  @Override
+  public int exprSize() {
+    int size = 1;
+    for(final Expr group : groups) size += group.exprSize();
+    return size;
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final Switch s && cond.equals(s.cond) &&
+        Array.equals(groups, s.groups);
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this), cond, groups);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.token(SWITCH).paren(cond).tokens(groups);
+  }
+}

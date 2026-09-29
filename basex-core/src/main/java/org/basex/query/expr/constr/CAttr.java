@@ -1,0 +1,105 @@
+package org.basex.query.expr.constr;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+import static org.basex.util.Token.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Attribute constructor.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class CAttr extends CName {
+  /** Generated namespace. */
+  private static final byte[] NS0 = token("ns0:");
+  /** XML prefix. */
+  private static final byte[] XML0 = token("xml:");
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param computed computed construction flag
+   * @param name name
+   * @param value attribute value
+   */
+  public CAttr(final InputInfo info, final boolean computed, final Expr name, final Expr... value) {
+    super(info, Types.ATTRIBUTE_O, computed, name, value);
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) throws QueryException {
+    name = name.simplifyFor(Simplify.STRING, cc);
+    if(name instanceof Value) {
+      final QNm nm = qname(false, cc.qc);
+      name = nm;
+      exprType.assign(NodeType.get(NameTest.get(nm, Kind.ATTRIBUTE)));
+    }
+    optValue(cc);
+    return this;
+  }
+
+  @Override
+  public FAttr value(final QueryContext qc) throws QueryException {
+    QNm nm = qname(false, qc);
+    byte[] nmPrefix = nm.prefix();
+    final byte[] nmUri = nm.uri();
+    if(computed) {
+      // assign the xml prefix to prefix-less names in the XML namespace
+      if(nmPrefix.length == 0 && eq(nmUri, XML_URI)) {
+        nm = qc.shared.qName(concat(XML0, nm.string()), nmUri);
+        nmPrefix = nm.prefix();
+      }
+      if(eq(nmPrefix, XML) ^ eq(nmUri, XML_URI)) throw CAXML.get(info);
+      if(eq(nmUri, XMLNS_URI)) throw CAINV_X.get(info, nmUri);
+      if(eq(nmPrefix, XMLNS) || nmPrefix.length == 0 && eq(nm.string(), XMLNS))
+        throw CAINV_X.get(info, nm.string());
+
+      // create new standard namespace to cover most frequent cases
+      if(eq(nmPrefix, EMPTY) && !eq(nmUri, EMPTY))
+        nm = qc.shared.qName(concat(NS0, nm.string()), nmUri);
+    }
+    if(!nm.hasURI() && nm.hasPrefix()) throw NOQNNAMENS_X.get(info, nmPrefix);
+
+    byte[] value = atomValue(qc, true);
+    if(eq(nmPrefix, XML) && eq(nm.local(), ID)) value = normalize(value);
+
+    return new FAttr(nm, qc.shared.token(value));
+  }
+
+  @Override
+  public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new CAttr(info, computed, name.copy(cc, vm), copyAll(cc, vm, exprs)));
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof CAttr && super.equals(obj);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    if(computed) {
+      toString(qs, ATTRIBUTE);
+    } else {
+      qs.token(((QNm) name).string()).token('=');
+      if(exprs.length == 1 && exprs[0] instanceof final Str str) {
+        qs.quoted(str.string());
+      } else {
+        qs.token("\"{").tokens(exprs, SEP).token("}\"");
+      }
+    }
+  }
+}

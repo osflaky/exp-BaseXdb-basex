@@ -1,0 +1,5741 @@
+package org.basex.query.func;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.func.Function.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.*;
+import org.basex.core.cmd.*;
+import org.basex.io.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.List;
+import org.basex.query.expr.constr.*;
+import org.basex.query.expr.gflwor.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.func.fn.*;
+import org.basex.query.func.prof.ProfType.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * This class tests standard functions.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnModuleTest extends SandboxTest {
+  /** Document. */
+  private static final String DOC = "src/test/resources/input.xml";
+  /** Binds five items that are opaque at compile time; the variable must be used more than once. */
+  private static final String OPAQUE = "let $o := (1 to 5) ! data(attribute _ { . }) return ";
+  /** Months. */
+  private static final String MONTHS = " ('January', 'February', 'March', 'April', 'May', "
+      + "'June', 'July', 'August', 'September', 'October', 'November', 'December')";
+
+  /** Test method. */
+  @Test public void abs() {
+    final Function func = ABS;
+
+    check(func.args(" ()"), "", empty());
+    check("for $i in (1 to 2)[. != 0] return " + func.args(" $i"),
+        "1\n2", type(func, "xs:integer"));
+    check("for $i in (1, 2.0)[. != 0] return " + func.args(" $i"),
+        "1\n2", type(func, "xs:decimal"));
+    check(func.args(wrap(1)), 1, type(func, "xs:double"));
+
+    check("for $i in ([], [1])[. != 0] return " + func.args(" $i"),
+        1, type(func, "xs:numeric?"));
+    check("for $i in (1, <a>2</a>) return " + func.args(" $i"), "1\n2", type(func, "xs:numeric?"));
+
+    // pre-evaluate empty sequence
+    check(func.args(" ()"), "", empty(func));
+    // pre-evaluate argument
+    check(func.args(1), 1, empty(func));
+
+    // function is replaced by its argument (argument yields no result)
+    check(func.args(" void()"), "", empty(func));
+    // check adjusted type
+    check(func.args(wrap(1)), 1, type(func, "xs:double"));
+    check(func.args(wrap(1) + "! array { . }"), 1, type(func, "xs:double"));
+  }
+
+  /** Test method. */
+  @Test public void allDifferent() {
+    final Function func = ALL_DIFFERENT;
+
+    query(func.args(" ()"), true);
+    query(func.args(1), true);
+    query(func.args("x"), true);
+    query(func.args(" (1, 1)"), false);
+    query(func.args(" (1 to 1000) ! 1"), false);
+    query(func.args(" (1 to 1000) ! 'x'"), false);
+    query(func.args(" (1 to 2)"), true);
+    query(func.args(" (1, 2, 3)"), true);
+    query(func.args(" (1, 2, 3) ! string()"), true);
+    query(func.args(" (1, '1')"), true);
+    query(func.args(" (1, 1.0, 1e0)"), false);
+
+    query(func.args(" <a/>[. = '']"), true);
+    query(func.args(" (<a/>, <b/>)[. = '']"), false);
+    query(func.args(" <a/>[. != '']"), true);
+    query(func.args(" (<a/>, <b/>)[. != '']"), true);
+
+    query(func.args(" []"), true);
+    query(func.args(" [ 1 ]"), true);
+    query(func.args(" [ 1, 1 ]"), false);
+    query(func.args(" [ 1, 2 ]"), true);
+
+    query(func.args(" (1 to <_>1</_>/text())"), true);
+    query(func.args(" (1 to <_>2</_>/text())"), true);
+
+    query(func.args(" replicate((1 to 100)[. < 1], 100)"), true);
+    query(func.args(" replicate((1 to 100)[. < 2], 100)"), false);
+    query(func.args(" replicate((1 to 100)[. < 3], 100)"), false);
+    query(func.args(" reverse((1 to 10) ! string())"), true);
+    query(func.args(" sort((1 to 10) ! string())"), true);
+    check(func.args(SORT_BY.args(" (1 to 10) ! string()", " { 'key': data#1 }")), true,
+        empty(SORT_BY));
+    check(func.args(SORT_WITH.args(" (1 to 10) ! string()", " compare#2")), true,
+        empty(SORT_WITH));
+
+    final String c = "http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive";
+    query(func.args(" ('A', 'a')", c), false);
+    query(func.args(" ('A', 'b')", c), true);
+  }
+
+  /** Test method. */
+  @Test public void allEqual() {
+    final Function func = ALL_EQUAL;
+
+    query(func.args(" ()"), true);
+    query(func.args(1), true);
+    query(func.args("x"), true);
+    query(func.args(" (1, 1)"), true);
+    query(func.args(" (1 to 1000) ! 1"), true);
+    query(func.args(" (1 to 1000) ! 'x'"), true);
+    query(func.args(" (1 to 2)"), false);
+    query(func.args(" (1, 2, 3)"), false);
+    query(func.args(" (1, 2, 3) ! string()"), false);
+    query(func.args(" (1, '1')"), false);
+    query(func.args(" (1, 1.0, 1e0)"), true);
+
+    query(func.args(" <a/>[. = '']"), true);
+    query(func.args(" (<a/>, <b/>)[. = '']"), true);
+    query(func.args(" <a/>[. != '']"), true);
+    query(func.args(" (<a/>, <b/>)[. != '']"), true);
+
+    query(func.args(" []"), true);
+    query(func.args(" [ 1 ]"), true);
+    query(func.args(" [ 1, 1 ]"), true);
+    query(func.args(" [ 1, 2 ]"), false);
+
+    query(func.args(" (1 to <_>1</_>/text())"), true);
+    query(func.args(" (1 to <_>2</_>/text())"), false);
+
+    query(func.args(" replicate((1 to 100)[. < 1], 100)"), true);
+    query(func.args(" replicate((1 to 100)[. < 2], 100)"), true);
+    query(func.args(" replicate((1 to 100)[. < 3], 100)"), false);
+    query(func.args(" reverse((1 to 10) ! string())"), false);
+    query(func.args(" sort((1 to 10) ! string())"), false);
+    check(func.args(SORT_BY.args(" (1 to 10) ! string()", " { 'key': data#1 }")), false,
+        empty(SORT_BY));
+    check(func.args(SORT_WITH.args(" (1 to 10) ! string()", " compare#2")), false,
+        empty(SORT_WITH));
+
+    final String c = "http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive";
+    query(func.args(" ('A', 'a')", c), true);
+    query(func.args(" ('A', 'b')", c), false);
+  }
+
+  /** Test method. */
+  @Test public void analyzeString() {
+    final Function func = ANALYZE_STRING;
+    query(func.args("banana", "(b)(x?)"), "<analyze-string-result xmlns="
+        + "\"http://www.w3.org/2005/xpath-functions\"><match><group nr=\"1\">b</group>"
+        + "<group nr=\"2\"/></match><non-match>anana</non-match></analyze-string-result>");
+    query(func.args("banana", "(b(x?))"), "<analyze-string-result xmlns="
+        + "\"http://www.w3.org/2005/xpath-functions\"><match><group nr=\"1\">b<group nr=\"2\"/>"
+        + "</group></match><non-match>anana</non-match></analyze-string-result>");
+
+    query(func.args("a", ""), "<analyze-string-result xmlns=\"http://www.w3.org/2005/xpath-"
+        + "functions\"><match/><non-match>a</non-match><match/></analyze-string-result>");
+
+    // named capturing groups carry a name attribute (GH-2729)
+    query(func.args("2026", "(?<y>\\d+)"), "<analyze-string-result xmlns="
+        + "\"http://www.w3.org/2005/xpath-functions\"><match><group name=\"y\" nr=\"1\">2026"
+        + "</group></match></analyze-string-result>");
+    query(func.args("go", "\\b(?=(?<w>\\w+))"), "<analyze-string-result xmlns="
+        + "\"http://www.w3.org/2005/xpath-functions\"><match><lookahead-group name=\"w\" nr=\"1\" "
+        + "value=\"go\" position=\"1\"/></match><non-match>go</non-match></analyze-string-result>");
+  }
+
+  /** Test method. */
+  @Test public void apply() {
+    final Function func = APPLY;
+
+    query(func.args(" true#0", " []"), true);
+    query(func.args(" count#1", " [ (1, 2, 3) ]"), 3);
+    query(func.args(" string-join#1", " [ reverse(1 to 5) ! string() ]"), 54321);
+    query("let $func := function($a, $b, $c) { $a + $b + $c } "
+        + "let $args := [ 1, 2, 3 ] "
+        + "return " + func.args(" $func", " $args"), 6);
+    query("for $a in 2 to 3 "
+        + "let $f := function-lookup(#fn:concat, $a) "
+        + "return " + func.args(" $f", " array { 1 to $a }"), "12\n123");
+    query(func.args(" false#0", " [ 'x' ]"), false);
+    error(func.args(" string-length#1", " [ ('a', 'b') ]"), INVTYPE_X);
+
+    // no pre-evaluation (higher-order arguments), but type adjustment
+    inline(true);
+    check(func.args(" true#0", " []"), true, type(func, "xs:boolean"));
+    check(func.args(" count#1", " [ 1 ]"), 1, type(func, "xs:integer"));
+    check(func.args(" abs#1", " [ 1 ]"), 1, type(func, "xs:integer"));
+    check(func.args(" reverse#1", " [ () ]"), "", type(func, "empty-sequence()"));
+    check("(true#0, 1)[. instance of function(*)] ! " + func.args(" .", " []"), true,
+        type(func, "item()*"));
+
+    // code coverage tests
+    query("string-length(" + func.args(" reverse#1", " ['a']") + ")", 1);
+    query(func.args(" true#0", " [ 1 ]"), true);
+    error(func.args(" concat#2", " [ 'x' ]"), APPLY_X_X_X);
+    error(func.args(" put#2", " [ <_/>, '' ]"), FUNCUP_X);
+  }
+
+  /** Test method. */
+  @Test public void atomicEqual() {
+    final Function func = ATOMIC_EQUAL;
+    check(func.args(" <_>A</_>", "A"), true, root(Bln.class));
+    check("some((1 to 6) !" + func.args(" .", " .") + ')', true, root(Bln.class));
+
+    check(func.args(wrap(1), "1"), true, exists(CmpSimpleG.class));
+    check(func.args(" <?_ 1?>", "1"), true, exists(CmpSimpleG.class));
+    check(func.args(" false()", " boolean(" + wrap(1)) + ')', false, exists(NOT));
+    check("some((1 to 6) !" + func.args(" .", " . + 1") + ')', false, exists(CmpSimpleG.class));
+    check(func.args(" xs:anyURI('A')", " <?_ A?>"), true, root(CmpSimpleG.class));
+    check(func.args(" <?_ A?>", " xs:anyURI('A')"), true, root(CmpSimpleG.class));
+    check(func.args(" #a", " xs:QName(<?_ a?>)"), true, root(CmpSimpleG.class));
+    check(func.args(" xs:QName(<?_ a?>)", " #a"), true, root(CmpSimpleG.class));
+    check(func.args(" xs:integer(<?_ 1?>)", 1), true, root(CmpSimpleG.class));
+    check(func.args(1, " xs:integer(<?_ 1?>)"), true, root(CmpSimpleG.class));
+    check(func.args(" xs:byte(<?_ 1?>)", " xs:byte(1)"), true, root(CmpSimpleG.class));
+    check(func.args(" xs:byte(1)", " xs:byte(<?_ 1?>)"), true, root(CmpSimpleG.class));
+
+    check("declare default collation '?lang=de';" + func.args(wrap(1), "1"), true, root(func));
+    check(func.args(" array:build((1 to 10)[. = 1] ! string())", "1"), true, root(func));
+    check(func.args("1", " array:build((1 to 10)[. = 1] ! string())"), true, root(func));
+    check(func.args("1", " ([ <?_ 1?> ], 1)[. instance of array(*)]"), true, root(func));
+    check(func.args(" ([ <?_ 1?> ], 1)[. instance of array(*)]", "1"), true, root(func));
+    check(func.args(" #a", " <?_ 1?>"), false, root(func));
+    check(func.args(" <?_ 1?>", " #a"), false, root(func));
+    check(func.args(" <?_ 1?>", " true()"), false, root(func));
+
+    error(func.args(" ()", " <?_ 1?>"), INVTYPE_X);
+    error(func.args(" <?_ 1?>", " ()"), INVTYPE_X);
+    error(func.args(" true#0", " 1"), FIATOMIZE_X);
+    error(func.args(" 1", " true#0"), FIATOMIZE_X);
+  }
+
+  /** Test method. */
+  @Test public void atomicTypeAnnotation() {
+    final Function func = ATOMIC_TYPE_ANNOTATION;
+
+    query(func.args(23) + " ? name", "#xs:integer");
+    query("let $x := 23, $y := 93.7 return " + func.args(" $x") + "? matches($y)", false);
+    query(func.args(" xs:numeric('23.2')") + " ? name", "#xs:double");
+
+    final String q1 = func.args(" <a>42</a>");
+    query(q1, "{\"name\":#xs:untypedAtomic,"
+        + "\"is-simple\":true(),"
+        + "\"base-type\":fn() as fn:schema-type-record { (: fn:schema-type :)() },"
+        + "\"primitive-type\":fn() as fn:schema-type-record { (: fn:schema-type :)() },"
+        + "\"variety\":\"atomic\","
+        + "\"members\":(),"
+        + "\"simple-content-type\":(),"
+        + "\"matches\":fn($value) as xs:boolean { (: fn:schema-type :)($value) },"
+        + "\"constructor\":xs:untypedAtomic#1}");
+    query(q1 + "?name eq #xs:untypedAtomic", true);
+    query(q1 + "?is-simple", true);
+    query(q1 + "?variety", "atomic");
+    query(q1 + "?base-type()?name eq #xs:anyAtomicType", true);
+    query(q1 + "?base-type()?is-simple", true);
+    query(q1 + "?base-type()?variety", "atomic");
+    query(q1 + "?base-type()?base-type()?name eq #xs:anySimpleType", true);
+    query(q1 + "?base-type()?base-type()?is-simple", true);
+    query(q1 + "?base-type()?base-type()=> map:contains('variety')", true);
+    query(q1 + "?base-type()?base-type()?base-type()?name eq #xs:anyType", true);
+    query(q1 + "?base-type()?base-type()?base-type()?is-simple", false);
+    query(q1 + "?base-type()?base-type()?base-type()?variety", "mixed");
+    query(q1 + "?base-type()?base-type()?base-type()?base-type() => exists()", false);
+    query(q1 + "?primitive-type()?name eq #xs:untypedAtomic", true);
+    query(q1 + "=> map:contains('members')", true);
+    query(q1 + "=> map:contains('simple-content-type')", true);
+    query(q1 + "?matches(<a>abc</a>)", true);
+    query(q1 + "?constructor(<a>abc</a>)", "abc");
+
+    final String q2 = "let $q2 := " + func.args(" xs:unsignedByte(255)") + "\n return $q2";
+    query(q2, "{\"name\":#xs:unsignedByte,"
+        + "\"is-simple\":true(),"
+        + "\"base-type\":fn() as fn:schema-type-record { (: fn:schema-type :)() },"
+        + "\"primitive-type\":fn() as fn:schema-type-record { (: fn:schema-type :)() },"
+        + "\"variety\":\"atomic\","
+        + "\"members\":(),"
+        + "\"simple-content-type\":(),"
+        + "\"matches\":fn($value) as xs:boolean { (: fn:schema-type :)($value) },"
+        + "\"constructor\":xs:unsignedByte#1}");
+    query(q2 + "?name eq #xs:unsignedByte", true);
+    query(q2 + "?is-simple", true);
+    query(q2 + "?base-type()?name eq #xs:unsignedShort", true);
+    query(q2 + "?base-type()?is-simple", true);
+    query(q2 + "?base-type()?matches($q2?base-type()?constructor(255))", true);
+    query(q2 + "?primitive-type()?name eq #xs:decimal", true);
+    query(q2 + "?primitive-type()?base-type()?name eq #xs:anyAtomicType", true);
+    query(q2 + "?primitive-type() => deep-equal($q2?base-type()?primitive-type())", true);
+    query(q2 + "?variety", "atomic");
+    query(q2 + "=> map:contains('members')", true);
+    query(q2 + "=> map:contains('simple-content-type')", true);
+    query(q2 + "?matches($q2?constructor(255))", true);
+    query(q2 + "?matches($q2?base-type()?constructor(255))", false);
+    query(q2 + "?constructor(255) => ($q2?matches)()", true);
+
+    error(q2 + "?constructor(256)", FUNCCAST_X_X_X);
+
+    error(func.args(" ()"), INVTYPE_X);
+    error(func.args(" []"), INVTYPE_X);
+    error(func.args(" {}"), FIATOMIZE_X);
+    error(func.args(" [ 1, 2 ]"), INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void avg() {
+    final Function func = AVG;
+
+    check(func.args(" ()"), "", empty());
+    check(func.args(" void('x')"), "", empty(func));
+
+    check(func.args(" 1"), 1, empty(func));
+    check(func.args(" 1.0"), 1, empty(func));
+    check(func.args(" 1e0"), 1, empty(func));
+    check(func.args(" xs:float('1')"), 1, empty(func));
+    check(func.args(" (<a>1</a>, <a>3</a>)"), 2, empty(func));
+
+    check(func.args(" (1, 2)[. = 1]"), 1, type(func, "xs:decimal?"));
+    check(func.args(" (1.0, 2.0)[. = 1]"), 1, type(func, "xs:decimal?"));
+    check(func.args(" (1e0, 2e0)[. = 1]"), 1, type(func, "xs:double?"));
+    check(func.args(" (xs:float('1'), xs:float('2'))[. = 1]"), 1, type(func, "xs:float?"));
+
+    check(func.args(" (1, (3, 4)[. = 5])"), 1, type(func, "xs:decimal"));
+    check(func.args(" (1, (3.0, 4.0)[. = 5])"), 1, type(func, "xs:decimal"));
+
+    check(func.args(" (1 to 3)"), 2, empty(func));
+    check(func.args(" reverse(1 to 3)"), 2, empty(func));
+    check(func.args(" (1 to " + wrap(3) + ")"), 2, type(func, "xs:decimal?"));
+    check(func.args(" (1 to " + wrap(0) + ")"), "", type(func, "xs:decimal?"));
+    check(func.args(" (1 to 999999)"), 500000, empty(func));
+    check(func.args(" (1 to 999999) ! 1"), 1, empty(func));
+
+    check(func.args(" (1 to 3) ! 1"), 1, empty(func));
+    check(func.args(" (1 to 3) ! xs:untypedAtomic(1)"), 1, empty(func));
+
+    check(func.args(REPLICATE.args(1.0, 3)), 1, empty(func));
+    check(func.args(REPLICATE.args(wrap(1), 3)), 1, type(func, "xs:double"));
+
+    error(func.args(" true#0"), FIATOMIZE_X);
+    error(func.args(REPLICATE.args(" true#0", 2)), FIATOMIZE_X);
+    error(func.args(" (1 to 999999) ! true#0"), FIATOMIZE_X);
+
+    // average of durations: result has the duration type, not xs:decimal
+    check(func.args(" (xs:dayTimeDuration('PT1H'), xs:dayTimeDuration('PT3H'))"
+        + "[. ne xs:dayTimeDuration('PT0S')]"), "PT2H", type(func, "xs:dayTimeDuration?"));
+    check(func.args(" (xs:yearMonthDuration('P1Y'), xs:yearMonthDuration('P3Y'))"
+        + "[. ne xs:yearMonthDuration('P0M')]"), "P2Y", type(func, "xs:yearMonthDuration?"));
+  }
+
+  /**
+   * Test method.
+   * @throws IOException I/O exception
+   */
+  @Test public void baseUri() throws IOException {
+    final Function func = BASE_URI;
+    final String cd = new File(".").getCanonicalFile().toURI().toString().replaceFirst(
+        "^file:/(?!/)", "file:///");
+    query(func.args(" parse-xml('<x/>')"), cd);
+    query(func.args(" document{<x/>}"), cd);
+    query(func.args(" doc('src/test/resources/test.xml')"), cd + "src/test/resources/test.xml");
+    query("collection('src/test/resources/dir')!" + func.args(" .")
+        + "[ends-with(., '/test.xml')]", cd + "src/test/resources/dir/test.xml");
+  }
+
+  /** Test method. */
+  @Test public void bool() {
+    final Function func = BOOLEAN;
+
+    // pre-evaluated expressions
+    check(func.args(1), true, empty(func));
+    check(func.args(" ()"), false, empty(func));
+
+    // function is replaced with fn:exists
+    check(func.args(" <a>A</a>/text()"), true, exists(EXISTS));
+    // function is replaced by its argument (argument yields no result)
+    check("(false(), true())[" + func.args(" .") + "]", true, empty(func));
+    // no replacement
+    check("(false(), 1)[" + func.args(" .") + "]", 1, exists(func));
+
+    // optimize ebv
+    check("([], [])[. instance of xs:int][" + func.args(" .") + "]", "", empty(EXISTS));
+  }
+
+  /** Test method. */
+  @Test public void buildDateTime() {
+    final Function func = BUILD_DATETIME;
+    query(func.args(" ()"), "");
+    // examples from the spec
+    query(func.args(" { \"year\": 1999, \"month\": 5, \"day\": 31,"
+        + " \"hours\": 13, \"minutes\": 20, \"seconds\": 0,"
+        + " \"timezone\": xs:dayTimeDuration('-PT5H') }"),
+        "1999-05-31T13:20:00-05:00");
+    query(func.args(" {\"hours\": 13, \"minutes\": 30, \"seconds\": 4.2678}"),
+        "13:30:04.2678");
+    query(func.args(" { \"year\": 2007, \"month\": 5,"
+        + " \"timezone\": xs:dayTimeDuration('PT0S') }"),
+        "2007-05Z");
+    // xs:dateTime
+    query(func.args(" {\"year\": 2026, \"month\": 3, \"day\": 3,"
+        + " \"hours\": 14, \"minutes\": 41, \"seconds\": 56.789,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "2026-03-03T14:41:56.789+01:00");
+    // xs:date
+    query(func.args(" {\"year\": 2026, \"month\": 3, \"day\": 3,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "2026-03-03+01:00");
+    query(func.args(" {\"year\": -1, \"month\": 1, \"day\": 1}"),
+        "-0001-01-01");
+    // xs:time
+    query(func.args(" {\"hours\": 14, \"minutes\": 41, \"seconds\": 56.789,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "14:41:56.789+01:00");
+    // xs:gYear
+    query(func.args(" {\"year\": 2026,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "2026+01:00");
+    // xs:gYearMonth
+    query(func.args(" {\"year\": 2026, \"month\": 3,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "2026-03+01:00");
+    // xs:gMonth
+    query(func.args(" {\"month\": 3,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "--03+01:00");
+    // xs:gMonthDay
+    query(func.args(" {\"month\": 3, \"day\": 3,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "--03-03+01:00");
+    // xs:gDay
+    query(func.args(" {\"day\": 3,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"),
+        "---03+01:00");
+    // year 0
+    query(func.args(" {\"year\": 0, \"month\": 1, \"day\": 1}"), "0000-01-01");
+
+    // empty map
+    error(func.args(" {}"), INVDATETIMEFIELDS_X);
+    // invalid field set (year+day without month)
+    error(func.args(" {\"year\": 2026, \"day\": 3,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"), INVDATETIMEFIELDS_X);
+    // invalid field set (hours+minutes without seconds)
+    error(func.args(" {\"hours\": 14, \"minutes\": 41,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"), INVDATETIMEFIELDS_X);
+    // out of range component (minutes)
+    error(func.args(" {\"hours\": 14, \"minutes\": 60, \"seconds\": 0,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"), INVALIDVALUE_X_X);
+    // invalid date (March 0)
+    error(func.args(" {\"year\": 2026, \"month\": 3, \"day\": 0,"
+        + " \"timezone\": xs:dayTimeDuration('PT1H') }"), INVALIDVALUE_X_X);
+    // invalid date (February 29, 2026)
+    error(func.args(" {\"year\": 2026, \"month\": 2, \"day\": 29}"), INVALIDVALUE_X_X);
+    // invalid timezone (+15:00)
+    error(func.args(" {\"year\": 2026, \"month\": 3, \"day\": 3,"
+        + " \"timezone\": xs:dayTimeDuration('PT15H') }"), INVALIDZONE_X);
+  }
+
+  /** Test method. */
+  @Test public void charr() {
+    final Function func = CHAR;
+
+    // test pre-evaluation
+    query(func.args("\\t") + " => string-to-codepoints()", 9);
+    query(func.args("\\r") + " => string-to-codepoints()", 13);
+    query(func.args("\\n") + " => string-to-codepoints()", 10);
+    query(func.args("\\n"), "\n");
+    query(func.args(10), "\n");
+    query(func.args(" 0xa"), "\n");
+    query(func.args(" 0xA"), "\n");
+    query(func.args(" 0x0A"), "\n");
+    query(func.args(" 00000000000000000000010"), "\n");
+    query(func.args(" 0x0000000000000000000000A"), "\n");
+
+    query(func.args(32), " ");
+    query(func.args(" 0x20"), " ");
+
+    // permitted characters (XML 1.1 repertoire)
+    query(func.args(1) + " => string-to-codepoints()", 1);
+    query(func.args(8) + " => string-to-codepoints()", 8);
+    query(func.args(8) + " eq " + func.args("\\b"), true);
+    query(func.args(12) + " eq " + func.args("\\f"), true);
+    query("(1 to 31) ! " + func.args(" .") + " => string-join() => string-length()", 31);
+    query(func.args(" 0xD7FF") + " => string-to-codepoints()", 55295);
+    query(func.args(" 0x10FFFF") + " => string-to-codepoints()", 1114111);
+
+    query(func.args("ring"), "\u02DA");
+    query(func.args("AMP"), "&");
+    query(func.args("amp"), "&");
+    query(func.args("Tab"), "\t");
+
+    error(func.args(0), INVTYPE_X);
+    error(func.args(" 0xD800"), CHARINV_X);
+    error(func.args(" 0x110000"), CHARINV_X);
+    error(func.args(11111111111111L), CHARINV_X);
+    error(func.args("\\x"), CHARINV_X);
+    error(func.args(""), CHARINV_X);
+    error(func.args("x"), CHARINV_X);
+    error(func.args("xy"), CHARINV_X);
+    error(func.args("xyz"), CHARINV_X);
+  }
+
+  /** Test method. */
+  @Test public void characters() {
+    final Function func = CHARACTERS;
+
+    // test pre-evaluation
+    check(func.args(" ()"), "", empty());
+    query(func.args(""), "");
+    query(func.args("abc"), "a\nb\nc");
+
+    query("count(" + func.args(" string-join(" + REPLICATE.args("A", 100000) + ')') + ')',
+        100000);
+    check("count(" + func.args(" string-join(" + REPLICATE.args("A", 100000) + ')') + ')',
+        100000, empty(func), empty(STRING_LENGTH));
+
+    // test iterative evaluation
+    query(func.args(wrap("")), "");
+    query(func.args(wrap("abc")), "a\nb\nc");
+    query(func.args(wrap("abc")) + "[2]", "b");
+    query(func.args(wrap("abc")) + "[last()]", "c");
+
+    query(func.args(wrap("äöü")), "ä\nö\nü");
+    query("subsequence(" + func.args(wrap("")) + ", 3)", "");
+    query("subsequence(" + func.args(wrap("aeiou")) + ", 3)", "i\no\nu");
+    query("subsequence(" + func.args(wrap("äeiöü")) + ", 3)", "i\nö\nü");
+
+    query("sort(" + func.args("cba") + ")", "a\nb\nc");
+
+    check("count(" + func.args(" string-join(" +
+        REPLICATE.args(wrap("A"), 100000) + ')') + ')', 100000, exists(STRING_LENGTH));
+    check("string-to-codepoints(" + wrap("AB") + ") ! codepoints-to-string(.)",
+        "A\nB", root(func));
+    check("string-to-codepoints(" + wrap("AB") + ") ! char(.)", "A\nB", root(func));
+    check(func.args(wrap("AB")) + " ! string-to-codepoints(.)", "65\n66",
+        root(STRING_TO_CODEPOINTS));
+
+    check(func.args(wrap("AB")) + " = 'B'", true, root(CONTAINS));
+    check(func.args(wrap("A€")) + " = '€'", true, root(CONTAINS));
+    check(func.args(wrap("AB")) + " = 'AB'", false, exists(func));
+    check(func.args(wrap("AB")) + " = ''", false, exists(func));
+  }
+
+  /** Test method. */
+  @Test public void codepointsToString() {
+    final Function func = CODEPOINTS_TO_STRING;
+    check(func.args(" string-to-codepoints(" + wrap("ABC") + ')'), "ABC", root(STRING));
+
+    query(func.args(" ()"), "");
+    query(func.args(" (1 to 1000)[. > 1000]"), "");
+    query(func.args(" 0x41"), "A");
+    query(func.args(" (0x41, 0x42)"), "AB");
+    query(func.args(" (0x41 to 0x5A)"), "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    query(func.args(" (1 to 1000)[. = 0x41]"), "A");
+
+    // permitted characters (XML 1.1 repertoire)
+    query("string-to-codepoints(" + func.args(" 1 to 31") + ") => count()", 31);
+    query("string-to-codepoints(" + func.args(" 1") + ')', 1);
+    query("string-to-codepoints(" + func.args(" 0xD7FF") + ')', 55295);
+    query("string-to-codepoints(" + func.args(" 0x10FFFF") + ')', 1114111);
+
+    error(func.args(" 0"), INVCODE_X);
+    error(func.args(" 0xD800"), INVCODE_X);
+    error(func.args(" 0xFFFE"), INVCODE_X);
+    error(func.args(" 0x110000"), INVCODE_X);
+
+    // GH-2326
+    query(func.args(" ()") + " => boolean()", false);
+    query(func.args(" (1 to 1000)[. > 1000]") + " => boolean()", false);
+    query(func.args(" 0x41") + " => boolean()", true);
+    query(func.args(" (0x41, 0x42)") + " => boolean()", true);
+    query(func.args(" (0x1000 to 0xA000)") + " => boolean()", true);
+    query(func.args(" (1 to 1000) ! (0x1000 to 0xA000)") + " => boolean()", true);
+    query(func.args(" (1 to 1000)[. > 999]") + " => boolean()", true);
+  }
+
+  /** Test method. */
+  @Test public void concat() {
+    final Function func = CONCAT;
+
+    query(func.args(""), "");
+    query(func.args("", ""), "");
+    query(func.args(" ('', '')"), "");
+    query(func.args(" <?_?>"), "");
+    query(func.args(" <?_?>", " <?_?>"), "");
+    query(func.args(" (<?_?>, <?_?>)"), "");
+
+    // GH-2326
+    query(func.args("") + " => boolean()", false);
+    query(func.args("", "") + " => boolean()", false);
+    query(func.args(" ('', '')") + " => boolean()", false);
+    query(func.args(" <?_?>") + " => boolean()", false);
+    query(func.args(" <?_?>", " <?_?>") + " => boolean()", false);
+    query(func.args(" (<?_?>, <?_?>)") + " => boolean()", false);
+
+    query(func.args("", " 1") + " => boolean()", true);
+    query(func.args(" ('', '1')") + " => boolean()", true);
+    query(func.args(" 1") + " => boolean()", true);
+    query(func.args("", " 1 to 10_000_000_000") + " => boolean()", true);
+    query(func.args(" (1, 1 to 10_000_000_000)") + " => boolean()", true);
+    query(func.args(" 1", " 1 to 10_000_000_000", "") + " => boolean()", true);
+  }
+
+  /** Test method. */
+  @Test public void contains() {
+    final Function func = CONTAINS;
+
+    // pre-evaluate equal arguments and empty substring
+    check(func.args(wrap("abc"), wrap("abc")), true, root(Bln.class));
+    check(func.args(wrap("abc"), ""), true, root(Bln.class));
+    check(func.args(wrap("abc"), " ()"), true, root(Bln.class));
+
+    // do not optimize if argument may be of wrong type
+    check(func.args(" (1, 'a')[. instance of xs:string]", "a"), true, root(CONTAINS));
+  }
+
+  /** Test method. */
+  @Test public void containsSubsequence() {
+    final Function func = CONTAINS_SUBSEQUENCE;
+
+    query(func.args(" ()", " ()"), true);
+    query(func.args(" (1 to 5)", " ()"), true);
+    query(func.args(" (1 to 5)", " (2, 3)"), true);
+    query(func.args(" (1 to 5)", " (2, 4)"), false);
+    query(func.args(" (1 to 5)", " (1 to 5)"), true);
+    query(func.args(" (1 to 5)", " (4, 5, 6)"), false);
+
+    // custom comparison function (its invocation checks for interruptions)
+    query(func.args(" ('a', 'B', 'c')", " ('b')",
+        " fn($a, $b) { lower-case($a) = lower-case($b) }"), true);
+
+    // large scan: guarded by qc:checkStop, otherwise an uninterruptible quadratic search
+    query(func.args(" (1 to 50000) ! 'a'", " ((1 to 1000) ! 'a', 'b')"), false);
+  }
+
+  /** Test method. */
+  @Test public void count() {
+    final Function func = COUNT;
+
+    // count(array:members(E)) → array:size(E)
+    check(func.args(" " + _ARRAY_MEMBERS.args(" array { tokenize(" + wrap("a b") + ") }")), 2,
+        exists(_ARRAY_SIZE), empty(_ARRAY_MEMBERS));
+
+    query(func.args(" (1 to 100_000_000) ! string()"), 100000000);
+    query(func.args(" for $i in 1 to 100_000_000 return string('x')"), 100000000);
+
+    query(func.args(" count(array { <a/>, <b/> }) "), 1);
+    query(func.args(" count([ <a/>, <b/> ]) "), 1);
+
+    query(func.args(" data( [ (1 to 6) ! <_>{ 1 }</_> ][. > 0 ] )"), 6);
+
+    // static occurrence: zero-or-one
+    String count = func.args(" " + wrap(1) + "[. = 1]");
+
+    // static result: no need to evaluate count
+    check(count + " <    0", false, root(Bln.class));
+    check(count + " <= -.1", false, root(Bln.class));
+    check(count + " >=   0", true, root(Bln.class));
+    check(count + " > -0.1", true, root(Bln.class));
+    check(count + " =  1.1", false, root(Bln.class));
+    check(count + " != 1.1", true, root(Bln.class));
+    check(count + " =   -1", false, root(Bln.class));
+    check(count + " !=  -1", true, root(Bln.class));
+
+    // rewrite to empty/exists (faster)
+    check(count + " >  0", true, root(CmpSimpleG.class));
+    check(count + " >= 1", true, root(CmpSimpleG.class));
+    check(count + " != 0", true, root(CmpSimpleG.class));
+    check(count + " <  1", false, root(CmpSimpleG.class));
+    check(count + " <= 0", false, root(CmpSimpleG.class));
+    check(count + " =  0", false, root(CmpSimpleG.class));
+
+    // zero-or-one result: no need to evaluate count
+    check(count + " <  2", true, root(Bln.class));
+    check(count + " <= 2", true, root(Bln.class));
+    check(count + " <= 1", true, root(Bln.class));
+    check(count + " != 2", true, root(Bln.class));
+    check(count + " >  1", false, root(Bln.class));
+    check(count + " >= 2", false, root(Bln.class));
+    check(count + " =  2", false, root(Bln.class));
+
+    // no pre-evaluation possible
+    check(count + " != 1", false, root(CmpSimpleG.class));
+    check(count + " =  1", true, root(CmpSimpleG.class));
+    check(count + " - 1 = 0", true, root(CmpSimpleG.class));
+
+    // one-or-more results: no need to evaluate count
+    count = func.args(" (1," + wrap(1) + "[. = 1])");
+    check(count + " >  0", true, root(Bln.class));
+    check(count + " >= 1", true, root(Bln.class));
+    check(count + " != 0", true, root(Bln.class));
+    check(count + " <  1", false, root(Bln.class));
+    check(count + " <= 0", false, root(Bln.class));
+    check(count + " =  0", false, root(Bln.class));
+    check(count + " =  1.1", false, root(Bln.class));
+
+    // no pre-evaluation possible
+    check(count + " != 1", true, exists(func));
+    check(count + " =  1", false, root(_UTIL_COUNT_WITHIN));
+    check(count + " =  2", true, root(_UTIL_COUNT_WITHIN));
+    check(count + " div 2 = 1", true, root(_UTIL_COUNT_WITHIN));
+
+    // comparisons with ranges and variables: no minimum size
+    final String seq = " (1 to 2)[. = " + wrap(3) + "]";
+    count = func.args(seq);
+    check(count + " <= (3 to 5)", true, root(_UTIL_COUNT_WITHIN));
+    check(count + " >= (3 to 5)", false, root(_UTIL_COUNT_WITHIN));
+    check(count + " =  (3 to 5)", false, root(_UTIL_COUNT_WITHIN));
+
+    final String cmps = "declare %basex:inline(0) function local:cmps($input as item()*, "
+        + "$count as xs:integer) { count($input) <= $count, count($input) >= $count, "
+        + "count($input) = $count }; local:cmps(";
+    query(cmps + seq + ", 0)", "true\ntrue\ntrue");
+    query(cmps + seq + ", 1)", "true\nfalse\nfalse");
+
+    // GH-1519: count of large sequences
+    query("declare function local:replicate($seq, $n, $out) { "
+        + "  if($n eq 0) then $out "
+        + "  else ( "
+        + "    let $out2 := if($n mod 2 eq 0) then $out else ($out, $seq) "
+        + "    return local:replicate(($seq, $seq), $n idiv 2, $out2) "
+        + "  ) "
+        + "};"
+        + "let $n := 1000000 "
+        + "return ( "
+        + "  count(local:replicate((1, 2, 3), $n, ())) eq 3 * $n, "
+        + "  count(local:replicate((1, 2, 3), $n, ())) = 3 * $n "
+        + ")",
+        "true\ntrue");
+
+    // pre-evaluation, based on database statistics
+    check(func.args(1), 1, exists(Itr.class));
+
+    execute(new CreateDB(NAME, "<xml><a x='y'>1</a><a>2 3</a><a/></xml>"));
+    check(func.args(" //a"), 3, exists(Itr.class));
+    check(func.args(" /xml/a"), 3, exists(Itr.class));
+    check(func.args(" //text()"), 2, exists(Itr.class));
+    check(func.args(" //*"), 4, exists(Itr.class));
+    check(func.args(" //node()"), 6, exists(Itr.class));
+    check(func.args(" //comment()"), 0, exists(Itr.class));
+    check(func.args(" /self::document-node()"), 1, exists(Itr.class));
+    execute(new DropDB(NAME));
+  }
+
+  /** Test method. */
+  @Test public void csvToArrays() {
+    final Function func = CSV_TO_ARRAYS;
+
+    // Handling trivial input:
+    query(func.args(" ()"), "");
+    query(func.args(""), "");
+    query(func.args(" char('\\n')"), "[]");
+    query(func.args(" ' '", " { 'trim-whitespace': true() }"), "");
+    query(func.args(" ' '", " { 'trim-whitespace': false() }"), "[\" \"]");
+    query(func.args(" ` {char('\\n')}`", " { 'trim-whitespace': true() }"), "[]");
+    query(func.args(" ` {char('\\n')}`", " { 'trim-whitespace': false() }"), "[\" \"]");
+    query(func.args(" `{char('\\n')} `", " { 'trim-whitespace': true() }"), "[]");
+    query(func.args(" `{char('\\n')} `", " { 'trim-whitespace': false() }"), "[]\n[\" \"]");
+    // Using newline separators:
+    query(func.args(
+        " `name,city{ char('\\n') }` ||\n"
+      + " `Bob,Berlin{ char('\\n') }` ||\n"
+      + " `Alice,Aachen{ char('\\n') }`"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]\n"
+      + "[\"Alice\",\"Aachen\"]");
+    query(
+        " let $CRLF := `{ char('\\r') }{ char('\\n') }`\n"
+      + "return " + func.args(
+        "  `name,city{ $CRLF }` ||\n"
+      + "  `Bob,Berlin{ $CRLF }` ||\n"
+      + "  `Alice,Aachen{ $CRLF }`\n"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]\n"
+      + "[\"Alice\",\"Aachen\"]");
+    // Quote handling:
+    query(func.args(
+        " string-join(\n"
+      + "    (`\"name\",\"city\"`, `\"Bob\",\"Berlin\"`, `\"Alice\",\"Aachen\"`),\n"
+      + "    char('\\n')\n"
+      + "  )"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]\n"
+      + "[\"Alice\",\"Aachen\"]");
+    query(func.args(
+        "  `\"name\",\"city\"{ char('\\n') }` ||\n"
+      + "  `\"Bob \"\"The Exemplar\"\" Mustermann\",\"Berlin\"{ char('\\n') }`"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob \"\"The Exemplar\"\" Mustermann\",\"Berlin\"]");
+    // Non-default field separator:
+    query(func.args(
+        " string-join(\n"
+      + "    (\"name;city\", \"Bob;Berlin\", \"Alice;Aachen\"),\n"
+      + "    char('\\n')\n"
+      + "  )",
+      " { \"separator\": \";\" }"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]\n"
+      + "[\"Alice\",\"Aachen\"]");
+    // Non-default quote character:
+    query(func.args(
+        " string-join(\n"
+      + "    (\"|name|,|city|\", \"|Bob|,|Berlin|\"),\n"
+      + "    char('\\n')\n"
+      + "  )", " { \"quote-character\": \"|\" }"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]");
+    // Trimming whitespace in fields:
+    query(func.args(
+        " string-join(\n"
+      + "    (\"name  ,city    \", \"Bob   ,Berlin  \", \"Alice ,Aachen  \"),\n"
+      + "    char('\\n')\n"
+      + "  )", " { \"trim-whitespace\": true() }"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]\n"
+      + "[\"Alice\",\"Aachen\"]");
+    // Quoted fields are not trimmed:
+    query(func.args(" '\" a \",b'", " { \"trim-whitespace\": true() }"), "[\" a \",\"b\"]");
+    // An empty quoted field constitutes a non-blank row:
+    query(func.args(" '\"\"'"), "[\"\"]");
+    // Comment rows:
+    final String comments =
+        " string-join(\n"
+      + "    (\"# comment\", \"name,city\", \"Bob,Berlin\", \"# comment\", \"Alice,Aachen\"),\n"
+      + "    char('\\n')\n"
+      + "  )";
+    query(func.args(comments, " { 'comment-marker': '#' }"),
+        "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]\n"
+      + "[\"Alice\",\"Aachen\"]");
+    query(func.args(comments, " { 'comment-marker': () }"),
+        "[\"# comment\"]\n"
+      + "[\"name\",\"city\"]\n"
+      + "[\"Bob\",\"Berlin\"]\n"
+      + "[\"# comment\"]\n"
+      + "[\"Alice\",\"Aachen\"]");
+    // A comment row ends with the next newline, even if a quote was opened:
+    query(func.args(" `#\"a{ char('\\n') }b,c{ char('\\n') }x,y`", " { 'comment-marker': '#' }"),
+        "[\"b\",\"c\"]\n[\"x\",\"y\"]");
+    // Comment markers are only recognized at the start of a row:
+    query(func.args(" `a,#b{ char('\\n') }#c,d`", " { 'comment-marker': '#' }"), "[\"a\",\"#b\"]");
+    // Comment rows are skipped before the header row is chosen:
+    query(PARSE_CSV.args(comments, " { 'comment-marker': '#', 'header': true() }") + "?columns",
+        "name\ncity");
+    // Invalid options:
+    error(func.args("", " { 'separator': char('\\n') }"), CSV_NEWLINE_X);
+    error(func.args("", " { 'comment-marker': '' }"), CSV_SINGLECHAR_X_X);
+    error(func.args("", " { 'comment-marker': '##' }"), CSV_SINGLECHAR_X_X);
+    error(func.args("", " { 'comment-marker': char('\\n') }"), CSV_NEWLINE_X);
+    error(func.args("", " { 'comment-marker': ',' }"), CSV_DELIMITER_X);
+    error(func.args("", " { 'comment-marker': '\"' }"), CSV_DELIMITER_X);
+    error(func.args("", " { 'comment-marker': 1 }"), INVALIDOPTION_X_X_X_X);
+  }
+
+  /** Test method. */
+  @Test public void csvToXml() {
+    final Function func = CSV_TO_XML;
+    final String queryPrefix =
+        "let $crlf := char('\\r') || char('\\n')\n"
+      + "let $csv-string := `name,city{ $crlf }Bob,Berlin{ $crlf }Alice,Aachen{ $crlf }`\n"
+      + "let $csv-uneven-cols := concat(\n"
+      + "  `date,name,city,amount,currency,original amount,note{ $crlf }`,\n"
+      + "  `2023-07-19,Bob,Berlin,10.00,USD,13.99{ $crlf }`,\n"
+      + "  `2023-07-20,Alice,Aachen,15.00{ $crlf }`,\n"
+      + "  `2023-07-20,Charlie,Celle,15.00,GBP,11.99,cake,not a lie{ $crlf }`\n"
+      + ")\n"
+      + "return ";
+    final String resultTag = "<csv xmlns=\"http://www.w3.org/2005/xpath-functions\">";
+
+    // An empty CSV with default column extraction (false):
+    query(func.args(" ()"), "");
+    query(func.args(""), resultTag + "<rows/></csv>");
+    query(func.args(" char('\\n')"), resultTag + "<rows><row/></rows></csv>");
+    // An empty CSV with header extraction:
+    query(func.args("", " { 'header': true() }"), resultTag + "<rows/></csv>");
+    // An empty CSV with explicit column names:
+    query(func.args("", " { \"header\": (\"name\", \"\", \"city\") }"), resultTag + "<columns>"
+      + "<column>name</column><column/><column>city</column></columns><rows/></csv>");
+    // Trailing empty column names are skipped:
+    query(func.args("", " { \"header\": (\"name\", \"\") }"),
+      resultTag + "<columns><column>name</column></columns><rows/></csv>");
+    // Without any non-empty column name, the columns element is omitted:
+    query(func.args("", " { \"header\": (\"\", \"\") }"), resultTag + "<rows/></csv>");
+    // Duplicate column names are retained:
+    query(func.args("A,B", " { \"header\": (\"name\", \"name\") }"),
+      resultTag + "<columns><column>name</column><column>name</column></columns><rows>"
+      + "<row><field column=\"name\">A</field><field column=\"name\">B</field></row></rows></csv>");
+    // With defaults for delimiters and quotes, recognizing headers:
+    query(queryPrefix + func.args(" $csv-string", " { 'header': true() }"),
+      resultTag + "<columns><column>name</column><column>city</column></columns><rows><row><field "
+      + "column=\"name\">Bob</field><field column=\"city\">Berlin</field></row><row><field column="
+      + "\"name\">Alice</field><field column=\"city\">Aachen</field></row></rows></csv>");
+    // Filtering columns
+    query(queryPrefix + func.args(" $csv-uneven-cols",
+        " { \"header\": true(), \n"
+      + "  \"select-columns\": (2, 1, 4)\n"
+      + " }"),
+      resultTag + "<columns><column>name</column><column>date</column><column>amount</column>"
+      + "</columns><rows><row><field column=\"name\">Bob</field><field column=\"date\">2023-07-19"
+      + "</field><field column=\"amount\">10.00</field></row><row><field column=\"name\">Alice"
+      + "</field><field column=\"date\">2023-07-20</field><field column=\"amount\">15.00</field>"
+      + "</row><row><field column=\"name\">Charlie</field><field column=\"date\">2023-07-20</field>"
+      + "<field column=\"amount\">15.00</field></row></rows></csv>");
+    // Ragged rows
+    query(queryPrefix + func.args(" $csv-uneven-cols", " { \"header\": true() }"),
+      resultTag + "<columns><column>date</column><column>name</column><column>city</column><column>"
+      + "amount</column><column>currency</column><column>original amount</column><column>note"
+      + "</column></columns><rows><row><field column=\"date\">2023-07-19</field><field column="
+      + "\"name\">Bob</field><field column=\"city\">Berlin</field><field column=\"amount\">10.00"
+      + "</field><field column=\"currency\">USD</field><field column=\"original amount\">13.99"
+      + "</field></row><row><field column=\"date\">2023-07-20</field><field column=\"name\">Alice"
+      + "</field><field column=\"city\">Aachen</field><field column=\"amount\">15.00</field></row>"
+      + "<row><field column=\"date\">2023-07-20</field><field column=\"name\">Charlie</field><field"
+      + " column=\"city\">Celle</field><field column=\"amount\">15.00</field><field column="
+      + "\"currency\">GBP</field><field column=\"original amount\">11.99</field><field column="
+      + "\"note\">cake</field><field>not a lie</field></row></rows></csv>");
+    // Trimming rows to constant width
+    query(queryPrefix + func.args(" $csv-uneven-cols",
+        " { \"header\": true(),\n"
+      + "   \"trim-rows\": true()\n"
+      + " }"),
+      resultTag + "<columns><column>date</column><column>name</column><column>city</column><column>"
+      + "amount</column><column>currency</column><column>original amount</column><column>note"
+      + "</column></columns><rows><row><field column=\"date\">2023-07-19</field><field column="
+      + "\"name\">Bob</field><field column=\"city\">Berlin</field><field column=\"amount\">10.00"
+      + "</field><field column=\"currency\">USD</field><field column=\"original amount\">13.99"
+      + "</field><field column=\"note\"/></row><row><field column=\"date\">2023-07-20</field><field"
+      + " column=\"name\">Alice</field><field column=\"city\">Aachen</field><field column="
+      + "\"amount\">15.00</field><field column=\"currency\"/><field column=\"original amount\"/>"
+      + "<field column=\"note\"/></row><row><field column=\"date\">2023-07-20</field><field column="
+      + "\"name\">Charlie</field><field column=\"city\">Celle</field><field column=\"amount\">15.00"
+      + "</field><field column=\"currency\">GBP</field><field column=\"original amount\">11.99"
+      + "</field><field column=\"note\">cake</field></row></rows></csv>");
+    // Specifying a fixed number of columns
+    query(queryPrefix + func.args(" $csv-uneven-cols",
+        " { \"header\": true(),\n"
+      + "   \"select-columns\": 1 to 6\n"
+      + " }"),
+      resultTag + "<columns><column>date</column><column>name</column><column>city</column><column>"
+      + "amount</column><column>currency</column><column>original amount</column></columns><rows>"
+      + "<row><field column=\"date\">2023-07-19</field><field column=\"name\">Bob</field><field "
+      + "column=\"city\">Berlin</field><field column=\"amount\">10.00</field><field column="
+      + "\"currency\">USD</field><field column=\"original amount\">13.99</field></row><row><field "
+      + "column=\"date\">2023-07-20</field><field column=\"name\">Alice</field><field column="
+      + "\"city\">Aachen</field><field column=\"amount\">15.00</field><field column=\"currency\"/>"
+      + "<field column=\"original amount\"/></row><row><field column=\"date\">2023-07-20</field>"
+      + "<field column=\"name\">Charlie</field><field column=\"city\">Celle</field><field column="
+      + "\"amount\">15.00</field><field column=\"currency\">GBP</field><field column="
+      + "\"original amount\">11.99</field></row></rows></csv>");
+  }
+
+  /** Test method. */
+  @Test public void decodeFromUri() {
+    final Function func = DECODE_FROM_URI;
+
+    query(func.args(""), "");
+    query(func.args("A"), "A");
+
+    query(func.args("+"), "+");
+    query(func.args("%41"), "A");
+    query(func.args("A%42%20C"), "AB C");
+    query(func.args("A%42+C"), "AB+C");
+    query("decode-from-uri(translate('A%42+C', '+', ' '))", "AB C");
+    query(func.args("%F0%9F%92%A1"), "\uD83D\uDCA1");
+
+    query(func.args("%"), "\uFFFD");
+
+    query(func.args("%X"), "\uFFFD");
+    query(func.args("%XX"), "\uFFFD");
+    query(func.args("%XX!"), "\uFFFD!");
+    query(func.args("%4"), "\uFFFD");
+    query(func.args("%4X"), "\uFFFD");
+
+    query(func.args("%\u00FC"), "\uFFFD");
+    query(func.args("%\u00FC!"), "\uFFFD!");
+    query(func.args("%\u00FC\u00FC"), "\uFFFD\u00FC");
+
+    query(func.args("%F0%9F%92%41"), "\uFFFDA");
+    query(func.args("%F0%F0%9F%92%A1"), "\uFFFD\uD83D\uDCA1");
+
+    query(func.args("%00"), "\uFFFD");
+    query("string-to-codepoints(" + func.args("%01") + ')', 1);
+    query(func.args("%09"), "\t");
+    query(func.args("%22"), "\"");
+    query(func.args("%25"), "%");
+
+    query(func.args("%F0"), "\uFFFD");
+    query(func.args("%F0%F0"), "\uFFFD\uFFFD");
+    query(func.args("%F0%F0%F0"), "\uFFFD\uFFFD\uFFFD");
+    query(func.args("%F0%F0%F0%F0"), "\uFFFD\uFFFD\uFFFD\uFFFD");
+  }
+
+  /** Test method. */
+  @Test public void deepEqual() {
+    final Function func = DEEP_EQUAL;
+
+    query("let $a := reverse((<a/>, <b/>)) return " + func.args(" $a/.", " $a/."), true);
+    query("deep-equal(1 to 1_000_000_000, 1 to 1_000_000_000)", true);
+    query("deep-equal(1 to 1_000_000_000, 1 to 1_000_000_001)", false);
+
+    // function items are compared for equivalence
+    query(func.args(" true#0", " true#0"), true);
+    query(func.args(" fn($x) { $x }", " fn($y) { $y }"), true);
+    query(func.args(" fn($x) { $x }", " fn($y) {  $y  }"), true);
+    query(func.args(" fn() { error() }", " fn() { error() }"), true);
+    query(func.args(" fn($x) { $x }", " fn($x) { $x + 1 }"), false);
+    query(func.args(" fn($x) { $x }", " fn($x, $y) { $x }"), false);
+    // context-dependent references capture the focus
+    query("let $f := (<a/>, <b/>) ! fn:name#0 return " + func.args(" $f[1]", " $f[2]"), false);
+    // fn:last and fn:position access a single focus component
+    query(func.args(" (1) ! last#0", " (2) ! last#0"), true);
+    query(func.args(" (1) ! last#0", " (1, 2) ! last#0"), false);
+    query(func.args(" (<a/>) ! last#0", " (<b/>) ! last#0"), true);
+    query("let $f := (1, 2) ! last#0 return " + func.args(" $f[1]", " $f[2]"), true);
+    query(func.args(" (1) ! position#0", " (2) ! position#0"), true);
+    query("let $f := (1, 2) ! position#0 return " + func.args(" $f[1]", " $f[2]"), false);
+    query("let $f := (1, 2) ! position#0 return " + func.args(" $f[1]", " (9) ! position#0"), true);
+    query(func.args(" (1, 2) ! last#0", " (1, 2) ! position#0"), false);
+    // fn:last and fn:position require a context value: an absent one is not equivalent
+    query(func.args(" last#0", " last#0"), true);
+    query(func.args(" position#0", " position#0"), true);
+    query(func.args(" last#0", " (1) ! last#0"), false);
+    query(func.args(" position#0", " (1) ! position#0"), false);
+    query(func.args(" function-lookup(xs:QName('fn:last'), 0)", " (1) ! last#0"), false);
+    query("let $f := (1) ! function-lookup(xs:QName('fn:last'), 0) return " +
+        func.args(" $f", " (2) ! last#0"), true);
+    // a focus is captured in path expressions, but not by a for clause
+    query(func.args(" <a><b/><b/></a>/b ! last#0", " (1, 2) ! last#0"), true);
+    query(func.args(" <a><b/><b/></a>/b ! last#0", " (1) ! last#0"), false);
+    query("let $f := (for $x in (1, 2) return last#0) return " + func.args(" $f[1]", " $f[2]"),
+        true);
+    // coercion preserves equivalence
+    query("let $f as function() as xs:integer := (1) ! last#0 return " +
+        func.args(" $f", " (2) ! last#0"), true);
+    // name and annotations are ignored
+    query("declare namespace a = 'a'; " + func.args(" %a:x fn() { 1 }", " fn() { 1 }"), true);
+    query("declare %private function local:f() { 1 }; " +
+        func.args(" local:f#0", " fn() { 1 }"), true);
+    // a map is never equivalent to another function item
+    query(func.args(" {}", " fn($k) { () }"), false);
+    // partial applications
+    query(func.args(" concat('a', ?)", " concat('b', ?)"), false);
+    query(func.args(" partial-apply(concat#2, { 1: 'a' })", " concat('a', ?)"), true);
+    // references to a recursive function
+    query("declare function local:f($n) { if($n le 1) then 1 else $n * local:f($n - 1) }; " +
+        func.args(" local:f#1", " local:f#1"), true);
+    // an items-equal callback that returns an empty sequence falls back to the default rules
+    final String empty = " { 'items-equal': fn($a, $b) { () } }";
+    query(func.args(" (1) ! last#0", " (2) ! last#0", empty), true);
+    query(func.args(" <a/> ! name#0", " <b/> ! name#0", empty), false);
+    // other functions access the context value, but not its position and size
+    query("let $f := (1, 1) ! string#0 return " + func.args(" $f[1]", " $f[2]"), true);
+    query("let $f := (<a/>, <a/>) ! name#0 return " + func.args(" $f[1]", " $f[2]"), true);
+    // function items in sequences, maps and arrays
+    query("let $f := (1, 2, 3) ! last#0 return " + func.args(" $f", " reverse($f)"), true);
+    query("let $f := (1, 2, 3) ! position#0 return " + func.args(" $f", " reverse($f)"), false);
+    query(func.args(" { 'f': (1) ! last#0 }", " { 'f': (2) ! last#0 }"), true);
+    query("let $f := (1, 2) ! position#0 return " + func.args(" [ $f[1] ]", " [ $f[2] ]"), false);
+    // closures: captured values are compared with deep equality
+    query("let $n := <a/> return " + func.args(" fn() { $n }", " fn() { $n }"), true);
+    query(func.args(" (let $n := <a/> return fn() { $n })", " (let $m := <a/> return fn() { $m })"),
+        true);
+    query(func.args(" (let $n := 1 return fn() { $n })", " (let $m := 2 return fn() { $m })"),
+        false);
+    // captured values of different types, but with equal values
+    query(func.args(" (let $n := 1 return fn() { $n })", " (let $m := 1.0 return fn() { $m })"),
+        true);
+    query(func.args(" (let $n := 'a' return fn() { $n })",
+        " (let $m := xs:untypedAtomic('a') return fn() { $m })"), true);
+    query(func.args(" (let $n := 1 return fn() { $n })", " (let $m := '1' return fn() { $m })"),
+        false);
+    query(func.args(" fn() { 1 }", " fn() { 1.0 }"), true);
+    query(func.args(" fn() { 1 }", " fn() { 2 }"), false);
+    query(func.args(" fn() { 1 }", " fn() { true() }"), false);
+
+    // options that are accepted, but cannot take effect in a processor without schema support
+    query(func.args(1, 1, " { 'typed-values': false() }"), true);
+    query(func.args(1, 1, " { 'type-annotations': true() }"), true);
+    query(func.args(1, 1, " { 'type-variety': false() }"), true);
+    // diagnostics
+    query(func.args(1, 1, " { 'debug': true() }"), true);
+    query(func.args(1, 2, " { 'debug': true() }"), false);
+    query(func.args(" ()", " <x/>", " { 'debug': true() }"), false);
+    query(func.args(" (1, 2)", " (1, 2, 3)", " { 'debug': true() }"), false);
+    query(func.args(" <a><b>1</b></a>", " <a><b>2</b></a>", " { 'debug': true() }"), false);
+    // diagnostics are a side effect: the call must not be pre-evaluated
+    check(func.args(1, 2, " { 'debug': true() }"), false, exists(DEEP_EQUAL));
+    check(func.args(1, 2, " { 'debug': false() }"), false, empty(DEEP_EQUAL));
+    check(func.args(1, 2), false, empty(DEEP_EQUAL));
+    // options that were removed
+    error(func.args(1, 1, " { 'false-on-error': true() }"), INVALIDOPTION_X);
+    error(func.args(1, 1, " { 'normalize-space': true() }"), INVALIDOPTION_X);
+  }
+
+  /** Test method. */
+  @Test public void distinctOrderedNodes() {
+    final Function func = DISTINCT_ORDERED_NODES;
+    query(func.args(" <a/>"), "<a/>");
+    query(func.args(" (<a/>, <b/>)"), "<a/>\n<b/>");
+
+    check(func.args(REPLICATE.args(" (<a/>, <b/>)", 10)), "<a/>\n<b/>",
+        empty(REPLICATE));
+    check(func.args(REPLICATE.args(" <a/>", 2, true)), "<a/>\n<a/>",
+        exists(REPLICATE));
+    // replicate of an out-of-order sequence must still be normalized to document order
+    check(func.args(REPLICATE.args(" reverse(<a><b/></a> ! (., *))", 2)),
+        "<a><b/></a>\n<b/>", empty(REPLICATE));
+
+    check("(<a><b/></a> ! (., *)) => reverse() => " + func.args(),
+        "<a><b/></a>\n<b/>", empty(REVERSE));
+    check("(<a><b/></a> ! (., *)) => sort() => " + func.args(),
+        "<a><b/></a>\n<b/>", empty(SORT));
+    check("(<a><b/></a> ! (., *)) => sort() => reverse() => sort() => " + func.args(),
+        "<a><b/></a>\n<b/>", empty(SORT), empty(REVERSE));
+
+    error(func.args(1), INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void distinctValues() {
+    final Function func = DISTINCT_VALUES;
+
+    query(func.args(" (1 to 100_000_000) ! 'a'"), "a");
+    query("count(" + func.args(" 1 to 100_000_000") + ')', 100000000);
+    check(func.args(" void(1)"), "", root(VOID));
+    check("(1, 3) ! " + func.args(" ."), "1\n3", root(BytSeq.class));
+
+    // remove duplicate expressions
+    check(func.args(" (1, <_/>, 1)"), "1\n", count(Itr.class, 1));
+    check(func.args(" (1, 1)[. = 1]"), 1, root(Itr.class));
+    check(func.args(" (" + wrap(1) + "," + wrap(1) + ")[. = 1]"), 1,
+        empty(List.class), empty(REPLICATE));
+    // remove reverse function call
+    check(func.args(" reverse((<a>A</a>, <b>A</b>))"), "A", empty(REVERSE));
+    check(func.args(" reverse((<a>A</a>, <b>A</b>)[data()])"), "A", empty(REVERSE));
+    check(func.args(" reverse((<a>A</a>, <b>A</b>))[data()]"), "A", empty(REVERSE));
+    // remove sort function call
+    check(func.args(" sort((<a>A</a>, <b>A</b>))"), "A", empty(SORT));
+    // swap distinct-values and sort
+    check(func.args(" sort((<a>A</a>, <b>A</b>)[data()])"),
+        "A", exists(SORT.className() + "/" + DISTINCT_VALUES.className()));
+    check(func.args(" sort((string(<_>X</_>), 1), (), string#1)"),
+        "1\nX", empty(DISTINCT_VALUES));
+    // swapping distinct-values and sort must preserve the collation
+    check(func.args(" sort((<a>A</a>, <b>a</b>)[data()])",
+        "http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive"), "A",
+        exists(SORT.className() + "/" + DISTINCT_VALUES.className()));
+
+    // single value: replace with data
+    check(func.args(wrap("A")), "A", root(DATA));
+    check("(<a/>, <b/>) ! " + func.args(" ."), "\n", root(DATA));
+    check("(1 to 2) ! " + func.args(" ."), "1\n2", root(RangeSeq.class));
+
+    // integer runtime optimizations
+    query("sum(" + func.args(" (3, 1 to 1_000_000)") + ")", 500000500000L);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000)") + "))", 500000500000L);
+    query("sum(" + func.args(" (3, 1 to 1_000_000, xs:byte(3))") + ")", 500000500000L);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000, xs:byte(3))") + "))", 500000500000L);
+    query("sum(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1))") + ")", 500000499999L);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1))") + "))", 500000499999L);
+    query("sum(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1), -1)") + ")", 500000499999L);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1), -1)") + "))", 500000499999L);
+
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>))") + ")", 55);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>))") + "))", 55);
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(3))") + ")", 55);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(3))") + "))", 55);
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1))") + ")", 54);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1))") + "))", 54);
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1), -1)") + ")", 54);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1), -1)") + "))", 54);
+  }
+
+  /** Test method. */
+  @Test public void doc() {
+    final Function func = Function.DOC;
+
+    // local documents are pre-evaluated, remote ones are not
+    check("<a>{" + func.args(DOC) + " }</a>//x", "", exists(DBNode.class));
+    check("if(" + wrap(1) + "= 1) then 2 else" + func.args(DOC), 2, exists(DBNode.class));
+    check("if(" + wrap(1) + "= 1) then 2 else" + func.args("http://abc.de/"), 2, exists(func));
+    check("if(" + wrap(1) + "= 1) then 2 else" + COLLECTION.args("http://abc.de/"), 2,
+        exists(COLLECTION));
+
+    final IOFile sandbox = sandbox();
+    final BiFunction<String, String, String> write = (name, content) -> {
+      final IOFile file = new IOFile(sandbox, name);
+      write(file, content);
+      return file.path();
+    };
+
+    write.apply("schema.xsd", "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+        + "<xs:element name='root'/></xs:schema>");
+    final String doc1 = write.apply("doc1.xml",
+        "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+        + "xsi:noNamespaceSchemaLocation=\"schema.xsd\"/>");
+    final String doc2 = write.apply("doc2.xml",
+        "<root2 xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+        + "xsi:noNamespaceSchemaLocation=\"schema.xsd\"/>");
+    query(func.args(doc1, " { 'xsd-validation': 'strict', 'use-xsi-schema-location': true(),"
+        + " 'trust-external': true() }"),
+        "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+        + "xsi:noNamespaceSchemaLocation=\"schema.xsd\"/>");
+    error(func.args(doc1, " { 'xsd-validation': 'strict', 'use-xsi-schema-location': false(),"
+        + " 'trust-external': true() }"), IOERR_X);
+    error(func.args(doc2, " { 'xsd-validation': 'strict', 'use-xsi-schema-location': true(),"
+        + " 'trust-external': true() }"), XSDVALIDATIONERR_X);
+    error(func.args(doc1, " { 'xsd-validation': 'strict', 'use-xsi-schema-location': true(),"
+        + " 'trust-external': false()  }"),
+        EXTERNALRESOURCE_X);
+    error("xquery:eval(``[" + func.args(doc2, " { 'xsd-validation': 'strict', 'use-xsi-schema-locat"
+        + "ion': true(), 'trust-external': true() }") + "]``, (), {'permission': 'write'})",
+        XQUERY_PERM_X);
+
+    final String docWithExtDtd = write.apply("ext-dtd.xml",
+        "<!DOCTYPE root SYSTEM 'validate.dtd'><root/>");
+    write.apply("validate.dtd", "<!ELEMENT root (#PCDATA)>");
+    query(func.args(docWithExtDtd, " { 'dtd-validation': true(), 'trust-external': true() }"),
+        "<root/>");
+    error(func.args(docWithExtDtd, " { 'dtd-validation': true(), 'trust-external': false() }"),
+        EXTERNALRESOURCE_X);
+    error("xquery:eval(``[" + func.args(docWithExtDtd,
+        " { 'dtd-validation': true(), 'trust-external': true() }")
+        + "]``, (), {'permission': 'read'})", XQUERY_PERM_X);
+
+    final String xincDoc = write.apply("xinclude.xml",
+        "<?xml version='1.0'?>"
+        + "<root xmlns:xi='http://www.w3.org/2001/XInclude'>"
+        + "<xi:include href='doc1.xml'/></root>");
+    query("exists(" + func.args(xincDoc, " { 'xinclude': true(), 'trust-external': true() }")
+        + "/root/root)", true);
+    error(func.args(xincDoc, " { 'xinclude': true(), 'trust-external': false() }"),
+        EXTERNALRESOURCE_X);
+    error("xquery:eval(``[exists(" + func.args(xincDoc,
+        " { 'xinclude': true(), 'trust-external': true() }")
+        + "/root/root)" + "]``, (), {'permission': 'none'})", XQUERY_PERM_X);
+
+    // unstable documents are parsed anew for each evaluation
+    query("count(distinct-values(for $i in 1 to 2 return " +
+        GENERATE_ID.args(" " + func.args(DOC, " { 'stable': false() }")) + "))", 2);
+    query("count(distinct-values(for $i in 1 to 2 return " +
+        GENERATE_ID.args(" " + func.args(DOC, " { 'stable': true() }")) + "))", 1);
+  }
+
+  /** Test method. */
+  @Test public void docAvailable() {
+    final Function func = DOC_AVAILABLE;
+
+    query(func.args(DOC), true);
+    query(func.args("/"), false);
+    query(func.args("/a/b/c/d/e"), false);
+    query(func.args(DOC, " {}"), true);
+    query(func.args(DOC, " { 'xinclude': true(), 'trust-external': true() }"), true);
+    query(func.args(DOC, " { 'xinclude': true(), 'trust-external': false() }"), false);
+    query(func.args(DOC, " { 'use-xsi-schema-location': true(), 'trust-external': true() }"), true);
+    query(func.args(DOC, " { 'use-xsi-schema-location': true(), 'trust-external': false() }"),
+        true);
+    query(func.args(DOC, " { 'use-xsi-schema-location': true(), 'trust-external': false(), "
+        + "'xsd-validation': 'strict' }"), false);
+  }
+
+  /**
+   * Test method.
+   * @throws IOException I/O exception
+   */
+  @Test public void documentUri() throws IOException {
+    final Function func = DOCUMENT_URI;
+    final String cd = new File(".").getCanonicalFile().toURI().toString().replaceFirst(
+        "^file:/(?!/)", "file:///");
+    query(func.args(" parse-xml('<x/>')"), "");
+    query(func.args(" document{<x/>}"), "");
+    query(func.args(" doc('src/test/resources/test.xml')"), cd + "src/test/resources/test.xml");
+    query("collection('src/test/resources/dir')!" + func.args(" .")
+        + "[ends-with(., '/test.xml')]", cd + "src/test/resources/dir/test.xml");
+  }
+
+  /** Test method. */
+  @Test public void doUntil() {
+    final Function func = DO_UNTIL;
+    error(func.args(1, " error#0", " boolean#1"), FUNERR1);
+    query(func.args(1, " identity#1", " exists#1"), 1);
+
+    query(func.args(" ()", " string#1", " exists#1"), "");
+    query(func.args(" (21 to 24)", " tail#1", " fn($s) { head($s) >= 23 }"), "23\n24");
+    query(func.args(" (6 to 8)", " fn($s) { $s ! (. - 1) }",
+        " fn($s) { sum($s) <= 10 }"), "2\n3\n4");
+    query(func.args(" reverse(1 to 100)", " fn($s) { tail($s) }",
+        " fn($s) { sum($s) <= 20 and head($s) <= 4 }"), "4\n3\n2\n1");
+
+    query(func.args(1, " fn($x) { $x + 1 }", " fn($x) { $x >= 10000 }"), 10000);
+    query(func.args(2, " fn($x) { $x * $x }", " fn($x) { $x >= 1000 }"), 65536);
+    query(func.args(1, " fn($x) { $x, $x }", " fn($x) { count($x) >= 3 }"),
+        "1\n1\n1\n1");
+    query(func.args(" (1 to 100)", " fn($s) { subsequence($s, 2, count($s) - 2) }",
+        " fn($s) { $s[last()] - $s[1] <= 1 }"),
+        "50\n51");
+
+    query(func.args(" 1e0",
+        " fn($n) { if($n instance of xs:double) then xs:float($n) else xs:double($n) }",
+        " fn($n) { $n instance of xs:double }"),
+        1);
+    query(func.args(1,
+        " fn($n) { if($n instance of xs:short) then xs:byte($n) else xs:short($n) }",
+        " fn($n) { $n instance of xs:byte }"),
+        1);
+
+    query(func.args(" { 'string': 'muckanaghederdauhaulia', 'remove': 'a' }",
+        " fn($map) { { 'string': replace($map?string, $map?remove, ''),"
+        + "'remove': $map?remove =!> string-to-codepoints() "
+        + "  =!> (fn($n) { $n + 2 })() =!> codepoints-to-string() } }",
+        " fn($map) { not(characters($map?string) = $map?remove) }")
+        + "?string", "unhdrduhul");
+
+    query("let $s := (1 to 1000) return " +
+        func.args(1, " fn { . + 1 }", " fn { not(. = $s) }"), 1001);
+    query("let $i := 3936256 return " + func.args(" $i", " fn($n) { ($n + $i div $n) div 2 }",
+        " fn($n) { abs($n * $n - $i) < 0.0000000001 }"), 1984);
+
+    query(func.args(1, " fn($x) { $x * 2 }", " fn($x) { $x >= 1000 }"), 1024);
+    query(func.args(1, " fn($x) { $x, $x }", " fn($xs) { count($xs) > 3 }"),
+        "1\n1\n1\n1");
+
+    query(func.args(1, " op('*')", " fn($_, $p) { $p >= 10 }"), 3628800);
+
+    check(func.args(1, " identity#1", " true#0"), 1, root(DO_UNTIL));
+    check(func.args(" (1, 2)", " identity#1", " true#0"), "1\n2", root(DO_UNTIL));
+
+    // GH-2257
+    query("head(" + func.args(" (1, 2)", " identity#1",
+        " fn($x, $p) { $p = 1 }") + ')', 1);
+    query("head(" + func.args(" (1, 2)", " fn($s as xs:integer+) { $s[2], $s[1] }",
+        " fn($x, $p) { $p = 1 }") + ')', 2);
+    error("head(" + func.args(" (1, 2)", " fn($s as xs:integer) { $s[2], 1 }",
+        " fn($x, $p) { $p = 1 }") + ')', INVTYPE_X);
+
+    // closure
+    check("for $a in (1 to 2)[. > 0] return " +
+        func.args(" $a", " fn($x) { (1 to 100)[$x + $a] }", " fn($x) { $x ge 5 }"),
+        "5\n6", exists(ITEMS_AT), empty(HoistedFilter.class), empty(CachedFilter.class));
+  }
+
+  /** Test method. */
+  @Test public void duplicateValues() {
+    final Function func = DUPLICATE_VALUES;
+
+    query(func.args(1), "");
+    query(func.args(" (1, 2)"), "");
+    query(func.args(" (1, 2, 1)"), 1);
+    query(func.args(" (1, 2, 1, 1)"), 1);
+    query(func.args(" (1, 2, 2, 1)"), "2\n1");
+    query(func.args(" (1, 'a', true())"), "");
+    query(func.args(" 1 to 5000000000"), "");
+    query(func.args(" (1 to 5000000000) ! 1"), 1);
+    query(func.args(wrap(1) + "to 5000000000"), "");
+
+    query(func.args(" (1 to 5) ! <_>1</_>"), 1);
+    query(func.args(" (<a>1</a>, <b>1</b>)"), 1);
+
+    query(func.args(" 'a'", "?lang=de"), "");
+    query(func.args(" ('a', 'a')", "?lang=de"), "a");
+    query(func.args(" ('a', 'a', 'a')", "?lang=de"), "a");
+
+    error(func.args(" (1, true#0)"), FIATOMIZE_X);
+    error(func.args(" (1 to 5) ! true#0"), FIATOMIZE_X);
+
+    // optimizations
+    String seq = "let $seq := (" + wrap(1) + ", 2, " + wrap(1) + ") return ";
+    check(seq + "count($seq)  = count(distinct-values($seq))", false, root(EMPTY), exists(func));
+    check(seq + "count($seq) <= count(distinct-values($seq))", false, root(EMPTY), exists(func));
+    check(seq + "count($seq) <  count(distinct-values($seq))", false, root(Bln.class));
+    check(seq + "count($seq) >= count(distinct-values($seq))", true,  root(Bln.class));
+    check(seq + "count($seq) >  count(distinct-values($seq))", true,  root(EXISTS), exists(func));
+    check(seq + "count($seq) != count(distinct-values($seq))", true,  root(EXISTS), exists(func));
+
+    check(seq + "count(distinct-values($seq))  = count($seq)", false, root(EMPTY), exists(func));
+    check(seq + "count(distinct-values($seq)) <= count($seq)", true,  root(Bln.class));
+    check(seq + "count(distinct-values($seq)) <  count($seq)", true,  root(EXISTS), exists(func));
+    check(seq + "count(distinct-values($seq)) >= count($seq)", false, root(EMPTY), exists(func));
+    check(seq + "count(distinct-values($seq)) >  count($seq)", false, root(Bln.class));
+    check(seq + "count(distinct-values($seq)) != count($seq)", true,  root(EXISTS), exists(func));
+
+    seq = "let $seq := (<_>1</_>, 2, <_>1</_>)[. = 1] return ";
+    check(seq + "count($seq)  = count(distinct-values($seq))", false, root(EMPTY), exists(func));
+    check(seq + "count($seq) <= count(distinct-values($seq))", false, root(EMPTY), exists(func));
+    check(seq + "count($seq) <  count(distinct-values($seq))", false, root(Bln.class));
+    check(seq + "count($seq) >= count(distinct-values($seq))", true,  root(Bln.class));
+    check(seq + "count($seq) >  count(distinct-values($seq))", true,  root(EXISTS), exists(func));
+    check(seq + "count($seq) != count(distinct-values($seq))", true,  root(EXISTS), exists(func));
+
+    check(seq + "count(distinct-values($seq))  = count($seq)", false, root(EMPTY), exists(func));
+    check(seq + "count(distinct-values($seq)) <= count($seq)", true,  root(Bln.class));
+    check(seq + "count(distinct-values($seq)) <  count($seq)", true,  root(EXISTS), exists(func));
+    check(seq + "count(distinct-values($seq)) >= count($seq)", false, root(EMPTY), exists(func));
+    check(seq + "count(distinct-values($seq)) >  count($seq)", false, root(Bln.class));
+    check(seq + "count(distinct-values($seq)) != count($seq)", true,  root(EXISTS), exists(func));
+
+    // integer runtime optimizations
+    query("sum(" + func.args(" (3, 1 to 1_000_000)") + ")", 3);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000)") + "))", 3);
+    query("sum(" + func.args(" (3, 1 to 1_000_000, xs:byte(3))") + ")", 3);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000, xs:byte(3))") + "))", 3);
+    query("sum(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1))") + ")", 3);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1))") + "))", 3);
+    query("sum(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1), -1)") + ")", 2);
+    query("sum(sort(" + func.args(" (3, 1 to 1_000_000, xs:byte(-1), -1)") + "))", 2);
+
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>))") + ")", 3);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>))") + "))", 3);
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(3))") + ")", 3);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(3))") + "))", 3);
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1))") + ")", 3);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1))") + "))", 3);
+    query("sum(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1), -1)") + ")", 2);
+    query("sum(sort(" + func.args(" (3, 1 to xs:integer(<?_ 10?>), xs:byte(-1), -1)") + "))", 2);
+  }
+
+  /** Test method. */
+  @Test public void elementToMap() {
+    final Function func = Function.ELEMENT_TO_MAP;
+    query(func.args(" <a>10</a>") + "?a instance of xs:integer", true);
+    query(func.args(" <a>10.0</a>") + "?a instance of xs:decimal", true);
+    query(func.args(" <a>10e0</a>") + "?a instance of xs:double", true);
+    // untyped string content is represented as xs:untypedAtomic
+    query(func.args(" <a>x</a>") + "?a instance of xs:untypedAtomic", true);
+    // booleans: 'true'/'false' are inferred as boolean, '0'/'1' as integer
+    query(func.args(" <a>true</a>") + "?a instance of xs:boolean", true);
+    query(func.args(" <a>false</a>") + "?a instance of xs:boolean", true);
+    query(func.args(" <a>1</a>") + "?a instance of xs:integer", true);
+    query(func.args(" <a>0</a>") + "?a instance of xs:integer", true);
+    // leading zeros are preserved as strings
+    query(func.args(" <a>007</a>") + "?a instance of xs:untypedAtomic", true);
+    query(func.args(" <a>-05</a>") + "?a instance of xs:untypedAtomic", true);
+    // infinity and not-a-number are not inferred as numeric
+    query(func.args(" <a>INF</a>") + "?a instance of xs:untypedAtomic", true);
+    query(func.args(" <a>NaN</a>") + "?a instance of xs:untypedAtomic", true);
+    query(func.args(" <a>1</a>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'decimal' } } }") +
+        "?a instance of xs:decimal", true);
+    // default: a value that cannot be cast to the prescribed type raises an error
+    error(func.args(" <a>x</a>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'boolean' } } }"),
+        PLAN_TYPE_X_X);
+    error(func.args(" <a>x</a>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'double' } } }"),
+        PLAN_TYPE_X_X);
+    // liberal: the value is retained in its original form
+    query(func.args(" <a>x</a>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'boolean' } }, "
+        + "'liberal': true() }") + "?a instance of xs:untypedAtomic", true);
+    query(func.args(" <a>x</a>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'double' } }, "
+        + "'liberal': true() }") + "?a instance of xs:untypedAtomic", true);
+    // empty and whitespace-only content: prescribed type is not applied, no error is raised
+    query(func.args(" <a/>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'integer' } } }") +
+        "?a instance of xs:untypedAtomic", true);
+    query(func.args(" <a> </a>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'integer' } } }") +
+        "?a instance of xs:untypedAtomic", true);
+    // the type 'string' prescribes no type
+    query(func.args(" <a>x</a>", " { 'plan': { 'a': {'layout': 'simple', 'type': 'string' } } }") +
+        "?a instance of xs:untypedAtomic", true);
+    // inferred types never raise an error
+    query(func.args(" <a>x</a>") + "?a instance of xs:untypedAtomic", true);
+    // attribute types are validated too
+    error(func.args(" <a b='x'/>", " { 'plan': { '@b': { 'type': 'integer' } } }"), PLAN_TYPE_X_X);
+    query(func.args(" <a b='x'/>", " { 'plan': { '@b': { 'type': 'integer' } }, "
+        + "'liberal': true() }") + "?a?('@b') instance of xs:untypedAtomic", true);
+    // an empty attribute type is equivalent to 'string'
+    query(func.args(" <a b='1'/>", " { 'plan': { '@b': { 'type': () } } }") +
+        "?a?('@b') instance of xs:untypedAtomic", true);
+    query(func.args(" <a b='1'/>", " { 'plan': { '@b': {} } }") +
+        "?a?('@b') instance of xs:untypedAtomic", true);
+
+    // content-key option
+    query(func.args(" <price currency='USD'>12.16</price>",
+        " { 'attribute-marker': '', 'content-key': 'value' }") + "?price?value", "12.16");
+    // content key clashes with attribute name: prepend '#'
+    query(func.args(" <a b='1'>x</a>", " { 'attribute-marker': '', 'content-key': 'b' }") +
+        "?a => map:keys() => sort()", "#b\nb");
+
+    // names of children of mixed and sequence content are relative to the enclosing element
+    query(func.args(" <b xmlns='urn:u'>text<c>x</c></b>") +
+        " => serialize({ 'method': 'json' })", "{\"Q{urn:u}b\":[\"text\",{\"c\":\"x\"}]}");
+    query(func.args(" <b xmlns='urn:u'><c/><d/><c/></b>") +
+        " => serialize({ 'method': 'json' })",
+        "{\"Q{urn:u}b\":[{\"c\":\"\"},{\"d\":\"\"},{\"c\":\"\"}]}");
+  }
+
+  /** Test method. */
+  @Test public void mapToElement() {
+    final Function func = Function.MAP_TO_ELEMENT;
+    // empty input
+    query(func.args(" ()"), "");
+    // simple content
+    query(func.args(" { 'foo': 'bar' }"), "<foo>bar</foo>");
+    // attributes only (empty-plus)
+    query(func.args(" { 'box': { '@width': '5', '@height': '10' } }"),
+        "<box width=\"5\" height=\"10\"/>");
+    // simple content with attribute (simple-plus)
+    query(func.args(" { 'price': { '@currency': 'USD', '#content': 12.16 } }"),
+        "<price currency=\"USD\">12.16</price>");
+    // record
+    query(func.args(" { 'name': { 'first': 'Jane', 'last': 'Smith' } }"),
+        "<name><first>Jane</first><last>Smith</last></name>");
+    // repeated child (array value)
+    query(func.args(" { 'n': { 'a': [ '1', '2' ] } }"), "<n><a>1</a><a>2</a></n>");
+    // mixed content
+    query(func.args(" { 'para': [ { '@id': 'x' }, 'This is a ', { 'i': 'fine' }, ' mess!' ] }"),
+        "<para id=\"x\">This is a <i>fine</i> mess!</para>");
+    // list layout: child name supplied by the plan
+    query(func.args(" { 'dates': [ '2023-03-20', '2023-04-12' ] }",
+        " { 'plan': { 'dates': { 'layout': 'list', 'child': 'date' } } }"),
+        "<dates><date>2023-03-20</date><date>2023-04-12</date></dates>");
+
+    // error: not a single-entry map
+    error(func.args(" { 'a': 1, 'b': 2 }"), MAP_TO_ELEMENT_X);
+    // error: content value with more than one item
+    error(func.args(" { 'a': ('x', 'y') }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': { '@id': (1, 2) } }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': { 'b': (1, 2) } }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': [ ('x', 'y') ] }"), MAP_TO_ELEMENT_X);
+
+    // single atomic array member and interspersed text remain valid (mixed content)
+    query(func.args(" { 'a': ['x'] }") + " => serialize()", "<a>x</a>");
+    query(func.args(" { 'a': ['x', { 'b': 'y' }, 'z'] }") + " => serialize()", "<a>x<b>y</b>z</a>");
+    // error: adjacent atomic members (list child name not recoverable without a plan)
+    error(func.args(" { 'a': ['x', 'y'] }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': ['x', 'y', 'z'] }"), MAP_TO_ELEMENT_X);
+
+    // error: empty element name
+    error(func.args(" { '': () }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { '': 'x' }"), MAP_TO_ELEMENT_X);
+
+    // bound and predefined prefixes are accepted; unbound prefixes are rejected
+    query(func.args(" { 'xml:id': 'v' }") + " => serialize()", "<xml:id>v</xml:id>");
+    error(func.args(" { 'y:a': () }"), MAP_TO_ELEMENT_X);
+
+    // error: non-atomic attribute, content or text values
+    error(func.args(" { 'a': { '@x': { 'y': 1 } } }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': { '#content': [1, 2] } }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': <x/> }"), MAP_TO_ELEMENT_X);
+    // error: simple content combined with child elements (no layout produces this)
+    error(func.args(" { 'a': { '#content': 'x', 'b': 'y' } }"), MAP_TO_ELEMENT_X);
+    // processing instruction
+    query(func.args(" { 'a': [ { '#processing-instruction': "
+        + "{ '#target': 'p', '#data': 'd' } } ] }") + " => serialize()", "<a><?p d?></a>");
+    // error: invalid processing-instruction structure, target or content
+    error(func.args(" { 'a': [ { '#processing-instruction': 'p', '#data': 'd' } ] }"),
+        MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': [ { '#processing-instruction': "
+        + "{ '#target': 'a b', '#data': 'd' } } ] }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': [ { '#processing-instruction': "
+        + "{ '#target': 'xml', '#data': 'd' } } ] }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': [ { '#processing-instruction': "
+        + "{ '#target': 'p', '#data': 'a?>b' } } ] }"), MAP_TO_ELEMENT_X);
+    // error: invalid comment content
+    error(func.args(" { 'a': [ { '#comment': 'a--b' } ] }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': [ { '#comment': 'ab-' } ] }"), MAP_TO_ELEMENT_X);
+
+    // error: array members must be single-entry maps (empty/multi-entry crash & silent loss)
+    error(func.args(" { 'a': [ {} ] }"), MAP_TO_ELEMENT_X);
+    error(func.args(" { 'a': [ { 'b': 1, 'c': 2 } ] }"), MAP_TO_ELEMENT_X);
+    // error: fn:null is only a nilled-element marker, not an attribute value
+    error(func.args(" { 'a': { '@x': xs:QName('fn:null') } }"), MAP_TO_ELEMENT_X);
+    // astral-plane (supplementary) characters are valid name characters
+    query("string-to-codepoints(name(" + func.args(" { codepoints-to-string(119070): 'x' }")
+        + "))", 119070);
+
+    // strict: an empty attribute-marker cannot distinguish attributes from elements
+    error("map-to-element({ 'a': 'x' }, { 'attribute-marker': '' })", MAP_TO_ELEMENT_X);
+    // xml layout must contain exactly one element (no extra/leading content silently dropped)
+    error("map-to-element({ 'a': '<b/><c/>' }, { 'plan': { 'a': { 'layout': 'xml' } } })",
+        MAP_TO_ELEMENT_X);
+    error("map-to-element({ 'a': 'hi<b/>' }, { 'plan': { 'a': { 'layout': 'xml' } } })",
+        MAP_TO_ELEMENT_X);
+    // xmlns must not be reconstructed as an attribute (would become a namespace declaration)
+    error(func.args(" { 'a': { '@xmlns': 'u' } }"), MAP_TO_ELEMENT_X);
+  }
+
+  /** Test method. */
+  @Test public void error() {
+    final Function func = ERROR;
+
+    // pre-evaluate empty sequence
+    error(func.args(), FUNERR1);
+    error(func.args(" ()"), FUNERR1);
+    query("(1, " + func.args() + ")[1]", 1);
+
+    // errors: defer error if not requested; adjust declared sequence type of {@link TypeCheck}
+    query("head((1, " + func.args() + "))", 1);
+    query("head((1, function() { error() }()))", 1);
+
+    inline(true);
+    query("declare function local:e() { error() }; head((1, local:e()))", 1);
+    query("declare function local:e() as empty-sequence() { error() }; head((1, local:e()))", 1);
+    query("declare %basex:inline(0) function local:f() { error() }; head((1, local:f()))", 1);
+  }
+
+  /** Test method. */
+  @Test public void every() {
+    final Function func = EVERY;
+
+    query(func.args(" (1 to 10) ! boolean(.)"), true);
+    query(func.args(" reverse(1 to 10) ! boolean(.)"), true);
+    query(func.args(" reverse(0 to 9) ! boolean(.)"), false);
+
+    query(func.args(" ()", " boolean#1"), true);
+    query(func.args(1, " boolean#1"), true);
+    query(func.args(" 0 to 1", " boolean#1"), false);
+    query(func.args(" (1, 3, 7)", " function($n) { $n mod 2 = 1 }"), true);
+    query(func.args(" -5 to 5", " function($n) { $n ge 0 }"), false);
+    query(func.args(" ('January', 'February', 'March', 'April', 'September', 'October',"
+        + "'November', 'December')", " contains(?, 'r')"), true);
+    check(func.args(" -3 to 3", " function($n) { abs($n) >= 0 }"), true,
+        exists(CmpG.class), empty(func), exists(NOT));
+
+    query(func.args(1, " op('=')"), true);
+    query(func.args(2, " op('=')"), false);
+    query(func.args(" 1 to 6", " op('=')"), true);
+    query(func.args(" 2 to 7", " op('=')"), false);
+    query(func.args(" reverse(1 to 9)", " op('=')"), false);
+
+    // an empty predicate result is treated as false
+    query(func.args(" (1, 2)", " fn($x, $p) { if($x eq 1) then () else true() }"), false);
+    query(func.args(" (1, 2, 3)", " fn($x, $p) { () }"), false);
+    query(func.args(" (1, 2, 3)", " fn($x, $p) { true() }"), true);
+
+    final String lookup = "function-lookup(xs:QName(<?_ fn:every?>), 2)";
+    query(lookup + "(1 to 9, boolean#1)", true);
+    query(lookup + "(1 to 9, not#1)", false);
+    query(lookup + "(0 to 9, boolean#1)", false);
+    query(lookup + "(0 to 9, not#1)", false);
+  }
+
+  /** Test method. */
+  @Test public void filter() {
+    final Function func = FILTER;
+    query(func.args(" (0, 1)", " boolean#1"), 1);
+
+    query(func.args(" 2 to 7", " op('=')"), "");
+    query(func.args(" 1 to 9", " op('=')"), "1\n2\n3\n4\n5\n6\n7\n8\n9");
+    query(func.args(" reverse(1 to 9)", " op('=')"), 5);
+
+    check(func.args(" ()", " boolean#1"), "", empty());
+    check(func.args(" 1 to 9", " function($n) { $n = 0 }"), "", exists(IterFilter.class));
+    check(func.args(" ('a', <a/>)", " function($s as xs:string) { $s = 'a' }"), "a",
+        exists(IterFilter.class));
+    check(func.args(" ('a', <a/>)", " function($s as xs:string) as xs:boolean? { $s = 'a' }"), "a",
+        exists(IterFilter.class));
+
+    check(func.args(9, " { 9: true() }"), 9);
+    check(func.args(9, " { 9: false() }"), null);
+    check(func.args(9, " { 9: ()} "), "");
+    check(func.args(8, " { 9: true() }"), "");
+
+    check(func.args(1, " [ true() ]"), 1);
+    check(func.args(1, " [ false() ]"), null);
+    check(func.args(1, " [ () ]"), "");
+    error(func.args(2, " [ true() ]"), ARRAYBOUNDS_X_X);
+
+    inline(true);
+    check(func.args(" (<a/>, <b/>)", " boolean#1"), "<a/>\n<b/>", root(List.class));
+    check(func.args(" <a/>", " boolean#1"), "<a/>", root(CElem.class));
+  }
+
+  /** Test method. */
+  @Test public void foldLeft() {
+    final Function func = FOLD_LEFT;
+
+    query("(1, 'a')[. instance of xs:integer] ! " +
+        func.args(" .", 0, " function($a, $b) { $b }"), 1);
+    query("(1, function($a, $b) { $b })[. instance of function(*)] ! " +
+        func.args("A", 1, " ."), "A");
+
+    query(func.args(" ()", 1, " function($a, $b) { $b }"), 1);
+    query(func.args(" void(1)", 1, " function($a, $b) { $b }"), 1);
+    query(func.args(2, 1, " function($a, $b) { $b }"), 2);
+    query("sort(" + func.args(" <a/>", "a", " compare#2") + ")", 1);
+
+    query(func.args(" 1 to 6", "ok", " fn($r, $i, $p) { $r[$i = $p] }"), "ok");
+    query(func.args(" 2 to 7", "-", " fn($r, $i, $p) { $r[$i = $p] }"), "");
+
+    // early exits: no exit if the condition depends on the position
+    query(func.args(" 1 to 5", 0, " fn($r, $v, $p) { if($p = 3) then $r else $r + $v }"), 12);
+    // early exits: no string equality exit for non-default collations
+    query("declare default collation 'http://basex.org/collation?lang=en;strength=primary'; " +
+        func.args(" 1 to 5", "a", " fn($r, $v) { if($r = 'A') then 'A' else 'z' }"), "A");
+
+    // early exits: recognized patterns terminate despite the huge input
+    query(func.args(" 1 to 1_000_000_000", 0,
+        " fn($r, $v) { if($r >= 10) then $r else $r + $v }"), 10);
+    query(func.args(" 1 to 1_000_000_000", 0,
+        " fn($r, $v) { if($r < 10) then $r + $v else $r }"), 10);
+    query(func.args(" 1 to 1_000_000_000", " false()",
+        " fn($r, $v) { $r or $v = 5 }"), true);
+    query(func.args(" 1 to 1_000_000_000", " true()",
+        " fn($r, $v) { $r and $v < 5 }"), false);
+    query(func.args(" 1 to 1_000_000_000", " false()",
+        " fn($r, $v) { $r or $v mod 7 = 6 or $v = 3 }"), true);
+    query(func.args(" 1 to 1_000_000_000", " false()",
+        " fn($r, $v) { $v = 300 or $r or $v mod 7 = 6 }"), true);
+    query(func.args(" 1 to 1_000_000_000", " true()",
+        " fn($r, $v) { $v != 0 and $r and $v < 5 }"), false);
+    query(func.args(" 1 to 1_000_000_000", " ()",
+        " fn($r, $v) { $r otherwise $v[. = 5] }"), 5);
+    query(func.args(" 1 to 1_000_000_000", " ()",
+        " fn($r, $v) { $r otherwise $v[. = 5] otherwise $v[. = 3] }"), 3);
+
+    check(func.args(" ()", " ()", " function($a, $b) { $b }"), "", empty());
+
+    check(func.args(" 1 to 10", " xs:byte(1)", " function($n, $_) {" +
+        " if($n instance of xs:byte ) then xs:short  (1) else" +
+        " if($n instance of xs:short) then xs:int    (1) else" +
+        " if($n instance of xs:int  ) then xs:long   (1) else" +
+        " if($n instance of xs:long ) then xs:integer(1) else" +
+        " xs:decimal(1)" +
+        "}"), 1,
+        type(func, "xs:decimal"));
+
+    // closure
+    check("for $a in (1 to 2)[. > 0] return " +
+        func.args(" 1 to 6", 0, " fn($_, $b) { (1 to 100)[$a + $b] }"),
+        "7\n8", exists(ITEMS_AT), empty(HoistedFilter.class), empty(CachedFilter.class));
+
+    // type inference
+    inline(true);
+    check(func.args(" (1, 2)[. = 1]", " ()", " function($r, $a) { $r, $a }"), 1,
+        type(func, "xs:integer*"));
+    check(func.args(" (1, 2)[. = 0]", 1, " function($r, $a) { $r, $a }"), 1,
+        type(func, "xs:integer+"));
+    check(func.args(" (1, 2)[. = 1]", "a", " function($r, $a) { $r, $a }"), "a\n1",
+        type(func, "xs:anyAtomicType+"));
+
+    check(func.args(" (1, 2)[. = 0]", 1, " function($r as xs:integer, $a) { $r + $r }"), 1,
+        type(func, "xs:integer"));
+
+    // should not be unrolled
+    check(func.args(" 1 to 6", 0, " function($a, $b) { $a + $b }"), 21,
+        exists(func));
+
+    // should be unrolled and evaluated at compile time
+    unroll(true);
+    check(func.args(" 2 to 5", 1, " function($a, $b) { $a + $b }"), 15,
+        empty(func),
+        exists(Itr.class));
+    // should be unrolled but not evaluated at compile time
+    check(func.args(" 2 to 5", 1, " function($a, $b) { $b[" + _RANDOM_DOUBLE.args() + "] }"), "",
+        empty(func),
+        exists(_RANDOM_DOUBLE));
+
+    // ensure that builder takes advantage of regularities
+    checkType(func.args(" 0 to 4", " ()", " fn($seq, $i) { $seq, $i }"),
+        new TypeInfo(RangeSeq.class, "xs:integer+", 5));
+    checkType(func.args(" 0 to 4", " ()", " fn($seq, $i) { $seq, -$i }"),
+        new TypeInfo(RangeSeq.class, "xs:integer+", 5));
+    checkType(func.args(" 0 to 4", " ()", " fn($seq, $i) { $i, $seq }"),
+        new TypeInfo(RangeSeq.class, "xs:integer+", 5));
+    checkType(func.args(" 0 to 4", " ()", " fn($seq, $i) { -$i, $seq }"),
+        new TypeInfo(RangeSeq.class, "xs:integer+", 5));
+
+    checkType(func.args(" 0 to 4", " ()", " fn($seq, $i) { $seq, 1 }"),
+        new TypeInfo(SingletonSeq.class, "xs:integer+", 5));
+    checkType(func.args(" 0 to 4", " ()", " fn($seq, $i) { 1, $seq }"),
+        new TypeInfo(SingletonSeq.class, "xs:integer+", 5));
+  }
+
+  /** Test method. */
+  @Test public void foldRight() {
+    final Function func = FOLD_RIGHT;
+    query(func.args(" 1 to 6", "ok", " fn($i, $r, $p) { $r[$i = 7 - $p] }"), "ok");
+    query(func.args(" 1 to 6", "-", " fn($i, $r, $p) { $r[$i = $p] }"), "");
+
+    // early exits: check the exit condition before the first call
+    query(func.args(" 1 to 5", 100, " fn($v, $r) { if($r >= 10) then $r else $r + $v }"), 100);
+
+    // early exits: recognized patterns terminate despite the huge input
+    query(func.args(" 1 to 1_000_000_000", 0,
+        " fn($v, $r) { if($r >= 10) then $r else $r + $v }"), 1000000000);
+    query(func.args(" 1 to 1_000_000_000", " ()",
+        " fn($v, $r) { $r otherwise $v[. mod 2 = 1] }"), 999999999);
+
+    check(func.args(" ()", " ()", " function($a, $b) { $a }"), "", empty());
+
+    // should not be unrolled
+    check(func.args(" 0 to 5", 10, " function($a, $b) { $a + $b }"), 25,
+        exists(func));
+
+    // closure
+    check("for $a in (1 to 2)[. > 0] return " +
+        func.args(" 1 to 6", 0, " fn($_, $b) { (1 to 100)[$a + $b] }"),
+        "6\n12", exists(ITEMS_AT), empty(HoistedFilter.class), empty(CachedFilter.class));
+
+    // should be unrolled and evaluated at compile time
+    unroll(true);
+    check(func.args(" 1 to 4", 10, " function($a, $b) { $a + $b }"), 20,
+        empty(func),
+        exists(Itr.class));
+    // should be unrolled but not evaluated at compile time
+    check(func.args(" 1 to 4", 10, " function($a, $b) { $b[" + _RANDOM_DOUBLE.args() + "] }"), "",
+        empty(func),
+        exists(_RANDOM_DOUBLE));
+  }
+
+  /** Test method. */
+  @Test public void foot() {
+    final Function func = FOOT;
+
+    // merge with nested positional functions (the let prevents the operand from being unrolled)
+    check(OPAQUE + "(" + func.args(" " + TAIL.args(" $o")) + ','
+        + func.args(" " + TRUNK.args(" $o")) + ','
+        + func.args(" " + REVERSE.args(" $o")) + ')', "5\n4\n1",
+        empty(TAIL), empty(TRUNK), empty(REVERSE));
+
+    query(func.args(" ()"), "");
+    query(func.args(1), 1);
+    query(func.args(" 1 to 2"), 2);
+
+    query("for $i in 1 to 2 return " + func.args(" $i"), "1\n2");
+    query(func.args(" (<a/>, <b/>)"), "<b/>");
+    query(func.args(" (<a/>, <b/>)[position() > 2]"), "");
+
+    query("for $i in 1 to 2 return " + func.args(" $i"), "1\n2");
+    query(func.args(" (<a/>, <b/>)"), "<b/>");
+
+    check(func.args(" void(())"), "", empty(func));
+    check(func.args(" <a/>"), "<a/>", empty(func));
+    check(func.args(" (<a/>, <b/>)[name()]"), "<b/>", type(HEAD, "(element(b)|element(a))?"));
+    check(func.args(" reverse((1, 2, 3)[. > 1])"), 2, exists(HEAD));
+
+    check(func.args(" tokenize(<_/>)"), "", exists(FOOT));
+    check(func.args(" tokenize(" + wrap(1) + ")"), 1, exists(FOOT));
+    check(func.args(" tokenize(" + wrap("1 2") + ")"), 2, exists(FOOT));
+
+    check(func.args(" tail(tokenize(<a/>))"), "", exists(TAIL));
+    check(func.args(" tail(1 ! <_>{.}</_>)"), "", empty());
+    check(func.args(" tail((1 to 2) ! <_>{.}</_>)"), "<_>2</_>", empty(TAIL));
+    check(func.args(" tail((1 to 3) ! <_>{.}</_>)"), "<_>3</_>", empty(TAIL));
+
+    check(func.args(TRUNK.args(" (1 to 3) ! <_>{.}</_>")), "<_>2</_>", empty(TRUNK));
+    check(func.args(TRUNK.args(" tokenize(<a/>)")), "", exists(TRUNK));
+
+    check(func.args(REPLICATE.args(" <a/>", 2)), "<a/>", root(CElem.class));
+    check(func.args(REPLICATE.args(" <a/>[. = '']", 2)), "<a/>",
+        root(IterFilter.class), empty(REPLICATE));
+    check(func.args(REPLICATE.args(" (<a/>, <b/>)[. = '']", 2)), "<b/>",
+        root(HEAD), empty(REPLICATE));
+    check(func.args(REPLICATE.args(" <a/>", " <_>2</_>")), "<a/>", exists(REPLICATE));
+
+    check(func.args(" (<a/>, <b/>)"), "<b/>", root(CElem.class));
+    check(func.args(" (<a/>, 1 to 2)"), 2, root(Itr.class));
+  }
+
+  /** Test method. */
+  @Test public void forEach() {
+    final Function func = FOR_EACH;
+
+    query("(1, not#1)[. instance of function(*)] ! " + func.args(" 1", " ."), false);
+    query("sort(" + func.args(" (1 to 2)[. > 0]", " string#1") + ')', "1\n2");
+    check(func.args(" ()", " boolean#1"), "", empty());
+
+    query(func.args(5, " op('*')"), 5);
+    query(func.args(" reverse(1 to 6)", " op('*')"), "6\n10\n12\n12\n10\n6");
+
+    inline(true);
+    // pre-compute result size
+    query("count(" + func.args(" 1 to 10_000_000_000", " string#1") + ')', 10000000000L);
+    check("count(" + func.args(" 1 to 20", " function($a) { $a, $a }") + ')',
+        40, root(Itr.class));
+
+    // rewritten to FLWOR expression
+    check(func.args(" 0 to 8", " function($x) { $x + 1 }"),
+        "1\n2\n3\n4\n5\n6\n7\n8\n9",
+        empty(func),
+        root(RangeSeq.class), exists(RangeSeq.class));
+    check(func.args(" 1 to 9", " function($x) { $x[" + _RANDOM_DOUBLE.args() + "] }"), "",
+        empty(func),
+        exists(DualMap.class), exists(_RANDOM_DOUBLE));
+    check(func.args(" 0 to 10", " function($x) { $x idiv 2 }"),
+        "0\n0\n1\n1\n2\n2\n3\n3\n4\n4\n5",
+        root(DualMap.class));
+    check(func.args(" (1 to 2)[. = 2]", " function($a) { $a * $a }"), 4,
+        type(DualMap.class, "xs:integer*"));
+  }
+
+  /** Test method. */
+  @Test public void forEachPair() {
+    final Function func = FOR_EACH_PAIR;
+
+    query("(0, concat#2)[. instance of function(*)] ! " +
+        func.args("A", "B", " ."), "AB");
+
+    query("sort(" + func.args(" ('aa', 'bb')", " (2, 2)", " substring#2") + ')', "a\nb");
+
+    // pre-compute result size
+    check("count(" + func.args(" 1 to 10_000_000_000", " 1 to 10_000_000_000",
+        " function($a, $b) { 'a' }") + ')', 10000000000L, empty(func));
+    check("count(" + func.args(" 1 to 20_000_000_000", " 1 to 10_000_000_000",
+        " function($a, $b) { 'a' }") + ')', 10000000000L, empty(func));
+    check("count(" + func.args(" 1 to 10_000_000_000", " 1 to 20_000_000_000",
+        " function($a, $b) { 'a' }") + ')', 10000000000L, empty(func));
+    check("count(" + func.args(" 1 to 20", " 1 to 20", " function($a, $b) { $a, $b }") + ')', 40,
+        exists(func));
+
+    check(func.args(" ()", "a", " matches#2"), "", empty());
+    check(func.args("aa", " ()", " matches#2"), "", empty());
+
+    query(func.args("aa", "a", " matches#2"), true);
+    query(func.args(" ('aa', 'bb')", "a", " matches#2"), true);
+    query(func.args("aa", " ('a', 'b')", " matches#2"), true);
+
+    query(func.args(5, 8, " fn($a, $b, $p) { ($b - $a) * $p }"), 3);
+    query(func.args(" (0 to 5)", " (1 to 6)", " fn($a, $b, $p) { ($b - $a) * $p }"),
+        "1\n2\n3\n4\n5\n6");
+
+    // random access
+    final String pos = func.args(" (10, 20, 30)", " (1, 2, 3)", " fn($a, $b, $p) { $p }");
+    query(pos + "[2]", 2);
+    query("reverse(" + pos + ')', "3\n2\n1");
+  }
+
+  /** Test method. */
+  @Test public void formatDateTime() {
+    final Function func = FORMAT_DATETIME;
+
+    query(func.args(" xs:dateTime('2023-07-01T12:00:00Z')",
+        "[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01][Z]", " ()", " ()", "America/New_York"),
+        "2023-07-01T08:00:00-04:00");
+    query(func.args(" xs:dateTime('2023-07-01T12:00:00Z')",
+        "[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01][Z]", " ()", " ()", "Asia/Kolkata"),
+        "2023-07-01T17:30:00+05:30");
+  }
+
+  /** Test method. */
+  @Test public void formatTime() {
+    final Function func = FORMAT_TIME;
+
+    query(func.args(" xs:time('12:00:00Z')", "[H01]:[m01]:[s01][Z]", " ()", " ()",
+        "America/New_York"), "07:00:00-05:00");
+    query(func.args(" xs:time('12:00:00Z')", "[H01]:[m01]:[s01][Z]", " ()", " ()",
+        "Asia/Kolkata"), "17:30:00+05:30");
+    query(func.args(" xs:time('12:01:01.123')", "[f99#]"), "123");
+    query(func.args(" xs:time('12:01:01.133')", "[f,2-4]"), "133");
+    query(func.args(" xs:time('12:01:01.135')", "[f00'0]"), "13'5");
+  }
+
+  /** Test method. */
+  @Test public void formatDate() {
+    final Function func = FORMAT_DATE;
+
+    query(func.args(" xs:date('2023-12-11')", "[Dwo] [MNn] ([FNn])", "zu"),
+        "[Language: en]eleventh December (Monday)");
+    query(func.args(" xs:date('2024-01-12Z')", "[Y0001]-[M01]-[D01][Z]", " ()", " ()",
+        "America/New_York"), "2024-01-11-05:00");
+
+    if(ExternalLib.ICU.available()) {
+      query(func.args(" xs:date('2023-12-11')", "[FNn], [MNn] [D], [Y]", "cy"),
+          "Dydd Llun, Rhagfyr 11, 2023");
+      query(func.args(" xs:date('2023-09-01')", "[MNn]", "es"), "septiembre");
+      // different wording for country
+      query(func.args(" xs:date('2023-09-01')", "[MNn]", "es-PE"), "setiembre");
+      // fallback to base language
+      query(func.args(" xs:date('2023-09-01')", "[MNn]", "es-CZ"), "septiembre");
+      // fallback to default language
+      query(func.args(" xs:date('2023-09-01')", "[MNn]", "zu-DE"), "[Language: en]September");
+    }
+  }
+
+  /** Test method. */
+  @Test public void formatInteger() {
+    final Function func = FORMAT_INTEGER;
+
+    query(func.args(11, "1"), "11");
+    query(func.args(11, "001"), "011");
+
+    query(func.args(1234, "16^xxxx"), "04d2");
+    query(func.args(1234, "16^X"), "4D2");
+    query(func.args(12345678, "16^xxxx_xxxx"), "00bc_614e");
+    query(func.args(12345678, "16^#_xxxx"), "bc_614e");
+    query(func.args(255, "2^xxxx xxxx"), "1111 1111");
+    query(func.args(1023, "32^XXXX"), "00VV");
+
+    query(func.args(1, "Ww", "de"), "Eins");
+    query(func.args(1, "Ww;o", "de"), "Erste");
+    if(ExternalLib.ICU.available()) {
+      query(func.args(1, "Ww;c", "de"), "Ein");
+      query(func.args(1, "Ww;o(%spellout-cardinal-feminine-financial)", "bs"), "Jedinica");
+      query(func.args(1, "Ww;c(%spellout-ordinal-neuter)", "es"), "Primera");
+      query(func.args(99, "w", "fr"), "quatre-vingt-dix-neuf");
+      // different wording for country
+      query(func.args(99, "w", "fr-CH"), "nonante-neuf");
+      // fallback to language code
+      query(func.args(99, "w", "fr-PL"), "quatre-vingt-dix-neuf");
+      // fallback to default language
+      query(func.args(99, "w", "zu-DE"), "ninety-nine");
+    }
+
+    // empty input, not known at compile time
+    query(func.args(" let $x :=" + _RANDOM_INTEGER.args() + " return ()", "0"), "");
+  }
+
+  /** Test method. */
+  @Test public void formatNumber() {
+    final Function func = FORMAT_NUMBER;
+
+    query(func.args(" 12345.67", "#.##0,00", "de"), "12.345,67");
+    query(func.args(" 12345.67", "#.##0,00", " { 'decimal-separator': ',', "
+        + "'grouping-separator': '.' }"), "12.345,67");
+    query(func.args(" 12345.67", "#'##0.00", "de-CH"), "12'345.67");
+    query(func.args(" 12345.67", "#.##0,00", " { "
+        + "'decimal-separator': ',', 'grouping-separator': '.' }"), "12.345,67");
+    query(func.args(" 12345.67", "#.##0,00", " { 'format-name': 'de' }"), "12.345,67");
+    query(func.args(" 12345.67", "#.##0,00", " { 'format-name': 'de', "
+        + "'decimal-separator': ',', 'grouping-separator': '.' }"), "12.345,67");
+    query(func.args(" 12345.67", "#.##0,00", " { 'format-name': 'en', "
+        + "'decimal-separator': ',', 'grouping-separator': '.' }"), "12.345,67");
+
+    error(func.args(" 12345.67", "#.##0,00", "de-XX"), FORMATWHICH_X);
+  }
+
+  /** Test method. */
+  @Test public void functionAnnotations() {
+    final Function func = FUNCTION_ANNOTATIONS;
+    // queries
+    query(func.args(" true#0"), "");
+    query(func.args(" %local:x function() {}") +
+        "=> " + _MAP_CONTAINS.args(" #local:x"), true);
+    query(func.args(" %Q{uri}name('a', 'b') function() {}") +
+        " (QName('uri', 'name'))", "a\nb");
+    query(COUNT.args(func.args(" %basex:inline %basex:lazy function() {}")), 2);
+  }
+
+  /** Test method. */
+  @Test public void functionLookup() {
+    final Function func = FUNCTION_LOOKUP;
+
+    check("for $f in ('fn:true', 'fn:position') !" + func.args(" xs:QName(.)", 0) +
+        " return (8, 9)[$f()]",
+        "8\n9\n9", exists(func), exists(CachedFilter.class));
+    check("for $f in #fn:position return (8, 9)[" + func.args(" $f", 0) + "()]",
+        "8\n9", empty(func), exists(CachedFilter.class));
+
+    // variadic functions
+    query(func.args(" #fn:concat", 0) + "()", "");
+    query(func.args(" #fn:concat", 2) + "('a', 'b')", "ab");
+
+    // default values that are only reached by the lookup
+    query("declare function local:f($a := upper-case('x')) { $a }; "
+        + func.args(" xs:QName('local:f')", 0) + "()", "X");
+    query("declare function local:f($a := upper-case('x')) { $a }; "
+        + "declare function local:g($a := lower-case('Y')) { $a }; "
+        + "for $name in ('f', 'g') return "
+        + func.args(" QName('http://www.w3.org/2005/xquery-local-functions', $name)", 0) + "()",
+        "X\ny");
+    // fn:current in a default value refers to the focus of the lookup
+    query("declare function local:f($a := current()) { $a }; "
+        + "'lookup' ! " + func.args(" xs:QName('local:f')", 0) + "()", "lookup");
+    query("declare function local:f($a := current()) { $a }; "
+        + "declare function local:g($a := fn:current()) { $a }; "
+        + "for $name in ('f', 'g') return 'lookup' ! "
+        + func.args(" QName('http://www.w3.org/2005/xquery-local-functions', $name)", 0) + "()",
+        "lookup\nlookup");
+
+    inline(true);
+    check(func.args(" #fn:count", 1) + "((1, 2))", 2, root(Itr.class));
+    check(func.args(" #fn:identity", 1) + "(1)", 1, root(Itr.class));
+    check(func.args(" #fn:identity", 1) + "(<a/>)", "<a/>", root(CElem.class));
+  }
+
+  /** Test method. */
+  @Test public void generate() {
+    final Function func = GENERATE;
+    query(func.args(" ()", " fn {}"), "");
+    query(func.args(" 1", " fn {}"), 1);
+    query(func.args(" ()", " fn { if(.) { . -1 } }"), "");
+    query(func.args(3, " fn { if(.) { . -1 } }"), "3\n2\n1\n0");
+
+    final String init = "x";
+    String step = " fn { . || 'x' }";
+    query("head(" + func.args(init, step) + ")", init);
+    query("count(" + func.args(init, step) + ") > 10", true);
+    query(func.args(init, step) + "[1]", init);
+    query("'" + init + "' = " + func.args(init, step), true);
+    query("'x'[. = " + func.args(init, step) + ']', "x");
+
+    step = " fn() { '" + init + "' }";
+    query(func.args(init, step) + "=>" + DISTINCT_VALUES.args(), init);
+    query("'" + init + "' = " + func.args(init, step), true);
+    query("'x'[. = " + func.args(init, step) + ']', "x");
+
+    step = " identity#1";
+    query(func.args(init, step) + "=>" + DISTINCT_VALUES.args(), init);
+    query("'" + init + "' = " + func.args(init, step), true);
+    query("'x'[. = " + func.args(init, step) + ']', "x");
+
+    // closure
+    check("for $a in (1 to 2)[. > 0] return subsequence(" +
+        func.args(1, " fn($x) { (1 to 100)[$a + $x] }") + ", 1, 5)",
+        "1\n2\n3\n4\n5\n1\n3\n5\n7\n9",
+        exists(ITEMS_AT), empty(HoistedFilter.class), empty(CachedFilter.class));
+  }
+
+  /** Test method. */
+  @Test public void generateId() {
+    final Function func = GENERATE_ID;
+
+    // GH-1633: ensure that database nodes return identical ID
+    query("count(distinct-values((document { <x/> } update {}) ! (*, *) ! " +
+        func.args(" .") + "))", 1);
+    // ensure that constructed nodes return distinct IDs
+    query("count(distinct-values(for $i in 1 to 5 return " + func.args(" <y/>") + "))", 5);
+    query("count(distinct-values((1 to 5) ! (<y/> ! " + func.args() + ")))", 5);
+    query("count(distinct-values(for $i in 1 to 5 return " +
+        func.args(" " + PARSE_HTML.args("<x/>")) + "))", 5);
+  }
+
+  /** Test method. */
+  @Test public void hash() {
+    final Function func = HASH;
+    query("string(" + func.args(" ()") + ")", "");
+    query("string(" + func.args("") + ")", "D41D8CD98F00B204E9800998ECF8427E");
+    query("string(" + func.args("", " ()") + ")", "D41D8CD98F00B204E9800998ECF8427E");
+
+    query(func.args(" ()", "crc-32"), "");
+    query("string( " + func.args("", "CRC-32") + ')', "00000000");
+    query("string( " + func.args("BaseX", "CRC-32") + ')', "4C06FC7F");
+    query("string( " + func.args("BaseX", "CRC-32", " {}") + ')', "4C06FC7F");
+
+    query("string( " + func.args("X", "BLAKE3") + ')',
+        "F7B966D4B544408E21361E62D4D554FEDB411BD8E108D70B4B654620A4B06CD2");
+
+    error(func.args("", ""), HASH_ALGORITHM_X);
+  }
+
+  /** Tests the fn:empty and fn:exists rewritings of their arguments. */
+  @Test public void emptyExists() {
+    final String seq = " tokenize(" + wrap("a b c") + ", ' ')";
+
+    // exists(map:keys(E)) → map:size(E) > 0, empty(array:members(E)) → array:size(E) = 0
+    check(EXISTS.args(" " + _MAP_KEYS.args(" " + _MAP_MERGE.args(seq + " !" +
+        _MAP_ENTRY.args(" .", 1)))), true, exists(_MAP_SIZE), empty(_MAP_KEYS));
+    check(EMPTY.args(" " + _ARRAY_MEMBERS.args(" array {" + seq + " }")), false,
+        exists(_ARRAY_SIZE), empty(_ARRAY_MEMBERS));
+
+    check(EXISTS.args(HEAD.args(seq)), true, root(EXISTS), empty(HEAD));
+    check(EMPTY.args(HEAD.args(seq)), false, root(EMPTY), empty(HEAD));
+    check(EXISTS.args(FOOT.args(seq)), true, root(EXISTS), empty(FOOT));
+    check(EMPTY.args(FOOT.args(seq)), false, root(EMPTY), empty(FOOT));
+    check(EXISTS.args(TAIL.args(seq)), true, root(_UTIL_COUNT_WITHIN), empty(TAIL));
+    check(EMPTY.args(TAIL.args(seq)), false, root(_UTIL_COUNT_WITHIN), empty(TAIL));
+    check(EXISTS.args(TRUNK.args(seq)), true, root(_UTIL_COUNT_WITHIN), empty(TRUNK));
+    check(EMPTY.args(TRUNK.args(seq)), false, root(_UTIL_COUNT_WITHIN), empty(TRUNK));
+    check(EXISTS.args(SUBSEQUENCE.args(seq, 2)), true, root(_UTIL_COUNT_WITHIN), empty(TAIL));
+    check(EXISTS.args(SUBSEQUENCE.args(seq, 3)), true, root(_UTIL_COUNT_WITHIN),
+        empty(SUBSEQUENCE));
+    check(EMPTY.args(SUBSEQUENCE.args(seq, 4)), true, root(_UTIL_COUNT_WITHIN),
+        empty(SUBSEQUENCE));
+    check(EXISTS.args(_UTIL_RANGE.args(seq, 2, 3)), true, root(_UTIL_COUNT_WITHIN),
+        empty(_UTIL_RANGE));
+    check(EXISTS.args(ITEMS_AT.args(seq, 3)), true, root(_UTIL_COUNT_WITHIN), empty(ITEMS_AT));
+    check(EMPTY.args(ITEMS_AT.args(seq, 4)), true, root(_UTIL_COUNT_WITHIN), empty(ITEMS_AT));
+    check(EXISTS.args(DISTINCT_VALUES.args(seq)), true, root(EXISTS), empty(DISTINCT_VALUES));
+    check(EMPTY.args(DISTINCT_VALUES.args(seq)), false, root(EMPTY), empty(DISTINCT_VALUES));
+
+    final String one = " tokenize(" + wrap("a") + ", ' ')";
+    check(EXISTS.args(TAIL.args(one)), false, root(_UTIL_COUNT_WITHIN));
+    check(EMPTY.args(TAIL.args(one)), true, root(_UTIL_COUNT_WITHIN));
+    check(EXISTS.args(TRUNK.args(one)), false, root(_UTIL_COUNT_WITHIN));
+    check(EMPTY.args(TRUNK.args(one)), true, root(_UTIL_COUNT_WITHIN));
+
+    // arrays may be atomized to empty sequences: input is not rewritten
+    check(EMPTY.args(DISTINCT_VALUES.args(" (1 to 3)[. > " + wrap(0) + "] ! [ ]")), true,
+        exists(DISTINCT_VALUES));
+
+    // head is rewritten even for nondeterministic input; other functions are kept
+    final String ndt = " (1 to 3) ! (if(. = 3) then error() else .)";
+    check(EXISTS.args(HEAD.args(ndt)), true, empty(HEAD));
+    check(EXISTS.args(TAIL.args(ndt)), true, exists(TAIL));
+    check(EXISTS.args(TRUNK.args(ndt)), true, exists(TRUNK));
+    error(EXISTS.args(FOOT.args(ndt)), FUNERR1);
+
+    // empty sequences bound to variables and parameters
+    query("let $a := () return" + EMPTY.args(" $a"), true);
+    query("let $a := () return" + EXISTS.args(" $a"), false);
+    query("declare function local:f($x as empty-sequence()) as xs:boolean {"
+        + EMPTY.args(" $x") + " }; local:f(())", true);
+  }
+
+  /** Test method. */
+  @Test public void head() {
+    final Function func = HEAD;
+
+    // merge with nested positional functions (the let prevents the operand from being unrolled)
+    check(OPAQUE + "(" + func.args(" " + TAIL.args(" $o")) + ','
+        + func.args(" " + TRUNK.args(" $o")) + ','
+        + func.args(" " + SUBSEQUENCE.args(" $o", 3)) + ')', "2\n1\n3",
+        empty(TAIL), empty(TRUNK), empty(SUBSEQUENCE));
+
+    // pre-evaluate empty sequence
+    check(func.args(" ()"), "", empty(func));
+    check(func.args(1), 1, empty(func));
+    check(func.args(" (1, 2)"), 1, empty(func));
+    check(func.args(" <a/>"), "<a/>", empty(func));
+    check(func.args(" <a/>[name()]"), "<a/>", empty(func));
+    check(func.args(" (<a/>, <b/>)[name()]"), "<a/>", exists(func));
+    check(func.args(" (1, error())"), 1, exists(Itr.class));
+    check(func.args(" reverse((1 to " + wrap(3) + ")[. > 1])"), 3,
+        "exists(//IterFilter/FnReverse)");
+
+    check(func.args(TRUNK.args(" (<a/>, <b/>, <c/>)")), "<a/>", empty(TRUNK));
+    check(func.args(TRUNK.args(" (<a/>, <b/>) ")), "<a/>", empty(TRUNK));
+    check(func.args(TRUNK.args(" <a/>")), "", empty());
+    check(func.args(TRUNK.args(" (1, 2)[. = 0]")), "", exists(TRUNK));
+
+    check(func.args(" tail((<a/>, <b/>, <c/>[. = '']))"), "<b/>", root(CElem.class));
+    check(func.args(" tail((<a/>, <b/>, <c/>))"), "<b/>", root(CElem.class));
+
+    check(func.args(" subsequence((<a/>, <b/>)," + wrap(1) + ")"), "<a/>",
+        exists(SUBSEQUENCE));
+    check(func.args(" subsequence((<a/>, <b/>, <c/>, <d/>), 2, 2)"), "<b/>",
+        root(CElem.class));
+    check(func.args(_UTIL_RANGE.args(" (<a/>, <b/>, <c/>, <d/>)", 2, 3)), "<b/>",
+        root(CElem.class));
+
+    check(func.args(REPLICATE.args(" <a/>", 2)), "<a/>", root(CElem.class));
+    check(func.args(REPLICATE.args(" <a/>[. = '']", 2)), "<a/>",
+        root(IterFilter.class), empty(REPLICATE));
+
+    check(func.args(REPLICATE.args(" (<a/>, <b/>)[. = '']", 2)), "<a/>",
+        root(HEAD), empty(REPLICATE));
+    check(func.args(REPLICATE.args(" <a/>", " <_>2</_>")), "<a/>",
+        exists(REPLICATE));
+
+    check(func.args(" (1, <a/>)"), 1, root(Itr.class));
+    check(func.args(" (1 to 2, <a/>)"), 1, root(Itr.class));
+    check(func.args(" (<a/>[. = ''], 1)"), "<a/>", root(Otherwise.class));
+
+    check(func.args(" (<a/>[. = ''], <b/>, <c/>)"), "<a/>", root(Otherwise.class));
+    check(func.args(" (<a/>[. = ''], <b/>[. = ''])"), "<a/>", root(Otherwise.class));
+    check(func.args(" (<a/>[. = ''], <b/>[. = ''], <c/>[. = ''])"), "<a/>", empty(Otherwise.class));
+  }
+
+  /** Test method. */
+  @Test public void highest() {
+    final Function func = HIGHEST;
+    query(func.args(" ()"), "");
+    check(func.args(" ('a', 'b', 'c', 'd', 'e', 'f')[. = 'f']"), "f");
+    check(func.args(" ('a', 'b', 'c', 'd', 'e', 'f')[. = 'g']"), "");
+    query(func.args(" 'x'"), "x");
+    query(func.args(" (1e0, 2e0)"), 2);
+    query(func.args(" (8 to 11)"), 11);
+    query(func.args(" reverse(8 to 11)"), 11);
+    query(func.args(" (8 to 11)", " ()", " string#1"), 9);
+    query(func.args(" reverse(8 to 11)", " ()", " string#1"), 9);
+    query(func.args(" (3, 2, 1)", " ()", " function($k) { true() }"), "3\n2\n1");
+    query(func.args(" (8 to 11)", " ()",
+        " function($k) { string-length(string($k)) }"), "10\n11");
+    query(func.args(" reverse(8 to 11)", " ()",
+        " function($k) { string-length(string($k)) }"), "11\n10");
+    query(func.args(" (<a _='1'/>, <b _='2'/>)", " ()",
+        " function($k) { $k/@* }") + " ! name()", "b");
+    query(func.args(" <_ _='1'/>", " ()",
+        " function($a) { $a/@* }"), "<_ _=\"1\"/>");
+    query(func.args(" (<_ _='9'/>, <_ _='10'/>)", " ()",
+        " function($a) { $a/@* }"), "<_ _=\"10\"/>");
+    query(func.args(" (<_ _='9'/>, <_ _='10'/>)", " ()",
+        " function($a) { string($a/@*) }"), "<_ _=\"9\"/>");
+    check(func.args(" replicate('a', 2)"), "a\na", root(SingletonSeq.class));
+    check(func.args(" reverse( (1 to 6)[. > 3] )"), 6, empty(REVERSE));
+    // reverse/sort over the input must not be dropped: tied items keep their (reordered) order
+    query(func.args(" sort((1, 1.0)[. ge 0], (), function($x) "
+        + "{ if($x instance of xs:integer) then 2 else 1 })")
+        + " ! (if(. instance of xs:integer) then 'i' else 'd')", "d\ni");
+
+    query(func.args(" (98 to 102)", " key := string#1"), 99);
+    query(func.args(" (98 to 102)", " ()", " string#1"), 99);
+
+    query(func.args(" #x"), "#x");
+    query(func.args(" (xs:gYear('9998'), xs:gYear('9999'))"), "9999");
+
+    error(func.args(" replicate(<_/>, 2)"), FUNCCAST_X_X);
+    error(func.args(" (1, 'x')"), CMPTYPES_X_X_X_X);
+    error(func.args(" true#0"), FIATOMIZE_X);
+  }
+
+  /** Test method. */
+  @Test public void htmlDoc() {
+    final Function func = HTML_DOC;
+    query(func.args(" ()"), "");
+    query(func.args(" []"), "");
+    query(func.args(" <_/>/text()"), "");
+
+    final String path = "src/test/resources/input.html";
+    query(func.args(path) + "//Q{http://www.w3.org/1999/xhtml}body ! name()", "body");
+    query(func.args(path, " { 'method': 'tagsoup', 'nons': false() }")
+        + "//Q{http://www.w3.org/1999/xhtml}body ! name()", "body");
+    query(func.args(path, " { 'method': 'tagsoup' }") + "//body ! name()", "body");
+  }
+
+  /** Test method. */
+  @Test public void id() {
+    final Function func = ID;
+    final String doc = "<foo xml:id=\"a1\" x=\"x\"><bar xml:id=\"a1\" y=\"y\"/></foo>";
+    String input = " document { " + doc + " }";
+    query(func.args("a1", input), doc);
+    query(func.args("a2", input), "");
+    query(func.args("a1", input + "/*"), doc);
+    query(func.args("a2", input + "/*"), "");
+    query(input + " ! " + func.args("a1"), doc);
+    query(input + " ! " + func.args("a2"), "");
+    query(input + "/* ! " + func.args("a1"), doc);
+    query(input + "/* ! " + func.args("a2"), "");
+
+    input = " doc('db')";
+    execute(new CreateDB("db", doc));
+    query(func.args("a1", input), doc);
+    query(func.args("a2", input), "");
+    query(func.args("a1", input + "/*"), doc);
+    query(func.args("a2", input + "/*"), "");
+    query(input + " ! " + func.args("a1"), doc);
+    query(input + " ! " + func.args("a2"), "");
+    query(input + "/* ! " + func.args("a1"), doc);
+    query(input + "/* ! " + func.args("a2"), "");
+
+    query(input + "/* ! boolean(" + func.args("a1") + ")", true);
+    query(input + "/* ! boolean(" + func.args("a2") + ")", false);
+
+    error(func.args("a2", " <a/>"), IDDOC);
+  }
+
+  /** Tests the rewritings of nested calls of idempotent functions. */
+  @Test public void idempotentCalls() {
+    final String number = wrap(3.5);
+    check(ABS.args(ABS.args(number)), 3.5, "count(//FnAbs) = 1");
+    check(FLOOR.args(FLOOR.args(number)), 3, "count(//FnFloor) = 1");
+    check(CEILING.args(CEILING.args(number)), 4, "count(//FnCeiling) = 1");
+    check(ROUND.args(ROUND.args(number)), 4, "count(//FnRound) = 1");
+    check(CEILING.args(FLOOR.args(number)), 3, root(FLOOR), empty(CEILING));
+    check(FLOOR.args(ROUND.args(number)), 4, root(ROUND), empty(FLOOR));
+    check(ROUND.args(CEILING.args(number)), 4, root(CEILING), empty(ROUND));
+    check(ROUND_HALF_TO_EVEN.args(ROUND.args(number)), 4, root(ROUND),
+        empty(ROUND_HALF_TO_EVEN));
+
+    // a precision argument yields non-integral results
+    check(ROUND.args(ROUND.args(number, 2)), 4, "count(//FnRound) = 2");
+    check(ROUND.args(ROUND.args(number), 2), 4, "count(//FnRound) = 2");
+    // fn:abs does not yield integral results
+    check(ABS.args(FLOOR.args(number)), 3, root(ABS), exists(FLOOR));
+
+    final String string = wrap(" a B c ");
+    check(UPPER_CASE.args(UPPER_CASE.args(string)), " A B C ", "count(//FnUpperCase) = 1");
+    check(LOWER_CASE.args(LOWER_CASE.args(string)), " a b c ", "count(//FnLowerCase) = 1");
+    check(NORMALIZE_SPACE.args(NORMALIZE_SPACE.args(string)), "a B c",
+        "count(//FnNormalizeSpace) = 1");
+    // case conversions are not interchangeable
+    check(UPPER_CASE.args(LOWER_CASE.args(string)), " A B C ", root(UPPER_CASE),
+        exists(LOWER_CASE));
+  }
+
+  /** Test method. */
+  @Test public void identity() {
+    final Function func = IDENTITY;
+    query(func.args(" ()"), "");
+    query(func.args(" <x/>"), "<x/>");
+    query(func.args(" 1 to 10"), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    query("reverse(9 to 10000) => sort((), identity#1) => head()", 9);
+  }
+
+  /** Test method. */
+  @Test public void indexOf() {
+    final Function func = INDEX_OF;
+
+    query(func.args(" 1 to 1_000_000", 0), "");
+    query("count(" + func.args(" 1 to 1_000_000", 0) + ")", 0);
+
+    query(func.args(" reverse(1 to 1_000_000)", 1000000), 1);
+    query("count(" + func.args(" reverse(1 to 1_000_000)", 1000000) + ")", 1);
+
+    query("count(" + func.args(" (1 to 1_000_000) ! 'x'", "x") + ")", 1000000);
+
+    check(func.args(" replicate(1, 6)", 1), "1\n2\n3\n4\n5\n6", exists(RangeSeq.class));
+  }
+
+  /** Test method. */
+  @Test public void indexWhere() {
+    final Function func = INDEX_WHERE;
+    query(func.args(" ()", " boolean#1"), "");
+    query(func.args(0, " boolean#1"), "");
+    query(func.args(1, " boolean#1"), 1);
+    query(func.args(0, " true#0"), 1);
+    query(func.args(0, " false#0"), "");
+    query(func.args(" (0, 4, 9)", " boolean#1"), "2\n3");
+    query(func.args(" 1 to 9", " function($n) { $n mod 5 = 0 }"), 5);
+    query(func.args(MONTHS, " contains(?, 'z')"), "");
+    query(func.args(MONTHS, " contains(?, 'v')"), 11);
+    query(func.args(MONTHS, " starts-with(?, 'J')"), "1\n6\n7");
+
+    query(func.args(" 1 to 6", " fn($n, $p) { $n = $p }"), "1\n2\n3\n4\n5\n6");
+    query(func.args(" reverse(1 to 6)", " fn($n, $p) { $n = $p }"), "");
+
+    check(func.args(" (0 to 5)[. = 0]", " not#1"), 1, root(GFLWOR.class));
+    check(func.args(" (0 to 5)[. = 6]", " not#1"), "", root(GFLWOR.class));
+
+    query("function-lookup(#fn:index-where, <_>2</_>/text())(0, not#1)", 1);
+    query("function-lookup(#fn:index-where, <_>2</_>/text())(1, not#1)", "");
+  }
+
+  /** Test method. */
+  @Test public void innermost() {
+    final Function func = INNERMOST;
+    query("let $n := <li/> return " + func.args(" ($n, $n)"), "<li/>");
+  }
+
+  /** Test method. */
+  @Test public void inScopeNamespaces() {
+    final Function func = IN_SCOPE_NAMESPACES;
+    query(func.args(" <a/>") + " => map:keys()", "xml");
+    query(func.args(" <a xmlns='x'/>") + " => map:keys() => sort()", "\nxml");
+    query(func.args(" <a xmlns:p='x'/>") + " => map:keys() => sort()", "p\nxml");
+  }
+
+  /** Test for namespace functions and in-scope namespaces. */
+  @Test public void inScopePrefixes() {
+    final Function func = IN_SCOPE_PREFIXES;
+    query("sort(<e xmlns:p='u'>{" + func.args(" <e/>") + "}</e>/text()/tokenize(.))", "p\nxml");
+  }
+
+  /** Test method. */
+  @Test public void insertBefore() {
+    final Function func = INSERT_BEFORE;
+    query(func.args(1, 1, 1), "1\n1");
+    query("count(" + func.args(" ()", 2, " 1 to 100_000_000") + ')', 100000000);
+    query("count(" + func.args(" 1 to 100_000_000", 3, " ()") + ')', 100000000);
+    query("count(" + func.args(" 1 to 100_000_000", 4, " 1 to 100_000_000") + ')', 200000000);
+
+    // a statically-empty (non-literal) operand is optimized away, side-effects preserved
+    check(func.args(" void(<a/>)", wrap(2), " (7, 8)"), "7\n8", empty(func));
+    check(func.args(" (7, 8)", wrap(2), " void(<a/>)"), "7\n8", empty(func));
+
+    query("head(" + func.args(" 1 to 100_000_000", wrap(4), " 1 to 100_000_000") + ')', 1);
+    query("subsequence(" + func.args(" 1 to 100_000_000", wrap(2), " 1 to 100_000_000") + ", 1, 3)",
+        "1\n1\n2");
+
+    query("for $p in (0 to 4)" +
+        "return string-join(" +
+        "  for $i in (5, 4, 3, 2, 1, 0)" +
+        "  return insert-before(6 to 7, $p, 1 to 2)[$i]" +
+        ")",
+        "7621\n7621\n7216\n2176\n2176");
+    query("for $p in (0 to 4)" +
+        "return string-join(" +
+        "  for $i in (5, 4, 3, 2, 1, 0)" +
+        "  return insert-before((6, 5), $p, ('x', 'y', 'z'))[$i]" +
+        ")",
+        "56zyx\n56zyx\n5zyx6\nzyx56\nzyx56");
+
+    // extreme position (no integer underflow)
+    query(func.args(" (1, 2, 3)", " -9223372036854775807 - 1", 99), "99\n1\n2\n3");
+    query(func.args(" (1, 2, 3)", 5, 99), "1\n2\n3\n99");
+  }
+
+  /** Test method. */
+  @Test public void insertSeparator() {
+    final Function func = INSERT_SEPARATOR;
+
+    query(func.args(" ()", " ()"), "");
+    query(func.args(" ()", 1), "");
+    query(func.args(1, " ()"), 1);
+    query(func.args(" (1, 2)", " ()"), "1\n2");
+
+    query(func.args(1, "a"), 1);
+    query(func.args(1, " ('a', 'b')"), 1);
+    query(func.args(" (1, 2)", "a"), "1\na\n2");
+    query(func.args(" (1, 2)", " ('a', 'b')"), "1\na\nb\n2");
+
+    check(func.args(1, "a") + " => count()", 1, root(Itr.class));
+    check(func.args(" 1[. =" + wrap(1) + "]", "a"), 1, root(If.class));
+    check(func.args(" (1, 2)[. =" + wrap(3) + "]", " 'a'"), "", root(func));
+    check(func.args(" (1, 2)", " 'a'[. = <_/>]"), "1\n2", root(func));
+  }
+
+  /** Test method. */
+  @Test public void invisibleXml() {
+    final Function func = INVISIBLE_XML;
+    // unambiguous grammar
+    query(func.args(
+          "e: t;\n"
+        + "   t, [\"+-\"], e.\n"
+        + "t: f;\n"
+        + "   t, [\"*/\"], f.\n"
+        + "f: [\"0\"-\"9\"]+;\n"
+        + "   \"(\", e, \")\".") + "('2*3+4')",
+        "<e><t><t><f>2</f></t>*<f>3</f></t>+<e><t><f>4</f></t></e></e>");
+    // ambiguous grammar
+    query(func.args(
+          "e: f;\n"
+        + "   e, [\"+-*/\"], e.\n"
+        + "f: [\"0\"-\"9\"]+;\n"
+        + "   \"(\", e, \")\".") + "('2*3+4')",
+          "<e xmlns:ixml=\"http://invisiblexml.org/NS\" ixml:state=\"ambiguous\">"
+        + "<e><e><f>2</f></e>*<e><f>3</f></e></e>+<e><f>4</f></e></e>");
+    // input with cr+lf, ixml 1.0
+    query("string-to-codepoints("
+        + func.args("ixml version '1.0'. s: ~[]*.")
+        + "(codepoints-to-string((9,13,10,9,10,13,9,10,9,13,9))))",
+        "9\n13\n10\n9\n10\n13\n9\n10\n9\n13\n9");
+    // input with cr+lf, ixml 1.1+
+    query("string-to-codepoints("
+        + func.args("s: ~[]*.")
+        + "(codepoints-to-string((9,13,10,9,10,13,9,10,9,13,9))))",
+        "9\n10\n9\n10\n10\n9\n10\n9\n10\n9");
+    // invalid input
+    query("let $parser := " + func.args("s: ~[\"x\"]*.") + "\n"
+        + "return $parser('x')",
+        "<ixml xmlns:ixml=\"http://invisiblexml.org/NS\" ixml:state=\"failed\">Failed to parse "
+        + "input:\nlexical analysis failed, found 'x'\nwhile expecting one of [end-of-input, ' ', "
+        + "'!', '\"', '#', '$', '%', '&amp;', \"'\", '(', ')', '*', '+', ',', '-', '.', ...]\nat "
+        + "line 1, column 1:\n...x...</ixml>");
+    query(func.args("s: [L].") + "('')",
+        "<ixml xmlns:ixml=\"http://invisiblexml.org/NS\" ixml:state=\"failed\">Failed to parse "
+        + "input:\nsyntax error, found end-of-input\nwhile expecting one of ['A'-'Z', 'a'-'z', #aa,"
+        + " #b5, #ba, #c0-#d6, #d8-#f6, #f8-#2c1, #2c6-#2d1, #2e0-#2e4, #2ec, #2ee, #370-#374, #376"
+        + ", #377, #37a-#37d, ...]\nat line 1, column 1</ixml>");
+    // result processing error
+    query("let $parser := " + func.args("-s: 'x'.") + "\n"
+        + "return $parser('x')",
+        "<ixml xmlns:ixml=\"http://invisiblexml.org/NS\" ixml:state=\"failed\" "
+        + "ixml:error-code=\"D06\">"
+        + "[D06] The parse tree does not contain exactly one top-level element.</ixml>");
+    // empty $grammar
+    query(func.args(" ()") + "(\"s: 'x'.\")",
+        "<ixml><rule name=\"s\"><alt><literal string=\"x\"/></alt></rule></ixml>");
+    query(func.args() + "(\"s: 'x'.\")",
+        "<ixml><rule name=\"s\"><alt><literal string=\"x\"/></alt></rule></ixml>");
+    // GuntherRademacher/markup-blitz#20
+    query(func.args("s : 'ab'**'cd', 'ef'++'gh'.") + "('abcdabefghef')",
+        "<s>abcdabefghef</s>");
+
+    query(func.args(" <ixml><rule name='s'/></ixml>") + "('')", "<s/>");
+    error(func.args(" document { <ixml><rule name='s'/></ixml> }"), IXML_GRM_X_X_X);
+
+    // invalid grammar
+    error(func.args("?%$"), IXML_GRM_X_X_X);
+    // parser generation failure
+    error(func.args("s: ~[#10ffff]."), IXML_GEN_X);
+    // invalid input with fail option
+    error("let $parser := " + func.args("s: ~[\"x\"]*.", " { 'fail-on-error': true() }") + "\n"
+        + "return $parser('x')", IXML_INP_X_X_X);
+
+    // GH-2763: xquery:eval timeout or memory limit must be able to stop an ambiguous parse
+    final String ambiguous = func.args("s: s, s | 'a'.").trim() + "('aaaaaaaaaaaaaaaaaaaa')";
+    error(_XQUERY_EVAL.args(ambiguous, " {}", " { 'timeout': .1 }"), XQUERY_TIMEOUT);
+    error(_XQUERY_EVAL.args(ambiguous, " {}", " { 'memory': 10 }"), XQUERY_MEMORY);
+  }
+
+  /** Test method. */
+  @Test public void isNaN() {
+    final Function func = IS_NAN;
+    query(func.args(" xs:double('NaN')"), true);
+    query(func.args(" xs:float('NaN')"), true);
+    query(func.args(" number('twenty-three')"), true);
+    query(func.args(" math:sqrt(-1)"), true);
+
+    query(func.args(23), false);
+    query(func.args("NaN"), false);
+    query(func.args(" <_/>"), false);
+    query(func.args(" <?_ ?>"), false);
+    query(func.args(" number('1')"), false);
+    query(func.args(" xs:double('INF')"), false);
+    query(func.args(" xs:decimal(<?_ 1?>)"), false);
+    query(func.args(" xs:integer(<?_ 1?>)"), false);
+    query(func.args(" xs:byte(<?_ 1?>)"), false);
+  }
+
+  /** Test method. */
+  @Test public void itemsAt() {
+    final Function func = ITEMS_AT;
+
+    // reversed input and reversed positions (the let prevents the operand from being unrolled)
+    check("let $o := (1 to 5) ! data(attribute _ { . }) "
+        + "let $p := (1 to 3) ! xs:integer(data(attribute _ { . })) return ("
+        + func.args(" " + REVERSE.args(" $o"), 2) + ','
+        + func.args(" $o", " " + REVERSE.args(" $p")) + ')', "4\n3\n2\n1");
+
+    query(func.args(" ()", " ()"), "");
+    query(func.args(" ()", 1), "");
+    query(func.args(1, " ()"), "");
+    query(func.args(1, 1), 1);
+    query(func.args(1, -1), "");
+    query(func.args(1, 0), "");
+    query(func.args(1, 2), "");
+    query(func.args(" 1 to 2", 2), 2);
+    query(func.args(" 1 to 2", 3), "");
+    query(func.args(" 1 to 2", 0), "");
+    query(func.args(" 1 to 2", -1), "");
+
+    query("for $i in 1 to 2 return " + func.args(" $i", 1), "1\n2");
+    query(func.args(" (<a/>, <b/>)", 1), "<a/>");
+    query(func.args(" (<a/>, <b/>)", 3), "");
+
+    query(func.args(" (<a/>, <b/>)[name()]", 1), "<a/>");
+    query(func.args(" (<a/>, <b/>)[name()]", 2), "<b/>");
+    query(func.args(" (<a/>, <b/>)[name()]", 3), "");
+
+    query(func.args(" <a/>", 2), "");
+    query(func.args(" (<a/>, <b/>)", wrap(0)), "");
+    query(func.args(" (<a/>, <b/>)", wrap(1)), "<a/>");
+    query(func.args(" (<a/>, <b/>)", wrap(3)), "");
+    query(func.args(" tokenize(" + wrap(1) + ")", 2), "");
+
+    query(func.args(1, wrap(0)), "");
+    query(func.args(" 1[. = 1]", wrap(1)), 1);
+    query(func.args(" 1[. = 1]", wrap(2)), "");
+
+    query("count(" + func.args(" 1 to 10", " 1 to 10") + ")", 10);
+    query("count(" + func.args(" reverse(1 to 10)", " 1 to 10") + ")", 10);
+    query("count(" + func.args(" 1 to 10", " reverse(1 to 10)") + ")", 10);
+    query("count(" + func.args(" reverse(1 to 10)", " reverse(1 to 10)") + ")", 10);
+    query("count(" + func.args(" 1 to 10", " xs:integer(<?_ 1?>) to 10") + ")", 10);
+
+    query("count(" + func.args(" (1 to 10)[. > 0]", " 1 to 10") + ")", 10);
+    query("count(" + func.args(" (1 to 10)", " (1 to 10)[. > 0]") + ")", 10);
+    query("count(" + func.args(" (1 to 10)[. > 0]", " (1 to 10)[. > 0]") + ")", 10);
+
+    query("count(" + func.args(" (1 to 10)[. > 0]", " (-100 to 100)[. < 1]") + ")", 0);
+    query("count(" + func.args(" (1 to 10)[. > 0]", " (-100 to 100)[. > 10]") + ")", 0);
+
+    query("count(" + func.args(" xs:string(<?_ x?>)", " xs:integer(<?_ 1?>)") + ")", 1);
+    query(func.args(" (<a/>, <b/>)[. = '']", 2), "<b/>");
+    query(func.args(" reverse((<a/>, <b/>)[. = ''])", 2), "<a/>");
+
+    query(func.args(" (head((1 to 6)[. < 2]), data(<a>A</a>/text()/..))", 2), "A");
+
+    check(func.args(" (7 to 9)[. = 8]", -1), "", empty());
+    check(func.args(" (7 to 9)[. = 8]", 0), "", empty());
+    check(func.args(" 1[. = 1]", 1), 1, empty(func));
+    check(func.args(" 1[. = 1]", 2), "", empty());
+
+    check(func.args(" (1, 2, <_/>)", 3), "<_/>", root(CElem.class));
+    check(func.args(" reverse((1, 2, <_/>))", 2), 2, empty(REVERSE));
+
+    check(func.args(" tail((1, 2, 3, <_/>))", 2), 3, empty(TAIL));
+    check(func.args(" tail((<_/>[data()], <_/>, <_/>))", 2), "", empty(TAIL), root(ITEMS_AT));
+
+    check(func.args(" (7 to 9)[. = 8]", 1), 8, root(HEAD), type(HEAD, "xs:integer?"));
+
+    check(func.args(" (<a/>, <b/>, <c/>)", 2), "<b/>", root(CElem.class));
+    check(func.args(" (<a/>, <b/>, <c/>, <d/>)", 2), "<b/>", root(CElem.class));
+    check(func.args(" (<a/>, <b/>[data()], <c/>)", 2), "<c/>", root(Otherwise.class));
+    check(func.args(" (<a/>, <b/>[data()], <c/>, <d/>)", 2), "<c/>", root(Otherwise.class));
+    check(func.args(" (<a/>[data()], <b/>, <c/>)", 2), "<c/>", root(ITEMS_AT));
+
+    check(func.args(" replicate(<a/>, 5)", 0), "", empty());
+    check(func.args(" replicate(<a/>, 5)", 3), "<a/>", root(CElem.class));
+    check(func.args(" replicate(<a/>, 5)", 6), "", empty());
+
+    check(func.args(" ('x', (2 to 10)[. = 5])", 2), 5, root(HEAD), empty(Str.class));
+    check(func.args(" ('x', (2 to 10)[. = 5])", 3), "", empty(List.class), empty(Str.class));
+    check(func.args(" ('x', (2 to 10)[. = 5], 3)", 3), 3, exists(List.class), empty(Str.class));
+
+    check("let $seq := (1 to 10)[. > 0] return " + func.args(" $seq", " count($seq)"),
+        10, root(HEAD));
+    check("let $seq := (1 to 10)[. > 0] return " + func.args(" $seq", " count($seq) + 1"),
+        "", empty());
+    check("let $seq := (1 to 10)[. > 0] return " + func.args(" $seq", " count($seq) - 1"),
+        9, root(Pipeline.class));
+
+    check(func.args(" void(())", 0), "", empty(func));
+    check(func.args(TRUNK.args(" (1, 2, 3, <_/>)"), 2), 2, empty(TRUNK));
+
+    // GH-2569
+    query("items-at('a', sort([ 1, 2 ], (), array:size#1))", "a");
+    query("""
+let $strings := ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j')
+let $arrays as array(*)* := (array{1 to 2}, array{3 to 6}, array{7 to 9})
+let $arrays := sort($arrays, (), fn($seq){array:size($seq) * -1})
+let $largest := $arrays => head()
+return
+  for $idx in $largest?* return $strings[$idx]""",
+        "c\nd\ne\nf");
+  }
+
+  /** Test method. */
+  @Test public void jsonDoc() {
+    final Function func = JSON_DOC;
+    query(func.args("src/test/resources/example.json") + "('address')('state')", "NY");
+    query(func.args("src/test/resources/example.json") + "?address?state", "NY");
+    query(func.args("src/test/resources/example.json", " { 'number-format': 'adaptive' }")
+        + "//postalCode ! data() => type-of()", "xs:integer");
+
+    error(func.args("src/test/resources/example.json", " { 'number-parser': xs:decimal#1 }"),
+        INVALIDOPTION_X);
+  }
+
+  /** Test method. */
+  @Test public void jsonToXml() {
+    final Function func = JSON_TO_XML;
+    contains(func.args("null"), "xmlns");
+    contains(func.args("null") + " update {}", "xmlns");
+
+    // duplicates: reject errors, use-first keeps the first, use-last is unsupported,
+    // retain (the default for this format) keeps both
+    final String dup = "{\"x\":1,\"x\":2}", ns = "http://www.w3.org/2005/xpath-functions";
+    error(func.args(dup, " { 'duplicates': 'reject' }"), DUPLICATE_JSON_X_X_X);
+    query("try { " + func.args(dup, " { 'duplicates': 'reject' }") +
+        " } catch * { $err:description }", "(1:11): Key \"x\" occurs more than once.");
+    query(func.args(dup, " { 'duplicates': 'use-first' }"),
+        "<map xmlns=\"" + ns + "\"><number key=\"x\">1</number></map>");
+    error(func.args(dup, " { 'duplicates': 'use-last' }"), OPTION_JSON_X);
+    query("try { " + func.args(dup, " { 'duplicates': 'use-last' }") +
+        " } catch * { $err:description }",
+        "'duplicates':'use-last' is not supported by the target format.");
+    final String both = "<map xmlns=\"" + ns + "\"><number key=\"x\">1</number>" +
+        "<number key=\"x\">2</number></map>";
+    query(func.args(dup, " { 'duplicates': 'retain' }"), both);
+    query(func.args(dup), both);
+  }
+
+  /**
+   * Test method.
+   * @throws Exception exception
+   */
+  @Test public void loadXQueryModule() throws Exception {
+    final Function func = LOAD_XQUERY_MODULE;
+    final String module = "src/test/resources/hello.xqm";
+
+    query(_REPO_INSTALL.args(module));
+
+    query(func.args("world", " { 'variables': { QName('world', 'ext'): 42 } }")
+        + "?variables(QName('world', 'ext'))", 42);
+    query("let $expr := '2 + 2'\n"
+        + "let $module := `xquery version '4.0'; \n"
+        + "  module namespace dyn='http://example.com/dyn';\n"
+        + "  declare %public variable $dyn:value := { $expr };`\n"
+        + "let $module := load-xquery-module('http://example.com/dyn', { 'content': $module })\n"
+        + "let $variables := $module?variables\n"
+        + "return $variables(QName('http://example.com/dyn', 'value'))", 4);
+    query(func.args("m", " { 'content': 'module namespace m=\"m\"; "
+        + "declare function m:f() { 42 };' }")
+        + "?functions => map:keys()", "#Q{m}f");
+    query(func.args("x", " { 'content': 'module namespace x=\"x\";\ndeclare context item as "
+        + "xs:decimal external; declare variable $x:x := .;', 'context-item': 1 }") + "?variables"
+        + "?#Q{x}x", 1);
+    query(func.args("x", " { 'content': 'module namespace x=\"x\";\ndeclare context value as "
+        + "xs:decimal* external; declare variable $x:x := .;', 'context-value': (1, 2) }")
+        + "?variables?#Q{x}x", "1\n2");
+    query("empty(" + func.args("x", " { 'content': 'module namespace x=\"x\";\ndeclare context "
+        + "value as xs:decimal* external; declare variable $x:x := .;', 'context-value': () }")
+        + "?variables?#Q{x}x)", true);
+    query(func.args("x", " { 'content': 'module namespace x=\"x\";\ndeclare variable $x:x := 1;', "
+        + "'xquery-version': 4.0 }") + "?variables?#Q{x}x", 1);
+    query(func.args("m", " { 'content': 'module namespace m=\"m\"; "
+        + "declare function m:f($a := upper-case(\"x\")) { $a };' }") + "?functions?#Q{m}f?0()",
+        "X");
+
+    // GH-2640
+    error("<e xmlns:p='p'>{\n"
+        + "  load-xquery-module(\"m\", {\n"
+        + "    'content': ``[module namespace m='m'; declare function m:f() {<p:x/>};]``\n"
+        + "  })?functions?#Q{m}f?0()\n"
+        + "}</e>", MODULE_STATIC_ERROR_X_X);
+
+    error(func.args(""), MODULE_URI_EMPTY);
+    error(func.args("x"), MODULE_NOT_FOUND_X);
+    error(func.args("x", " { 'content': '%@?$' }"), MODULE_STATIC_ERROR_X_X);
+    error(func.args("x", " { 'content': 'module namespace y = \"y\";' }"), MODULE_FOUND_OTHER_X);
+    error(func.args("x.xq", " { 'content': 'declare function local:f() {}; ()' }"),
+        MODULE_FOUND_MAIN_X);
+    error(func.args("world"), VAREMPTY_X);
+    error(func.args("world", " { 'location-hints': [\"src/test/resources/hello-ext.xqm\"] }"),
+        FUNCNOIMPL_X);
+    error(func.args("x", " { 'content': 'module namespace x=\"x\";\ndeclare context item as "
+        + "xs:integer external;', 'context-item': 1.0 }"), MODULE_CONTEXT_TYPE_X_X);
+    error(func.args("x", " { 'content': 'module namespace x=\"x\";\ndeclare context value as "
+        + "xs:integer* external;', 'context-value': (1, 2.0) }"), MODULE_CONTEXT_TYPE_X_X);
+    error(func.args("x", " { 'content': 'module namespace x=\"x\";', "
+        + "'context-value': 1, 'context-item': 1 }"), MODULE_CONTEXT_OPTIONS);
+    error(func.args("x", " { 'content': 'module namespace x=\"x\";\ndeclare context value as "
+        + "xs:integer* external; declare variable $x:x := .;', 'context-item': () }")
+        + "?variables?#Q{x}x", NOCTX_X);
+
+    // advanced and caching tests
+    // run simple HTTP server for module hosting
+    final int port = 62626;
+    final String url = "http://localhost:" + port;
+    final Map<String, String> modules = Map.of(
+      "/m1.xqm",
+        "module namespace m = 'm1';\n" +
+        "declare variable $m:node := <x/>;\n" +
+        "declare function m:id() { 'RANDOM_UUID' };",
+      "/m2.xqm",
+        "module namespace m = 'm2';\n" +
+        "declare function m:id() {\n" +
+        "  let $m := load-xquery-module('m1', { 'location-hints': [ '" + url + "/m1.xqm' ] })\n" +
+        "  return $m?functions?(QName('m1', 'id'))?0()\n" +
+        "};",
+      "/m3.xqm",
+        "module namespace m = 'm';\n" +
+        "declare context item as xs:long external;\n" +
+        "declare variable $m:m3 := .;",
+      "/m4.xqm",
+        "module namespace m = 'm';\n" +
+        "declare context item as xs:short external;\n" +
+        "declare variable $m:m4 := .;"
+    );
+    try(ServerSocket ss = new ServerSocket(port)) {
+      new Thread(() -> {
+        try {
+          while(true) {
+            try(Socket s = ss.accept()) {
+              final BufferedReader br = new BufferedReader(
+                  new InputStreamReader(s.getInputStream()));
+              final String uri = br.readLine().replaceAll("GET | .*", "");
+              final OutputStream os = s.getOutputStream();
+              os.write(Token.token("HTTP/1.1 200 OK\r\n\r\n"));
+              os.write(Token.token(modules.get(uri)));
+              os.flush();
+            }
+          }
+        } catch(final Exception ex) {
+          // raised when the server is stopped
+          Util.errln(ex);
+        }
+      }).start();
+      Performance.sleep(100);
+
+      // load module m1 with same options
+      query("let $opts1 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $opts2 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $id1 := load-xquery-module('m1', $opts1)?functions?(QName('m1', 'id'))?0()\n"
+          + "let $id2 := load-xquery-module('m1', $opts2)?functions?(QName('m1', 'id'))?0()\n"
+          + "return $id1 eq $id2", true);
+      query("let $opts1 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $opts2 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $node1 := load-xquery-module('m1', $opts1)?variables?(#Q{m1}node)\n"
+          + "let $node2 := load-xquery-module('m1', $opts2)?variables?(#Q{m1}node)\n"
+          + "return $node1 is $node2", true);
+
+      // load module m1 with differently ordered options
+      query("let $opts1 := { 'xquery-version': 3.1, 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $opts2 := { 'location-hints': '" + url + "/m1.xqm', 'xquery-version': 3.1 }\n"
+          + "let $id1 := load-xquery-module('m1', $opts1)?functions?(QName('m1', 'id'))?0()\n"
+          + "let $id2 := load-xquery-module('m1', $opts2)?functions?(QName('m1', 'id'))?0()\n"
+          + "return $id1 eq $id2", true);
+      query("let $opts1 := { 'xquery-version': 3.1, 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $opts2 := { 'location-hints': '" + url + "/m1.xqm', 'xquery-version': 3.1 }\n"
+          + "let $node1 := load-xquery-module('m1', $opts1)?variables?(#Q{m1}node)\n"
+          + "let $node2 := load-xquery-module('m1', $opts2)?variables?(#Q{m1}node)\n"
+          + "return $node1 is $node2", false);
+
+      // load module m1 from different modules
+      query("let $opts1 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $opts2 := { 'location-hints': '" + url + "/m2.xqm' }\n"
+          + "let $id1 := load-xquery-module('m1', $opts1)?functions?(QName('m1', 'id'))?0()\n"
+          + "let $id2 := load-xquery-module('m2', $opts2)?functions?(QName('m2', 'id'))?0()\n"
+          + "return $id1 eq $id2", true);
+
+      // load module m1 from different contexts
+      query("let $opts1 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "let $id1 := load-xquery-module('m1', $opts1)?functions?(QName('m1', 'id'))?0()\n"
+          + "let $id2 := xquery:eval(\"\n"
+          + "  let $opts2 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "  return load-xquery-module('m1', $opts2)?functions?(QName('m1', 'id'))?0()\n"
+          + "\")\n"
+          + "return $id1 eq $id2", true);
+
+      // load module m1 from different threads (expects execution in 3 different threads)
+      query("declare function f() {"
+          + "  let $opts1 := { 'location-hints': '" + url + "/m1.xqm' }\n"
+          + "  return load-xquery-module('m1', $opts1)?functions?(QName('m1', 'id'))?0()\n"
+          + "};\n"
+          + "let $ids := xquery:fork-join((1 to 3)!f#0)"
+          + "return (count($ids), count(distinct-values($ids)))", "3\n1");
+
+      // load module m from different sources
+      query("let $opts := {"
+          + "  'location-hints': ('" + url + "/m3.xqm', '" + url + "/m4.xqm'), "
+          + "  'context-item': xs:byte(1)"
+          + "}\n"
+          + "let $vars := load-xquery-module('m', $opts)?variables\n"
+          + "return $vars?(#Q{m}m3) + $vars?(#Q{m}m4)", 2);
+      error("let $opts := {"
+          + "  'location-hints': ('" + url + "/m3.xqm', '" + url + "/m4.xqm'), "
+          + "  'context-item': xs:int(1)"
+          + "}\n"
+          + "return load-xquery-module('m', $opts)",
+          MODULE_CONTEXT_TYPE_X_X);
+    }
+  }
+
+  /** Test method. */
+  @Test public void location() {
+    final Function func = LOCATION;
+    // locations are only retained on request
+    query(func.args(" ()"), "");
+    query(func.args(" <a/>"), "");
+    query(func.args(" doc('src/test/resources/test.xml')"), "");
+    query(func.args(" parse-xml('<a/>')"), "");
+    query("parse-xml('<a/>')/a ! " + func.args(), "");
+
+    final String xml = "'<a>\n  <b/>\n</a>'";
+    final String opts = " { 'retain-location': true() }";
+    final String node = " parse-xml(" + xml + "," + opts + ")//b";
+    query(func.args(node) + " instance of fn:location-record", true);
+    query(func.args(node) + "?line-number", 2);
+    // a document node starts at the beginning of its resource
+    query(func.args(" parse-xml(" + xml + "," + opts + ")") + "?column-number", 1);
+    // the standard parser reports the end of the start tag, the internal parser its start
+    query(func.args(node) + "?column-number", 7);
+    query(func.args(" parse-xml(" + xml + ", { 'retain-location': true(), 'intparse': true() })"
+        + "//b") + "?column-number", 3);
+    query(func.args(" parse-xml-fragment(" + xml + "," + opts + ")//b") + "?column-number", 3);
+    // copied nodes carry no location
+    query(func.args(" <x>{ parse-xml(" + xml + "," + opts + ")//b }</x>/b"), "");
+    // multi-line text: line deltas exceed the single-byte range
+    final String lines = " parse-xml('<a><t>' || string-join((1 to 100) ! 'x', '&#10;') || "
+        + "'</t><b/><t>' || string-join((1 to 20000) ! 'x', '&#10;') || '</t><c/></a>',"
+        + opts + ")";
+    query(func.args(lines + "//b") + "?line-number", 100);
+    query(func.args(lines + "//c") + "?line-number", 20099);
+  }
+
+  /** Test method. */
+  @Test public void lowest() {
+    final Function func = LOWEST;
+    query(func.args(" ()"), "");
+    check(func.args(" ('a', 'b', 'c', 'd', 'e', 'f')[. = 'f']"), "f");
+    check(func.args(" ('a', 'b', 'c', 'd', 'e', 'f')[. = 'g']"), "");
+    query(func.args(" 'x'"), "x");
+    query(func.args(" (1e0, 2e0)"), 1);
+    query(func.args(" (8 to 11)"), 8);
+    query(func.args(" reverse(8 to 11)"), 8);
+    query(func.args(" (8 to 11)", " ()", " string#1"), 10);
+    query(func.args(" reverse(8 to 11)", " ()", " string#1"), 10);
+    query(func.args(" (3, 2, 1)", " ()", " function($k) { true() }"), "3\n2\n1");
+    query(func.args(" (8 to 11)", " ()",
+        " function($k) { string-length(string($k)) }"), "8\n9");
+    query(func.args(" reverse(8 to 11)", " ()",
+        " function($k) { string-length(string($k)) }"), "9\n8");
+    query(func.args(" (<a _='1'/>, <b _='2'/>)", " ()",
+        " function($k) { $k/@* }") + " ! name()", "a");
+    query(func.args(" <_ _='1'/>", " ()",
+        " function($a) { $a/@* }"), "<_ _=\"1\"/>");
+    query(func.args(" (<_ _='9'/>, <_ _='10'/>)", " ()",
+        " function($a) { $a/@* }"), "<_ _=\"9\"/>");
+    query(func.args(" (<_ _='9'/>, <_ _='10'/>)", " ()",
+        " function($a) { string($a/@*) }"), "<_ _=\"10\"/>");
+    check(func.args(" replicate('a', 2)"), "a\na", root(SingletonSeq.class));
+    check(func.args(" reverse( (1 to 6)[. > 3] )"), 4, empty(REVERSE));
+    // reverse/sort over the input must not be dropped: tied items keep their (reordered) order
+    query(func.args(" sort((1, 1.0)[. ge 0], (), function($x) "
+        + "{ if($x instance of xs:integer) then 2 else 1 })")
+        + " ! (if(. instance of xs:integer) then 'i' else 'd')", "d\ni");
+
+    query(func.args(" (98 to 102)", " key := string#1"), 100);
+    query(func.args(" (98 to 102)", " ()", " string#1"), 100);
+
+    query(func.args(" #x"), "#x");
+    query(func.args(" (xs:gYear('9998'), xs:gYear('9999'))"), "9998");
+
+    error(func.args(" replicate(<_/>, 2)"), FUNCCAST_X_X);
+    error(func.args(" (1, 'x')"), CMPTYPES_X_X_X_X);
+    error(func.args(" true#0"), FIATOMIZE_X);
+  }
+
+  /** Test method. */
+  @Test public void matches() {
+    final Function func = MATCHES;
+    query(func.args("a", ""), true);
+
+    query(func.args("nop", 'o'), true);
+    query(func.args("nöp", 'ö'), true);
+    query(func.args("nop", '.'), true);
+
+    check(func.args(wrap("nop"), 'o'), true, root(CONTAINS));
+    check(func.args(wrap("nöp"), 'ö'), true, root(CONTAINS));
+    check(func.args(wrap("nop"), '.'), true, root(func));
+
+    // codepoint-based: do not fold to fn:contains under a non-codepoint default collation
+    check("declare default collation "
+        + "'http://www.w3.org/2005/xpath-functions/collation/html-ascii-case-insensitive'; "
+        + func.args(wrap("ABC"), "abc"), false, root(func));
+
+    query(func.args("nop", wrap("o")), true);
+    query(func.args("nöp", wrap("ö")), true);
+    query(func.args("nop", wrap(".")), true);
+
+    query(func.args(wrap("nop"), wrap("o")), true);
+    query(func.args(wrap("nöp"), wrap("ö")), true);
+    query(func.args(wrap("nop"), wrap(".")), true);
+
+    query(func.args("a", "[a-]"), true);
+    query(func.args("-", "[a-]"), true);
+    query(func.args("b", "[a-]"), false);
+    query(func.args("a", "[A-\\\\]"), false);
+    query(func.args("\\", "[A-\\\\]"), true);
+
+    query(func.args("babadad", "^((.)?a\\2)+$"), true);
+    query(func.args("x", "(a)|\\1"), true);
+
+    // '.' matches any character except LF (#xA) and CR (#xD); with 's' it matches all
+    query(func.args(" codepoints-to-string(10)", "."), false);
+    query(func.args(" codepoints-to-string(13)", "."), false);
+    query(func.args(" codepoints-to-string(133)", "."), true);
+    query(func.args(" codepoints-to-string(8232)", "."), true);
+    query(func.args(" codepoints-to-string(8233)", "."), true);
+    query(func.args(" codepoints-to-string(10)", ".", "s"), true);
+
+    // \w matches all but punctuation, separators and "other" (symbols like $ and + are word chars)
+    query(func.args("$", "\\w"), true);
+    query(func.args("+", "\\w"), true);
+    query(func.args(".", "\\w"), false);
+    query(func.args(".", "\\W"), true);
+
+    // \i and \c: XML NameStartChar and NameChar
+    query(func.args("A", "^\\i$"), true);
+    query(func.args(":", "^\\i$"), true);
+    query(func.args("5", "^\\i$"), false);
+    query(func.args("5", "^\\c$"), true);
+    query(func.args("-", "^\\c$"), true);
+    query(func.args("a-b.c", "^\\i\\c*$"), true);
+    query(func.args("1abc", "^\\i\\c*$"), false);
+
+    error(func.args("a", "+"), REGINVALID_X);
+    error(func.args("a", ".", "j"), REGFLAG_X);
+    error(func.args("a", "[a-\\\\]"), REGINVALID_X);
+    error(func.args("-", "([\\d-z]+)"), REGINVALID_X);
+  }
+
+  /** Test method. */
+  @Test public void matchingSegments() {
+    final Function func = MATCHING_SEGMENTS;
+
+    // empty sequence input → empty sequence
+    query(func.args(" ()", "x"), "");
+
+    // example 1: word matches, no groups
+    final String ex1 = func.args("The cat sat on the mat.", "\\w+");
+    query("count(" + ex1 + ')', 6);
+    query(ex1 + "[1]?substring", "The");
+    query(ex1 + "[1]?position", 1);
+    query(ex1 + "[1]?groups => map:size()", 0);
+    query(ex1 + "[6]?substring", "mat");
+    query(ex1 + "[6]?position", 20);
+
+    // example 2: single match, three captured groups
+    final String ex2 = func.args("08-12-03", "^(\\d+)\\-(\\d+)\\-(\\d+)$");
+    query("count(" + ex2 + ')', 1);
+    query(ex2 + "?substring", "08-12-03");
+    query(ex2 + "?position", 1);
+    query(ex2 + "?groups?1?value", "08");
+    query(ex2 + "?groups?1?position", 1);
+    query(ex2 + "?groups?2?value", 12);
+    query(ex2 + "?groups?2?position", 4);
+    query(ex2 + "?groups?3?value", "03");
+    query(ex2 + "?groups?3?position", 7);
+    query(ex2 + "?groups?2?nr", 2);
+    query(ex2 + "?groups?2?name", "");
+    query(ex2 + "?groups?3?name => exists()", false);
+
+    // example 3: multiple matches with groups
+    final String ex3 = func.args("A1,C15,,D24, X50,", "([A-Z])([0-9]+)");
+    query("count(" + ex3 + ')', 4);
+    query(ex3 + "[2]?substring", "C15");
+    query(ex3 + "[2]?position", 4);
+    query(ex3 + "[2]?groups?1?value", "C");
+    query(ex3 + "[2]?groups?2?value", 15);
+    query(ex3 + "[2]?groups?2?position", 5);
+    query(ex3 + "[4]?substring", "X50");
+    query(ex3 + "[4]?position", 14);
+
+    // example 4: lookahead with captured group outside the matching segment
+    final String ex4 = func.args("Chapter 5", "(Chapter|Appendix)(?=\\s+([0-9]+))");
+    query(ex4 + "?substring", "Chapter");
+    query(ex4 + "?groups?1?value", "Chapter");
+    query(ex4 + "?groups?2?value", 5);
+    query(ex4 + "?groups?2?position", 9);
+
+    // example 5: zero-length matches via lookahead
+    final String ex5 = func.args("There we go", "\\b(?=(\\w+))");
+    query("count(" + ex5 + ')', 3);
+    query(ex5 + "[1]?substring", "");
+    query(ex5 + "[1]?position", 1);
+    query(ex5 + "[1]?groups?1?value", "There");
+    query(ex5 + "[2]?position", 7);
+    query(ex5 + "[2]?groups?1?value", "we");
+    query(ex5 + "[3]?position", 10);
+    query(ex5 + "[3]?groups?1?value", "go");
+
+    // named capturing groups: keyed by name instead of group number
+    final String ex6 = func.args("2026-06-25",
+        "(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})");
+    query(ex6 + "?substring", "2026-06-25");
+    query(ex6 + "?groups => map:size()", 3);
+    query(ex6 + "?groups => map:contains(1)", false);
+    query(ex6 + "?groups?year?value", 2026);
+    query(ex6 + "?groups?year?position", 1);
+    query(ex6 + "?groups?month?value", "06");
+    query(ex6 + "?groups?day?value", 25);
+    query(ex6 + "?groups?day?position", 9);
+    query(ex6 + "?groups?month?nr", 2);
+    query(ex6 + "?groups?month?name", "month");
+    query(ex6 + "?groups?*[?nr = 2]?value", "06");
+
+    // named group mixed with numbered group
+    final String ex7 = func.args("A1", "(?<letter>[A-Z])([0-9]+)");
+    query(ex7 + "?groups?letter?value", "A");
+    query(ex7 + "?groups?2?value", 1);
+    query(ex7 + "?groups => map:size()", 2);
+    query(ex7 + "?groups => map:contains('letter')", true);
+    query(ex7 + "?groups => map:contains(1)", false);
+    query(ex7 + "?groups => map:contains(2)", true);
+    query(ex7 + "?groups?letter?nr", 1);
+    query(ex7 + "?groups?2?name => exists()", false);
+
+    // named group that does not participate in the match: no entry
+    query(func.args("a", "(?<x>a)|(?<y>b)") + "?groups => map:contains('y')", false);
+
+    // named group in a lookahead
+    query(func.args("Chapter 5", "Chapter(?=\\s+(?<num>[0-9]+))") + "?groups?num?value", 5);
+
+    // errors
+    error(func.args("a", "+"), REGINVALID_X);
+    error(func.args("a", "x", "X"), REGFLAG_X);
+    // duplicate group name
+    error(func.args("a", "(?<x>a)(?<x>b)"), REGINVALID_X);
+  }
+
+  /** Test method. */
+  @Test public void message() {
+    final Function func = MESSAGE;
+    query(func.args("a"), "");
+  }
+
+  /** Test method. */
+  @Test public void min() {
+    final Function func = MIN;
+    // repeated single item: the item is returned without evaluating the sequence
+    check(func.args(" " + REPLICATE.args(1, 3)), 1, root(Itr.class));
+    query(func.args(1), 1);
+    query(func.args(1.1), 1.1);
+    query(func.args(" 1e1"), 10);
+    query(func.args(" (1, 1e1)"), 1);
+    query(func.args(" (1, 1.1, 1e1)") + " instance of xs:integer", true);
+    query(func.args(wrap(1)) + " instance of xs:double", true);
+    // untyped values are promoted to xs:double, also if they are known at compile time
+    query(func.args(" xs:untypedAtomic('5')") + " instance of xs:double", true);
+    query(MAX.args(" xs:untypedAtomic('5')") + " instance of xs:double", true);
+    query(func.args(" [1]"), 1);
+    query(func.args(" (7, 6, 6, 6.0, 5.0, 5.0, xs:float('5'), xs:float('4'), xs:float('4'), " +
+        "4, 4e0, 3e0, 3e0, 2e0, 2, 2, 1, <x>0</x>, <x>0</x>)"), 0);
+    query(func.args(" (xs:double('NaN'), xs:float('NaN'))") + " instance of xs:double", true);
+
+    query(func.args(" (xs:anyURI('b'), xs:anyURI('a'))") +
+        " ! (. = 'a' and . instance of xs:anyURI)", true);
+    query(func.args(" (xs:anyURI('c'), xs:anyURI('b'), 'a')") +
+        " ! (. = 'a' and . instance of xs:string)", true);
+    query(func.args(" ('b', xs:anyURI('a'))") +
+        " ! (. = 'a' and . instance of xs:anyURI)", true);
+    query(func.args(" (2, 3, 1)"), 1);
+    query(func.args(" (xs:date('2002-01-01'), xs:date('2003-01-01'), xs:date('2001-01-01'))"),
+        "2001-01-01");
+    query(func.args(" (xs:dayTimeDuration('PT1S'), xs:dayTimeDuration('PT0S'))"), "PT0S");
+    query(func.args(" (xs:hexBinary('42'), xs:hexBinary('43'), xs:hexBinary('41'))"), 'A');
+
+    query("for $n in (1, 2) return " + func.args(" $n"), "1\n2");
+    query("for $n in (1, 2) return " + func.args(" ($n, $n)"), "1\n2");
+
+    query("for $s in (['a', 'b'], ['c']) return " + func.args(" ($s, $s)"), "a\nc");
+
+    // query plan checks
+    check(func.args(" ()"), "", empty());
+    check(func.args(" void(123)"), "", empty(func));
+    check(func.args(" 123"), 123, empty(func));
+    check(func.args(wrap(1)), 1, exists(func));
+    check(func.args(" (0 to 99_999_999_999) ! (1 to 10_000_000)"), 1, root(Itr.class));
+
+    query(func.args(" #a"), "#a");
+
+    // errors
+    error(func.args(" ('b', 'c', 'a', 1)"), ARGTYPE_X_X_X);
+    error(func.args(" (2, 3, 1, 'a')"), ARGTYPE_X_X_X);
+    error(func.args(" (false(), true(), false(), 1)"), ARGTYPE_X_X_X);
+    error(func.args(" 'x'", 1), INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void namespaceUriForPrefix() {
+    final Function func = NAMESPACE_URI_FOR_PREFIX;
+    query("sort(<e xmlns:p='u'>{" + func.args("p", " <e/>") + "}</e>/text()/tokenize(.))", "u");
+  }
+
+  /** Test method. */
+  @Test public void nodeTypeAnnotation() {
+    final Function func = NODE_TYPE_ANNOTATION;
+
+    query("let $e := parse-xml(\"<e/>\")/* return " + func.args(" $e") + " ? name", "#xs:untyped");
+    query("let $a := parse-xml(\"<e a='3'/>\")//@a return " + func.args(" $a") + " ? name",
+        "#xs:untypedAtomic");
+
+    final String q1 = func.args(" <a>42</a>");
+    query(q1, "{\"name\":#xs:untyped,"
+        + "\"is-simple\":false(),"
+        + "\"base-type\":fn() as fn:schema-type-record { (: fn:schema-type :)() },"
+        + "\"primitive-type\":(),"
+        + "\"variety\":\"mixed\","
+        + "\"members\":(),"
+        + "\"simple-content-type\":(),"
+        + "\"matches\":(),"
+        + "\"constructor\":()}");
+    query(q1 + "?name eq #xs:untyped", true);
+    query(q1 + "?is-simple", false);
+    query(q1 + "?variety", "mixed");
+    query(q1 + "?base-type()?name eq #xs:anyType", true);
+    query(q1 + "?base-type()?is-simple", false);
+    query(q1 + "?base-type()?variety", "mixed");
+    query(q1 + "=> map:contains('primitive-type')", true);
+    query(q1 + "=> map:contains('members')", true);
+    query(q1 + "=> map:contains('simple-content-type')", true);
+
+    final String q2 = func.args(" attribute a {42}");
+    query(q2, "{\"name\":#xs:untypedAtomic,"
+        + "\"is-simple\":true(),"
+        + "\"base-type\":fn() as fn:schema-type-record { (: fn:schema-type :)() },"
+        + "\"primitive-type\":fn() as fn:schema-type-record { (: fn:schema-type :)() },"
+        + "\"variety\":\"atomic\","
+        + "\"members\":(),"
+        + "\"simple-content-type\":(),"
+        + "\"matches\":fn($value) as xs:boolean { (: fn:schema-type :)($value) },"
+        + "\"constructor\":xs:untypedAtomic#1}");
+    query(q2 + "?name eq #xs:untypedAtomic", true);
+    query(q2 + "?is-simple", true);
+    query(q2 + "?variety", "atomic");
+    query(q2 + "?base-type()?name eq #xs:anyAtomicType", true);
+    query(q2 + "?base-type()?is-simple", true);
+    query(q2 + "?base-type()?variety", "atomic");
+    query(q2 + "?base-type()?base-type()?name eq #xs:anySimpleType", true);
+    query(q2 + "?base-type()?base-type()?is-simple", true);
+    query(q2 + "?base-type()?base-type()=> map:contains('variety')", true);
+    query(q2 + "?base-type()?base-type()?base-type()?name eq #xs:anyType", true);
+    query(q2 + "?base-type()?base-type()?base-type()?is-simple", false);
+    query(q2 + "?base-type()?base-type()?base-type()?variety", "mixed");
+    query(q2 + "?base-type()?base-type()?base-type()?base-type() => exists()", false);
+    query(q2 + "?primitive-type()?name eq #xs:untypedAtomic", true);
+    query(q2 + "=> map:contains('members')", true);
+    query(q2 + "=> map:contains('simple-content-type')", true);
+    query(q2 + "?matches(<a>abc</a>)", true);
+    query(q2 + "?constructor(attribute a {42})", "42");
+
+    error(func.args(" ()"), INVTYPE_X);
+    error(func.args(" []"), INVTYPE_X);
+    error(func.args(" {}"), INVTYPE_X);
+    error(func.args(" [<x/>, <y/>]"), INVTYPE_X);
+    error(func.args(" text { 'a' }"), INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void normalizeSpace() {
+    final Function func = NORMALIZE_SPACE;
+
+    query(func.args(""), "");
+    query(func.args("x"), "x");
+    query(func.args(" ' x '"), "x");
+    query(func.args(" <?_ x?>"), "x");
+    query(func.args(" <?_  x ?>"), "x");
+    query("string-length(" + func.args(" string-join((1 to 100000) ! ' ')") + ')', 0);
+    query("string-length(" + func.args(" string-join((1 to 100000) ! 'x')") + ')', 100000);
+
+    // GH-2326
+    query("boolean(" + func.args("") + ')', false);
+    query("boolean(" + func.args(" <?_?>") + ')', false);
+    query("boolean(" + func.args(" string-join((1 to 100000) ! ' ')") + ')', false);
+
+    query("boolean(" + func.args("x") + ')', true);
+    query("boolean(" + func.args(" ' x '") + ')', true);
+    query("boolean(" + func.args(" <?_ x?>") + ')', true);
+    query("boolean(" + func.args(" <?_  x ?>") + ')', true);
+    query("boolean(" + func.args(" string-join((1 to 100000) ! 'x')") + ')', true);
+  }
+
+  /** Test method. */
+  @Test public void not() {
+    final Function func = NOT;
+
+    // pre-evaluated expressions
+    check(func.args(1), false, empty(func));
+    check(func.args(" ()"), true, empty(func));
+
+    check(func.args(" empty((1, 2)[. = 1])"), true, root(Bln.class));
+    check(func.args(" exists((1, 2)[. = 1])"), false, root(Bln.class));
+    check(func.args(" <a/>/text()"), true, exists(EMPTY));
+    // function is replaced with fn:boolean
+    check(func.args(func.args(" ((1, 2)[. = 1])")), true, exists(BOOLEAN));
+
+    // function is replaced with fn:boolean
+    check("for $i in (1, 2)[. != 0] return " + func.args(" $i = $i + 1"),
+        "true\ntrue", exists("*[@op != '=']"));
+    check("for $i in (1, 2)[. != 0] return " + func.args(" $i eq $i + 1"),
+        "true\ntrue", exists("*[@op != 'eq']"));
+    check("for $i in (1, 2)[. != 0] return " + func.args(" [$i] eq $i + 1"),
+        "true\ntrue", exists("*[@op != 'eq']"));
+    check("for $i in (1, 2)[. != 0] return " + func.args(" $i = ($i, <_>{ $i }</_>)"),
+        "false\nfalse", exists(func));
+  }
+
+  /** Test method. */
+  @Test public void number() {
+    final Function func = NUMBER;
+
+    query(func.args(1), 1);
+    query(func.args(" ()"), "NaN");
+    query(func.args(" xs:double('NaN')"), "NaN");
+    query(func.args("X"), "NaN");
+    query(func.args(wrap(1)), 1);
+
+    check("for $d in (1e0, 2e-1)[. != 0] return" + func.args(" $d"), "1\n0.2", empty(func));
+    check("for $d in (1, 2.34)[. != 0] return" + func.args(" $d"), "1\n2.34", exists(func));
+    check("for $d in (1e0, 2e-1)[. != 0] return $d[" + func.args() + ']', 1, empty(func));
+    check("for $d in (1e0, 2e-1)[. != 0] return $d[" + func.args() + " = 1]", 1, empty(func));
+    check("for $d in (1, 2.34)[. != 0] return $d[" + func.args() + ']', 1, exists(func));
+
+    error(func.args(), NOCTX_X);
+    error(func.args(" true#0"), FIATOMIZE_X);
+  }
+
+  /** Test method. */
+  @Test public void oneOrMore() {
+    final Function func = ONE_OR_MORE;
+
+    error(func.args(" ()"), ONEORMORE);
+    query("count(" + func.args(" (1 to 3)[. > 0]") + ')', 3);
+
+    // value-based input
+    query("declare %basex:inline(0) function local:f($s as item()*) { foot(" +
+        func.args(" $s") + ") }; local:f((1, 2, 3))", 3);
+    // iterator-based input: results must not be materialized
+    query("head(" + func.args(" (1 to 100_000_000)[. > 0]") + ')', 1);
+  }
+
+  /** Test method. */
+  @Test public void op() {
+    final Function func = OP;
+
+    query(func.args("+") + " => count()", 1);
+    query(func.args("+") + " instance of function(item()*, item()*) as xs:anyAtomicType?", true);
+    query(func.args("+") + "(1, 2)", 3);
+    query(func.args(wrap("+")) + "(1, 2)", 3);
+
+    query(func.args(",") + "(<a>1</a>, <b>1</b>)", "<a>1</a>\n<b>1</b>");
+    query(func.args("and") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args("or") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args("+") + "(<a>1</a>, <b>1</b>)", 2);
+    query(func.args("-") + "(<a>1</a>, <b>1</b>)", 0);
+    query(func.args("*") + "(<a>1</a>, <b>1</b>)", 1);
+    query(func.args("div") + "(<a>1</a>, <b>1</b>)", 1);
+    query(func.args("idiv") + "(<a>1</a>, <b>1</b>)", 1);
+    query(func.args("mod") + "(<a>1</a>, <b>1</b>)", 0);
+    query(func.args("=") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args("<") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args("<=") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args(">") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args(">=") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args("!=") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args("eq") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args("lt") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args("le") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args("gt") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args("ge") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args("ne") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args("<<") + "(<a>1</a>, <b>1</b>)", true);
+    query(func.args(">>") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args("is") + "(<a>1</a>, <b>1</b>)", false);
+    query(func.args("||") + "(<a>1</a>, <b>1</b>)", "11");
+    query(func.args("|") + "(<a>1</a>, <b>1</b>)", "<a>1</a>\n<b>1</b>");
+    query(func.args("union") + "(<a>1</a>, <b>1</b>)", "<a>1</a>\n<b>1</b>");
+    query(func.args("except") + "(<a>1</a>, <b>1</b>)", "<a>1</a>");
+    query(func.args("intersect") + "(<a>1</a>, <b>1</b>)", "");
+    query(func.args("to") + "(<a>1</a>, <b>1</b>)", 1);
+    query(func.args("otherwise") + "(<a>1</a>, <b>1</b>)", "<a>1</a>");
+
+    error(func.args("xyz"), UNKNOWNOP_X);
+  }
+
+  /** Test method. */
+  @Test public void outermost() {
+    final Function func = OUTERMOST;
+    query("let $n := <li/> return " + func.args(" ($n, $n)"), "<li/>");
+  }
+
+  /** Test method. */
+  @Test public void padString() {
+    final Function func = PAD_STRING;
+
+    query(func.args("abc", 6), "abc   ");
+    query(func.args("abc", 6, " { 'side': 'start' }"), "   abc");
+    query(func.args("abc", 7, " { 'side': 'both' }"), "  abc  ");
+    query(func.args("abc", 8, " { 'side': 'both' }"), "  abc   ");
+    query(func.args("abc", 10, " { 'padding': '-=' }"), "abc-=-=-=-");
+    query(func.args("Chapter", 10, " { 'padding': '.' }"), "Chapter...");
+    query(func.args(42, 6, " { 'padding': '0', 'side': 'start' }"), "000042");
+
+    // no padding, no truncation
+    query(func.args("abc", 3), "abc");
+    query(func.args("abc", -1), "abc");
+    query(func.args(" ()", 3, " { 'padding': '*' }"), "***");
+
+    // length is measured in characters, not in graphemes
+    query(func.args(" char(0x1F600)", 3, " { 'padding': '.' }"), new TokenBuilder().add(0x1F600).
+        add("..").toString());
+
+    check(func.args("abc", 6), "abc   ", empty(func));
+
+    error(func.args("abc", 6, " { 'padding': '' }"), INVALIDVALUE_X_X);
+    error(func.args("abc", 6, " { 'side': 'middle' }"), INVALIDOPTIONVALUE_X);
+    error(func.args("abc", Long.MAX_VALUE), RANGE_X);
+  }
+
+  /** Test method. */
+  @Test public void parseHtml() {
+    final Function func = PARSE_HTML;
+
+    query(func.args(" ()"), "");
+    query(func.args("42"),
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head/><body>42</body></html>");
+    query(func.args("42", " { 'encoding': '" + Strings.UTF16LE + "' }"),
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head/><body>42</body></html>");
+    query(func.args(" xs:hexBinary(" + _BIN_ENCODE_STRING.args("<html><head><meta charset='"
+        + Strings.UTF16LE + "'></head><body>42</body>", Strings.UTF16LE) + ")",
+        " { 'encoding': '" + Strings.UTF16LE + "', 'xml-policy': 'ALTER_INFOSET' }"),
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta charset=\"" + Strings.UTF16LE
+        + "\"/></head><body>42</body></html>");
+    query(func.args(_BIN_ENCODE_STRING.args("<html><head><meta charset='ISO-8859-7'></head>"
+        + "<body>\u20AC</body>", "ISO-8859-7"), " { 'heuristics': 'NONE' }"),
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><meta charset=\"ISO-8859-7\"/></head>"
+        + "<body>\u20AC</body></html>");
+    query(func.args("42", " { 'heuristics': 'ICU' }"),
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head/><body>42</body></html>");
+    query(func.args("42", " { 'method': 'tagsoup' }"), "<html><body>42</body></html>");
+
+    error(func.args(42), STRBIN_X_X);
+    error(func.args("42", 42), INVTYPE_X);
+    error(func.args("42", " { '1234': '' }"), INVALIDOPTION_X);
+    error(func.args("42", " { 'heuristics': '5678' }"), INVALIDOPTIONVALUE_X);
+    error(func.args("42", " { 'heuristics': 'CHARDET' }"), BASEX_CLASSPATH_X_X);
+    error(func.args("42", " { 'heuristics': 'ALL' }"), BASEX_CLASSPATH_X_X);
+  }
+
+  /** Test method. */
+  @Test public void parseCsv() {
+    final Function func = PARSE_CSV;
+    final String display =
+        "let $display := fn($result) {\n"
+      + "   (: tidy up the result for display (function items cannot be properly displayed) :) \n"
+      + "   map:put($result, \"get\", \"(: function :)\")\n"
+      + "}\n";
+
+    // Default delimiters, no column headers:
+    query(display
+      + "let $input := string-join(\n"
+      + "  (\"name,city\", \"Bob,Berlin\", \"Alice,Aachen\"),\n"
+      + "  char('\\n')\n"
+      + ")\n"
+      + "let $result := " + func.args(" $input") + "\n"
+      + "return (\n"
+      + "  $result => $display(),\n"
+      + "  $result?get(1, 2),\n"
+      + "  $result?get(2, 2)\n"
+      + ")",
+        "{\"columns\":(),\"column-index\":{},\"rows\":([\"name\",\"city\"],[\"Bob\",\"Berlin\"],"
+      + "[\"Alice\",\"Aachen\"]),\"get\":\"(: function :)\"}\n"
+      + "city\n"
+      + "Berlin");
+    // Default delimiters, column headers:
+    query(display
+      + "let $input := string-join(\n"
+      + "  (\"name,city\", \"Bob,Berlin\", \"Alice,Aachen\"),\n"
+      + "  char('\\n')\n"
+      + ")\n"
+      + "let $result := " + func.args(" $input", " { \"header\": true() }") + "\n"
+      + "return (\n"
+      + "  $result => $display(),\n"
+      + "  $result?get(1, \"name\"),\n"
+      + "  $result?get(2, \"city\")\n"
+      + ")",
+        "{\"columns\":(\"name\",\"city\"),\"column-index\":{\"name\":1,\"city\":2},\"rows\":("
+      + "[\"Bob\",\"Berlin\"],[\"Alice\",\"Aachen\"]),\"get\":\"(: function :)\"}\n"
+      + "Bob\n"
+      + "Aachen");
+    // Custom separator and quote character, no column headers:
+    query(display
+      + "let $options := {\n"
+      + "  \"separator\": \";\", \n"
+      + "  \"quote-character\": \"|\"\n"
+      + "}\n"
+      + "let $input := string-join(\n"
+      + "  (\"|name|;|city|\", \"|Bob|;|Berlin|\", \"|Alice|;|Aachen|\"),\n"
+      + "  char('\\n')\n"
+      + ")\n"
+      + "let $result := " + func.args(" $input", " $options") + "\n"
+      + "return (\n"
+      + "  $result => $display(),\n"
+      + "  $result?get(3, 1)\n"
+      + ")",
+        "{\"columns\":(),\"column-index\":{},\"rows\":([\"name\",\"city\"],[\"Bob\",\"Berlin\"],"
+      + "[\"Alice\",\"Aachen\"]),\"get\":\"(: function :)\"}\n"
+        + "Alice");
+    // Supplied column names:
+    query(display
+      + "let $headers := (\"Person\", \"Location\")\n"
+      + "let $options := { \"header\": $headers }\n"
+      + "let $input := \"Alice,Aachen\" || char('\\n') || \"Bob,Berlin\" || char('\\n')\n"
+      + "let $parsed-csv := " + func.args(" $input", " $options") + "\n"
+      + "return (\n"
+      + "  $parsed-csv => $display(),\n"
+      + "  $parsed-csv?get(2, \"Location\")\n"
+      + ")",
+        "{\"columns\":(\"Person\",\"Location\"),\"column-index\":{\"Person\":1,\"Location\":2},"
+      + "\"rows\":([\"Alice\",\"Aachen\"],[\"Bob\",\"Berlin\"]),\"get\":\"(: function :)\"}\n"
+      + "Berlin");
+    // Filtering columns, with ragged input and header: true()
+    query(display
+      + "let $input := string-join((\n"
+      + "   \"date,name,city,amount,currency,original amount,note\",\n"
+      + "   \"2023-07-19,Bob,Berlin,10.00,USD,13.99\",\n"
+      + "   \"2023-07-20,Alice,Aachen,15.00\",\n"
+      + "   \"2023-07-20,Charlie,Celle,15.00,GBP,11.99,cake,not a lie\"\n"
+      + "), char('\\n'))\n"
+      + "let $options := {\n"
+      + "  \"header\": true(),\n"
+      + "  \"select-columns\": (2, 1, 4)\n"
+      + "}\n"
+      + "let $result := " + func.args(" $input", " $options") + "\n"
+      + "return (\n"
+      + "  $result => $display(),\n"
+      + "  $result?get(2, \"amount\")\n"
+      + ")",
+        "{\"columns\":(\"name\",\"date\",\"amount\"),\"column-index\":{\"name\":1,\"date\":2,"
+      + "\"amount\":3},\"rows\":([\"Bob\",\"2023-07-19\",\"10.00\"],[\"Alice\",\"2023-07-20\","
+      + "\"15.00\"],[\"Charlie\",\"2023-07-20\",\"15.00\"]),\"get\":\"(: function :)\"}\n"
+      + "15.00");
+    // Filtering columns, with supplied column map
+    query(display
+      + "let $input := string-join((\n"
+      + "  \"2023-07-20,Alice,Aachen,15.00\",\n"
+      + "  \"2023-07-19,Bob,Berlin,10.00,USD,13.99\",\n"
+      + "  \"2023-07-20,Charlie,Celle,15.00,GBP,11.99,cake,not a lie\"\n"
+      + "), char('\\n'))\n"
+      + "let $options := { \n"
+      + "  \"header\": ( \"Person\", \"\", \"Amount\" ),\n"
+      + "  \"select-columns\": (2, 1, 4)\n"
+      + "}\n"
+      + "let $result := " + func.args(" $input", " $options") + "\n"
+      + "return (\n"
+      + "  $result => $display(),\n"
+      + "  $result?get(2, \"Person\"),\n"
+      + "  $result?get(2, \"Amount\")\n"
+      + ")",
+        "{\"columns\":(\"Person\",\"\",\"Amount\"),\"column-index\":{\"Person\":1,\"Amount\":3},"
+      + "\"rows\":([\"Alice\",\"2023-07-20\",\"15.00\"],[\"Bob\",\"2023-07-19\",\"10.00\"],"
+      + "[\"Charlie\",\"2023-07-20\",\"15.00\"]),\"get\":\"(: function :)\"}\n"
+      + "Bob\n"
+      + "10.00");
+    // Specifying the number of columns explicitly, with header: false()
+    query(display
+      + "let $input := string-join((\n"
+      + "  \"date,      name,     amount,    currency,   original amount\",\n"
+      + "  \"2023-07-19,Bob,      10.00,     USD,        13.99\",\n"
+      + "  \"2023-07-20,Alice,    15.00\",\n"
+      + "  \"2023-07-20,Charlie,  15.00,     GBP,        11.99,             extra data\"\n"
+      + "), char('\\n'))\n"
+      + "let $options := {\n"
+      + "  \"header\": false(), \n"
+      + "  \"select-columns\": 1 to 5, \n"
+      + "  \"trim-whitespace\" :true()\n"
+      + "}\n"
+      + "let $result := " + func.args(" $input", " $options") + "\n"
+      + "return (\n"
+      + "  $result => $display(),\n"
+      + "  $result?get(4, 3)\n"
+      + ")",
+        "{\"columns\":(),\"column-index\":{},\"rows\":([\"date\",\"name\",\"amount\",\"currency\","
+      + "\"original amount\"],[\"2023-07-19\",\"Bob\",\"10.00\",\"USD\",\"13.99\"],[\"2023-07-20\","
+      + "\"Alice\",\"15.00\",\"\",\"\"],[\"2023-07-20\",\"Charlie\",\"15.00\",\"GBP\",\"11.99\"]),"
+      + "\"get\":\"(: function :)\"}\n"
+      + "15.00");
+    // Specifying the number of columns with a number and header: true()
+    query(display
+      + "let $input := string-join((\n"
+      + "  \"date,name,city,amount,currency,original amount,note\",\n"
+      + "  \"2023-07-19,Bob,Berlin,10.00,USD,13.99\",\n"
+      + "  \"2023-07-20,Alice,Aachen,15.00\",\n"
+      + "  \"2023-07-20,Charlie,Celle,15.00,GBP,11.99,cake,not a lie\"\n"
+      + "), char('\\n'))\n"
+      + "let $options := { \"header\": true(), \"select-columns\": 1 to 6 }\n"
+      + "let $result := " + func.args(" $input", " $options") + "\n"
+      + "return (\n"
+      + "  $result => $display(),\n"
+      + "  $result?get(3, \"original amount\")\n"
+      + ")",
+        "{\"columns\":(\"date\",\"name\",\"city\",\"amount\",\"currency\",\"original amount\"),"
+      + "\"column-index\":{\"date\":1,\"name\":2,\"city\":3,\"amount\":4,\"currency\":5,"
+      + "\"original amount\":6},\"rows\":([\"2023-07-19\",\"Bob\",\"Berlin\",\"10.00\",\"USD\","
+      + "\"13.99\"],[\"2023-07-20\",\"Alice\",\"Aachen\",\"15.00\",\"\",\"\"],[\"2023-07-20\","
+      + "\"Charlie\",\"Celle\",\"15.00\",\"GBP\",\"11.99\"]),\"get\":\"(: function :)\"}\n"
+      + "11.99");
+  }
+
+  /** Test method. */
+  @Test public void parseIetfDate() {
+    final Function func = PARSE_IETF_DATE;
+
+    query(func.args("Wed, 06 Jun 1994 07:29:35 GMT"), "1994-06-06T07:29:35Z");
+    query(func.args("Wed, 6 Jun 94 07:29:35 GMT"), "1994-06-06T07:29:35Z");
+    query(func.args("Wed Jun 06 11:54:45 EST 0090"), "0090-06-06T11:54:45-05:00");
+    query(func.args("Sunday, 06-Nov-94 08:49:37 GMT"), "1994-11-06T08:49:37Z");
+    query(func.args("Wed, 6 Jun 94 07:29:35 +0500"), "1994-06-06T07:29:35+05:00");
+    query(func.args("1 Nov 1234 05:06:07.89 gmt"), "1234-11-01T05:06:07.89Z");
+
+    query(func.args("01-feb-3456 07:08:09 GMT"), "3456-02-01T07:08:09Z");
+    query(func.args("01-FEB-3456 07:08:09 GMT"), "3456-02-01T07:08:09Z");
+    query(func.args("Wed, 06 Jun 94 07:29:35 +0000 (GMT)"), "1994-06-06T07:29:35Z");
+    query(func.args("Wed, 06 Jun 94 07:29:35"), "1994-06-06T07:29:35Z");
+
+    String s = "Wed, Jan-01 07:29:35 GMT 19";
+    query(func.args(s), "1919-01-01T07:29:35Z");
+    for(int i = s.length(); --i >= 0;) {
+      error(func.args(s.substring(0, i)), IETF_PARSE_X_X_X);
+    }
+
+    s = "Wed, 06 Jun 1994 07:29";
+    query(func.args(s), "1994-06-06T07:29:00Z");
+    for(int i = s.length(); --i >= 0;) {
+      error(func.args(s.substring(0, i)), IETF_PARSE_X_X_X);
+    }
+    error(func.args(s + "X"), IETF_PARSE_X_X_X);
+
+    error(func.args("Wed, 99 Jun 94 07:29:35 +0000 ("), IETF_PARSE_X_X_X);
+    error(func.args("Wed, 99 Jun 94 07:29:35 +0000 (GT)"), IETF_PARSE_X_X_X);
+    error(func.args("Wed, 99 Jun 94 07:29:35 +0000 (GMT"), IETF_PARSE_X_X_X);
+
+    error(func.args("Wed, 99 Jun 94 07:29:35. GMT"), IETF_PARSE_X_X_X);
+    error(func.args("Wed, 99 Jun 94 07:29:35 0500"), IETF_PARSE_X_X_X);
+    error(func.args("Wed, 99 Jun 94 07:29:35 +0500"), IETF_INV_X);
+  }
+
+  /** Test method. */
+  @Test public void parseInteger() {
+    final Function func = PARSE_INTEGER;
+    // successful queries
+    query(func.args("100", 2), 4);
+    query(func.args("1111111111111111", 2), 65535);
+    query(func.args("10000000000000000", 2), 65536);
+    query(func.args("4", 16), 4);
+    query(func.args("ffff", 16), 65535);
+    query(func.args("FFFF", 16), 65535);
+    query(func.args("10000", 16), 65536);
+    query(func.args("4", 10), 4);
+    query(func.args("65535", 10), 65535);
+    query(func.args("65536", 10), 65536);
+
+    error(func.args("1", 1), INTRADIX_X);
+    error(func.args("1", 100), INTRADIX_X);
+    error(func.args("abc", 10), INTINVALID_X_X);
+    error(func.args("012", 2), INTINVALID_X_X);
+  }
+
+  /** Test method. */
+  @Test public void parseJson() {
+    final Function func = PARSE_JSON;
+    query(func.args("\"x\\u0000\""), "x\uFFFD");
+
+    // permitted characters are returned, all control characters stay escaped with 'escape'
+    query("string-to-codepoints(" + func.args("\"\\u0001\"") + ')', 1);
+    query("string-to-codepoints(" + func.args("\"\\u001F\"") + ')', 31);
+    query("string-to-codepoints(" + func.args("\"\\u0001\"", " { 'escape': true() }") + ')',
+        "92\n117\n48\n48\n48\n49");
+    query("string-to-codepoints(" + func.args("\"\\u0009\"", " { 'escape': true() }") + ')',
+        "92\n116");
+
+    query(func.args("\"a\\bb\\uD801\\uDC02c\\uD803d\\uDC04e\\uD805\\uD806\"",
+        " { 'fallback': fn($s) { '[' || $s || ']' } }"),
+        "a\bb\uD801\uDC02c[\\uD803]d[\\uDC04]e[\\uD805][\\uD806]");
+    query("try {" + func.args("nvll") + "} catch * { $err:description }",
+        "(1:1): Unexpected JSON value: 'nvll'.");
+
+    query(func.args("1") + " => type-of()", "xs:double");
+    query(func.args("1", " { 'number-format': 'double' }") + " => type-of()", "xs:double");
+    query(func.args("1e6", " { 'number-format': 'double' }") + " => type-of()", "xs:double");
+
+    query(func.args("1", " { 'number-format': 'decimal' }") + " => type-of()", "xs:integer");
+    query(func.args("-5", " { 'number-format': 'decimal' }") + " => type-of()", "xs:integer");
+    query(func.args("2.0", " { 'number-format': 'decimal' }") + " => type-of()", "xs:integer");
+    query(func.args("1.5", " { 'number-format': 'decimal' }") + " => type-of()", "xs:decimal");
+    query(func.args("1e6", " { 'number-format': 'decimal' }") + " => type-of()", "xs:integer");
+    query(func.args("1.5e0", " { 'number-format': 'decimal' }") + " => type-of()", "xs:decimal");
+    query(func.args("99999999999999999999", " { 'number-format': 'decimal' }")
+        + " => type-of()", "xs:decimal");
+
+    query(func.args("1", " { 'number-format': 'adaptive' }") + " => type-of()", "xs:integer");
+    query(func.args("2.0", " { 'number-format': 'adaptive' }") + " => type-of()", "xs:integer");
+    query(func.args("1.5", " { 'number-format': 'adaptive' }") + " => type-of()", "xs:decimal");
+    query(func.args("1e6", " { 'number-format': 'adaptive' }") + " => type-of()", "xs:double");
+
+    error(func.args("1", " { 'number-parser': xs:decimal#1 }"), INVALIDOPTION_X);
+    error(func.args("1e9999", " { 'number-format': 'decimal' }"), FUNCCAST_X_X);
+
+    // duplicates (maps): reject errors, use-first/use-last select a value, retain is unsupported,
+    // the default is use-first
+    final String dup = "{\"x\":1,\"x\":2}";
+    error(func.args(dup, " { 'duplicates': 'reject' }"), DUPLICATE_JSON_X_X_X);
+    query("try { " + func.args(dup, " { 'duplicates': 'reject' }") +
+        " } catch * { $err:description }", "(1:11): Key \"x\" occurs more than once.");
+    query(func.args(dup, " { 'duplicates': 'use-first' }"), "{\"x\":1}");
+    query(func.args(dup, " { 'duplicates': 'use-last' }"), "{\"x\":2}");
+    error(func.args(dup, " { 'duplicates': 'retain' }"), OPTION_JSON_X);
+    query("try { " + func.args(dup, " { 'duplicates': 'retain' }") +
+        " } catch * { $err:description }",
+        "'duplicates':'retain' is not supported by the target format.");
+    query(func.args(dup), "{\"x\":1}");
+  }
+
+  /** Test method. */
+  @Test public void parseXml() {
+    final Function func = PARSE_XML;
+    contains(func.args("<x>a</x>") + "//text()", "a");
+    query(func.args("<a/>") + "/a[node()]", "");
+    query(func.args("<a/>") + "/*[1]", "<a/>");
+    query(func.args("<a/>") + "/*[self::a]", "<a/>");
+    query(func.args("<a/>") + "/*[1][self::a]", "<a/>");
+    query(func.args("<a/>") + "/*[1][not(child::node())]", "<a/>");
+    query(func.args("<a/>") + "/*[1][self::a][not(child::node())]", "<a/>");
+    query(func.args("<x> <y> </y> </x>"), "<x> <y> </y> </x>");
+    query(func.args("<x> <y> </y> </x>", " { 'strip-space': 'none' }"), "<x> <y> </y> </x>");
+    query(func.args("<x> <y> </y> </x>", " { 'strip-space': 'all' }"), "<x><y/></x>");
+    query(func.args("<x:doc xmlns:x='X'/>"), "<x:doc xmlns:x=\"X\"/>");
+    query(func.args("<x:doc xmlns:x='X'/>", " { 'stripns': false() }"), "<x:doc xmlns:x=\"X\"/>");
+    query(func.args("<x:doc xmlns:x='X'/>", " { 'stripns': true() }"), "<doc/>");
+    query(func.args(" xs:hexBinary(" + _BIN_ENCODE_STRING.args("<?xml version='1.0' encoding='"
+        + Strings.UTF16LE + "'?><x>42</x>", Strings.UTF16LE) + ")"), "<x>42</x>");
+    query(func.args(_BIN_ENCODE_STRING.args("<?xml version='1.0' encoding='ISO-8859-7'?><x>"
+        + "\u20AC</x>", "ISO-8859-7")), "<x>\u20AC</x>");
+
+    final String path = "src/test/resources/parse-xml.entity";
+    final String dtd = "<!DOCTYPE a ["
+        + "<!ELEMENT a (#PCDATA | b)*>"
+        + "<!ELEMENT b EMPTY>"
+        + "<!ENTITY e SYSTEM '" + path + "'>]>";
+    error(func.args(dtd + "<a>&amp;e;</a>", " { 'trust-external': false() }"), EXTERNALRESOURCE_X);
+    query(func.args(dtd + "<a>&amp;e;</a>", " { 'trust-external': true() }"), "<a><b/></a>");
+    query(func.args(dtd + "<a>&amp;e;</a>", " { 'dtd': false() }"), "<a/>");
+    error(func.args(dtd + "<a>&amp;e;</a>", " { 'intparse': true(), 'trust-external': false() }"),
+        EXTERNALRESOURCE_X);
+    query(func.args(dtd + "<a>&amp;e;</a>", " { 'intparse': true(), 'trust-external': true() }"),
+        "<a><b/></a>");
+    query(func.args(dtd + "<a>&amp;e;</a>", " { 'intparse': true(), 'dtd': false() }"), "<a/>");
+    // undeclared entities: HTML entity or replacement character
+    final String undeclared = "<!DOCTYPE a SYSTEM 'unknown.dtd'><a>&amp;nbsp;&amp;x;</a>";
+    query(func.args(undeclared, " { 'dtd': false() }"), "<a>\u00A0\uFFFD</a>");
+    query(func.args(undeclared, " { 'dtd': false(), 'intparse': true() }"), "<a>\u00A0\uFFFD</a>");
+    error(func.args(undeclared), EXTERNALRESOURCE_X);
+    error(func.args(undeclared, " { 'intparse': true() }"), EXTERNALRESOURCE_X);
+    query(func.args(dtd + "<a>&amp;e;</a>", " { 'dtd': true(), 'trust-external': true() }"),
+        "<a><b/></a>");
+    query(func.args(dtd + "<b>&amp;e;</b>", " { 'dtd': true(), 'trust-external': true() }"),
+        "<b><b/></b>");
+    query(func.args(dtd + "<a><b/></a>", " { 'dtd-validation': true() }"), "<a><b/></a>");
+    query(func.args(dtd + "<a>&amp;e;</a>",
+        " { 'dtd-validation': false(), 'trust-external': true() }"), "<a><b/></a>");
+    query(func.args(dtd + "<a>&amp;e;</a>",
+        " { 'dtd-validation': true(), 'trust-external': true() }"), "<a><b/></a>");
+    query(func.args(dtd + "<a>&amp;e;</a>",
+        " { 'dtd-validation': true(), 'dtd': true(), 'trust-external': true() }"), "<a><b/></a>");
+    error(func.args("<!DOCTYPE root SYSTEM 'src/test/resources/validate.dtd'><root/>",
+        " { 'dtd-validation': true(), 'trust-external': false() }"), EXTERNALRESOURCE_X);
+    query(func.args("<!DOCTYPE root SYSTEM 'src/test/resources/validate.dtd'><root/>",
+        " { 'dtd-validation': true(), 'trust-external': true() }"), "<root/>");
+    query(func.args("<root xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' "
+        + "xsi:noNamespaceSchemaLocation='src/test/resources/validate.xsd'/>",
+        " { 'xsd-validation': 'strict', 'use-xsi-schema-location': true(),"
+        + " 'trust-external': true() }"),
+        "<root xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+        + "xsi:noNamespaceSchemaLocation=\"src/test/resources/validate.xsd\"/>");
+
+    query(func.args("<a xmlns:xi='http://www.w3.org/2001/XInclude'><xi:include href='" + path
+        + "'/></a>", " { 'xinclude': false() }"), "<a xmlns:xi=\"http://www.w3.org/2001/XInclude\">"
+        + "<xi:include href=\"" + path + "\"/></a>");
+    error(func.args("<a xmlns:xi='http://www.w3.org/2001/XInclude'><xi:include href='" + path
+        + "'/></a>", " { 'xinclude': true(), 'trust-external': false() }"), EXTERNALRESOURCE_X);
+    query(func.args("<a xmlns:xi='http://www.w3.org/2001/XInclude'><xi:include href='" + path
+        + "'/></a>", " { 'xinclude': true(), 'trust-external': true() }"),
+        "<a xmlns:xi=\"http://www.w3.org/2001/XInclude\">"
+        + "<b xml:base=\"src/test/resources/parse-xml.entity\"/></a>");
+
+    error(func.args("<root xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' "
+        + "xsi:noNamespaceSchemaLocation='src/test/resources/validate.xsd'/>",
+        " { 'xsd-validation': 'strict', 'use-xsi-schema-location': true(),"
+        + " 'trust-external': false() }"), EXTERNALRESOURCE_X);
+
+    error(func.args(dtd + "<b>&amp;e;</b>",
+        " { 'dtd-validation': true(), 'trust-external': true() }"), DTDVALIDATIONERR_X);
+    error(func.args("<a xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' "
+        + "xsi:noNamespaceSchemaLocation='src/test/resources/validate.xsd'/>",
+        " { 'xsd-validation': 'strict', 'use-xsi-schema-location': true(),"
+        + " 'trust-external': true() }"), XSDVALIDATIONERR_X);
+    error(func.args("<a/>", " { 'catalog': 'catalog.xml' }"), INVALIDOPTION_X);
+  }
+
+  /** Test method. */
+  @Test public void parseXmlFragment() {
+    final Function func = PARSE_XML_FRAGMENT;
+    query(func.args("<x> <y> </y> </x> <z/>"), "<x> <y> </y> </x> <z/>");
+    query(func.args("<x> <y> </y> </x> <z/>", " { 'strip-space': 'none' }"),
+        "<x> <y> </y> </x> <z/>");
+    query(func.args("<x> <y> </y> </x> <z/>", " { 'strip-space': 'all' }"),
+        "<x><y/></x><z/>");
+    query(func.args("<x:doc xmlns:x='X'/>"), "<x:doc xmlns:x=\"X\"/>");
+    query(func.args("<x:doc xmlns:x='X'/>", " { 'stripns': false() }"), "<x:doc xmlns:x=\"X\"/>");
+    query(func.args("<x:doc xmlns:x='X'/>", " { 'stripns': true() }"), "<doc/>");
+    query(func.args(" xs:hexBinary(" + _BIN_ENCODE_STRING.args("<?xml version='1.0' encoding='"
+        + Strings.UTF16LE + "'?><x/><y/>", Strings.UTF16LE) + ")"), "<x/><y/>");
+    query(func.args(_BIN_ENCODE_STRING.args("<?xml version='1.0' encoding='ISO-8859-7'?><x>"
+        + "\u20AC</x><y>\u20AF</y>", "ISO-8859-7")), "<x>\u20AC</x><y>\u20AF</y>");
+
+    // GH-2449
+    query(func.args("<?xml version='1.0' encoding='utf8'?><a/>"), "<a/>");
+    error(func.args("<?xml version='1.0' encoding='utf8' standalone='no'?><a/>"), SAXERR_X);
+    error(func.args("<?xml version='1.0' encoding='utf8' standalone='yes'?><a/>"), SAXERR_X);
+  }
+
+  /** Test method. */
+  @Test public void partialApply() {
+    final Function func = PARTIAL_APPLY;
+
+    query("let $f := " + func.args(" dateTime#2", " {2: xs:time('00:00:00')}") + " return $f("
+        + "xs:date('2025-03-01'))", "2025-03-01T00:00:00");
+    error(func.args(" name#1", " {1: 42}"), INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void partition() {
+    final Function func = PARTITION;
+
+    String fn = " function($seq, $curr) { true() }";
+    query(func.args(" ()", fn), "");
+    query(func.args(1, fn), "[1]");
+    query(func.args(" (1 to 1000)", fn) + " => count()", 1000);
+    query(func.args(" (1 to 1000)[. < 3]", fn) + " => count()", 2);
+    query(func.args(" (1 to 1000)[. < 2]", fn) + " => count()", 1);
+    query(func.args(" (1 to 1000)[. < 1]", fn) + " => count()", 0);
+
+    fn = " function($seq, $curr) { false() }";
+    query(func.args(" ()", fn), "");
+    query(func.args(1, fn), "[1]");
+    query(func.args(" (1 to 1000)", fn) + " => count()", 1);
+    query(func.args(" (1 to 1000)[. < 3]", fn) + " => count()", 1);
+    query(func.args(" (1 to 1000)[. < 2]", fn) + " => count()", 1);
+    query(func.args(" (1 to 1000)[. < 1]", fn) + " => count()", 0);
+
+    fn = " function($seq, $curr) { not($seq = $curr) }";
+    query(func.args(" (1, 1)", fn), "[1,1]");
+    query(func.args(" (1, 1, 2, 1)", fn), "[1,1]\n[2]\n[1]");
+
+    fn = " function($seq, $curr) { $curr > $seq }";
+    query(func.args(" (846, 23, 5, 8, 6, 1000)", fn), "[846,23,5]\n[8,6]\n[1000]");
+
+    query(func.args(" ('Anita', 'Anne', 'Barbara', 'Catherine', 'Christine')",
+        " function($x, $y) { substring($x[last()], 1, 1) ne substring($y, 1, 1) }"),
+        "[\"Anita\",\"Anne\"]\n[\"Barbara\"]\n[\"Catherine\",\"Christine\"]");
+    query(func.args(" (1, 2, 3, 4, 5, 6)", " function($a, $b){ count($a) eq 2 }"),
+        "[1,2]\n[3,4]\n[5,6]");
+    query(func.args(" (1, 4, 6, 3, 1, 1)", " function($a, $b) { sum($a) ge 5 }"),
+        "[1,4]\n[6]\n[3,1,1]");
+    query(func.args(" tokenize('In the beginning was the word')",
+        " function($a, $b) { sum(($a, $b) ! string-length()) gt 10 }"),
+        "[\"In\",\"the\"]\n[\"beginning\"]\n[\"was\",\"the\",\"word\"]");
+    query(func.args(" (1, 2, 3, 6, 7, 9, 10)",
+        " function($seq, $new) { not($new = $seq[last()] + 1) }"),
+        "[1,2,3]\n[6,7]\n[9,10]");
+
+    query(func.args(" 1 to 5", " fn($a, $n, $p) { $p mod 2 = 1 }"), "[1,2]\n[3,4]\n[5]");
+  }
+
+  /** Test method. */
+  @Test public void partsOfDateTime() {
+    final Function func = PARTS_OF_DATETIME;
+    query(func.args(" ()"), "");
+    // examples from the spec
+    query(func.args(" xs:dateTime('1999-05-31T13:20:00-05:00')"),
+        "{\"year\":1999,\"month\":5,\"day\":31,\"hours\":13,\"minutes\":20,"
+      + "\"seconds\":0,\"timezone\":\"-PT5H\"}");
+    query(func.args(" xs:time('13:30:04.2678')"),
+        "{\"year\":(),\"month\":(),\"day\":(),\"hours\":13,\"minutes\":30,"
+      + "\"seconds\":4.2678,\"timezone\":()}");
+    query(func.args(" xs:gYearMonth('2007-05Z')"),
+        "{\"year\":2007,\"month\":5,\"day\":(),\"hours\":(),\"minutes\":(),"
+      + "\"seconds\":(),\"timezone\":\"PT0S\"}");
+    // xs:dateTime
+    query(func.args(" text{'2026-02-25T18:29:30.456+01:00'}"),
+        "{\"year\":2026,\"month\":2,\"day\":25,"
+      + "\"hours\":18,\"minutes\":29,\"seconds\":30.456,"
+      + "\"timezone\":\"PT1H\"}");
+    // xs:date
+    query(func.args(" text{'2026-02-25+01:00'}"),
+        "{\"year\":2026,\"month\":2,\"day\":25,"
+      + "\"hours\":(),\"minutes\":(),\"seconds\":(),"
+      + "\"timezone\":\"PT1H\"}");
+    // xs:time
+    query(func.args(" text{'18:29:30.456+01:00'}"),
+        "{\"year\":(),\"month\":(),\"day\":(),"
+      + "\"hours\":18,\"minutes\":29,\"seconds\":30.456,"
+      + "\"timezone\":\"PT1H\"}");
+    // xs:gYear
+    query(func.args(" text{'2026+01:00'}"),
+        "{\"year\":2026,\"month\":(),\"day\":(),"
+      + "\"hours\":(),\"minutes\":(),\"seconds\":(),"
+      + "\"timezone\":\"PT1H\"}");
+    // xs:gYearMonth
+    query(func.args(" text{'2026-02+01:00'}"),
+        "{\"year\":2026,\"month\":2,\"day\":(),"
+      + "\"hours\":(),\"minutes\":(),\"seconds\":(),"
+      + "\"timezone\":\"PT1H\"}");
+    // xs:gMonth
+    query(func.args(" text{'--02+01:00'}"),
+        "{\"year\":(),\"month\":2,\"day\":(),"
+      + "\"hours\":(),\"minutes\":(),\"seconds\":(),"
+      + "\"timezone\":\"PT1H\"}");
+    // xs:gMonthDay
+    query(func.args(" text{'--02-25+01:00'}"),
+        "{\"year\":(),\"month\":2,\"day\":25,"
+      + "\"hours\":(),\"minutes\":(),\"seconds\":(),"
+      + "\"timezone\":\"PT1H\"}");
+    // xs:gDay
+    query(func.args(" text{'---25+01:00'}"),
+        "{\"year\":(),\"month\":(),\"day\":25,"
+      + "\"hours\":(),\"minutes\":(),\"seconds\":(),"
+      + "\"timezone\":\"PT1H\"}");
+
+    error(func.args(" text{'not-a-date'}"), INVTYPE_X);
+    error(func.args(" text{'2026-02-30T18:29:30+01:00'}"), INVTYPE_X);
+    error(func.args(" text{'2026-02-25T18:29:30+15:00'}"), INVTYPE_X);
+    error(func.args(" text{'--13'}"), INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void randomNumberGenerator() {
+    final Function func = RANDOM_NUMBER_GENERATOR;
+
+    // ensure that the same seed will generate the same result
+    final String query = func.args(123) + "?number";
+    assertEquals(query(query), query(query));
+    // ensure that multiple number generators in a query will generate the same result
+    query("let $seq := 1 to 10 "
+        + "let $m1 := " + func.args() + " "
+        + "let $m2 := " + func.args() + " "
+        + "return every $test in ("
+        + "  $m1('number') = $m2('number'), "
+        + "  $m2('next')()('number') = $m1('next')()('number'), "
+        + "  deep-equal($m1('permute')($seq), $m2('permute')($seq))"
+        + ") satisfies true()", true);
+    // ensure that the generator has no mutable state
+    query("for $i in 1 to 100 "
+        + "let $rng := " + func.args() + " "
+        + "where $rng?next()?number ne $rng?next()?number "
+        + "return error()");
+  }
+
+  /** Test method. */
+  @Test public void remove() {
+    final Function func = REMOVE;
+
+    // static rewrites
+    query(func.args(" ()", 1), "");
+    query(func.args("A", 1), "");
+    query(func.args(" (1, 2)", 1), 2);
+    query(func.args(" (1 to 3)", 1), "2\n3");
+
+    // known result size
+    query(func.args(wrap(1) + "+ 1", 1), "");
+    query(func.args(" (" + wrap(1) + "+ 1, 3), 1"), 3);
+    query(func.args(" void(())", 1), "");
+
+    // unknown result size
+    query(func.args(wrap(1) + "[. = 0]", 1), "");
+    query(func.args(wrap(1) + "[. = 1]", 1), "");
+    query(func.args(" (1 to 2)[. = 0]", 1), "");
+    query(func.args(" (1 to 4)[. < 3]", 1), 2);
+
+    // value-based iterator
+    query(func.args(" tokenize(<_></_>)", 1), "");
+    query(func.args(" tokenize(<_>X</_>)", 1), "");
+    query(func.args(" tokenize(<_>X Y</_>)", 1), "Y");
+    query(func.args(" tokenize(<_>X Y Z</_>)", 1), "Y\nZ");
+
+    // random access into a single-position removal exercises the positional get();
+    // the !-map yields a non-value iterator with a known size, the wrap defeats pre-evaluation
+    final String seq = " (" + wrap(9) + ", 1, 2, 3, 4) ! string()";
+    query("reverse(" + func.args(seq, 2) + ")", "4\n3\n2\n9");
+    query("subsequence(" + func.args(seq, 2) + ", 2, 2)", "2\n3");
+    query("items-at(" + func.args(seq, 2) + ", 4)", 4);
+
+    // static rewrites, dynamic position
+    query(func.args(" ()", wrap(1)), "");
+    query(func.args("A", wrap(1)), "");
+    query(func.args(" (1, 2)", wrap(1)), 2);
+    query(func.args(" (1 to 3)", wrap(1)), "2\n3");
+
+    // known result size, dynamic position
+    query(func.args(wrap(1) + "+ 1", wrap(1)), "");
+    query(func.args(" (" + wrap(1) + "+ 1, 3), 1"), 3);
+    query(func.args(" void(())", wrap(1)), "");
+
+    // unknown result size, dynamic position
+    query(func.args(wrap(1) + "[. = 0]", wrap(1)), "");
+    query(func.args(wrap(1) + "[. = 1]", wrap(1)), "");
+    query(func.args(" (1 to 2)[. = 0]", wrap(1)), "");
+    query(func.args(" (1 to 4)[. < 3]", wrap(1)), 2);
+
+    // value-based iterator, dynamic position
+    query(func.args(" tokenize(<_></_>)", wrap(1)), "");
+    query(func.args(" tokenize(<_>X</_>)", wrap(1)), "");
+    query(func.args(" tokenize(<_>X Y</_>)", wrap(1)), "Y");
+    query(func.args(" tokenize(<_>X Y Z</_>)", wrap(1)), "Y\nZ");
+
+    // known result size
+    query(func.args(" (1, <_>2</_>, 3, 4)", 2), "1\n3\n4");
+    query(func.args(" (1, <_>2</_>, 3, 4)", 2) + "[1]", 1);
+    query(func.args(" (1, <_>2</_>, 3, 4)", 2) + "[2]", 3);
+    query(func.args(" (1, <_>2</_>, 3, 4)", 2) + "[3]", 4);
+
+    // multiple positions
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (1, 2)"), "3\n4");
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (2, 3)"), "1\n4");
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (2, 4)"), "1\n3");
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (2, 2)"), "1\n3\n4");
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (1 to 3)"), 4);
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (2 to 4)"), 1);
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (0 to 3)"), 4);
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (1 to 4)"), "");
+    query(func.args(" (1, <_>2</_>, 3, 4)", " (1 to 5)"), "");
+
+    // empty positions
+    query(func.args(" ()", " ()"), "");
+    query(func.args("A", " ()"), "A");
+    query(func.args(" <a>X</a>", " ()"), "<a>X</a>");
+    query(func.args(" (1, <_>2</_>, 3)", " ()"), "1\n<_>2</_>\n3");
+    query(func.args(" tokenize(<_>X Y</_>)", " ()"), "X\nY");
+    query(func.args(" (<a/>, <b/>)", " (1 to 2)[. > <_>5</_>]"), "<a/>\n<b/>");
+    query(func.args(" <a>X</a>", " void(())"), "<a>X</a>");
+  }
+
+  /** Test method. */
+  @Test public void regex() {
+    final Function func = REGEX;
+
+    query(func.args("abc") + "?pattern", "abc");
+    query(func.args("abc") + "?flags", "");
+    query(func.args("abc", "i") + "?flags", "i");
+    query(func.args("a") + " instance of fn:compiled-regex-record", true);
+    query(func.args("^a.*a+$") + "?matches('alpha')", true);
+    query(func.args("^a.*a+$") + "?matches('beta')", false);
+    query(func.args("kiki", "i") + "?matches('Kikikerikih!!')", true);
+    query(func.args("kiki", "i") + "?matches('Kikeriki!')", false);
+    query(func.args(",") + "?tokenize('a,b,c')", "a\nb\nc");
+    query(func.args("\\s+") + "?tokenize('hello world')", "hello\nworld");
+    query(func.args("[0-9]+") + "?replace('abc123def', '0')", "abc0def");
+    query(func.args("[aeiou]", "i") + "?replace('Hello World', '*')", "H*ll* W*rld");
+    query(func.args("[0-9]+") + "?analyze-string('abc123') => node-name() => expanded-QName()",
+        "Q{http://www.w3.org/2005/xpath-functions}analyze-string-result");
+    query(func.args("[0-9]+") + "?analyze-string('abc123def')//fn:match/text()", "123");
+    query(func.args("[0-9]+") + "?analyze-string('abc123def')//fn:non-match/text()", "abc\ndef");
+
+    // spec examples
+    query("let $r := " + func.args("^a.*a+$") +
+        " return ('alpha','beta','gamma','delta')[$r?matches(.)]", "alpha");
+    query("let $r := " + func.args("kiki", "i") +
+        " return some $k in ('Kikeriki!','Kikikerikih!!') satisfies $r?matches($k)", true);
+    query("let $r := " + func.args("[0-9]+") +
+        " return ('Chapter 1','Chapter 2','Chapter 3','Appendix 12')" +
+        "!$r?replace(., fn($k,$g) { number($k) + 1 })",
+        "Chapter 2\nChapter 3\nChapter 4\nAppendix 13");
+    final String ms = func.args("([A-Z])([0-9]+)") + "?matching-segments('A1,C15,,D24, X50,')";
+    query("count(" + ms + ')', 4);
+    query(ms + "[2]?substring", "C15");
+    query(ms + "[2]?position", 4);
+    query(ms + "[2]?groups?1?value", "C");
+    query(ms + "[2]?groups?2?value", 15);
+    query(ms + "[2]?groups?2?position", 5);
+
+    error(func.args("+"), REGINVALID_X);
+    error(func.args("x", "X"), REGFLAG_X);
+  }
+
+  /** Test method. */
+  @Test public void replace() {
+    final Function func = REPLACE;
+
+    query(func.args("a", "a", "b"), "b");
+    query(func.args("ä", "ä", "b"), "b");
+    query(func.args("a", ".", "b"), "b");
+
+    query(func.args("a", "", "x"), "xax");
+
+    // GH-573
+    query(func.args("aaaaa bbbbbbbb ddd ", "(.{6,15}) ", "$1@"), "aaaaa bbbbbbbb@ddd ");
+    query(func.args("aaaa AAA 123", "(\\s+\\P{Ll}{3,280}?)", "$1@"), "aaaa AAA@ 123@");
+    error(func.args("asdf", "a{12, 3}", ""), REGINVALID_X);
+
+    // GH-1940
+    query(func.args("hello", "hel(?:lo)", "$1"), "");
+    query(func.args("abc", "b", "$0"), "abc");
+    query(func.args("abc", "b", "$1"), "ac");
+    query(func.args("abc", "b", "$10"), "a0c");
+
+    query(func.args("a", "a", " ()"), "");
+
+    query(func.args("b", "b", " fn($k, $g) {}"), "");
+    query(func.args("c", "c", " fn($k, $g) { upper-case($k) }"), "C");
+    query(func.args("de", ".", " fn($k, $g) { $k || $k }"), "ddee");
+
+    // GH-2692: unmatched groups are absent from the groups map
+    query(func.args("", "(X)?", " fn($_, $groups) { $groups?1 }"), "");
+
+    // GH-2697: unmatched groups
+    query(func.args("a", "(a)|(b)", " fn($m){$m}"), "a");
+
+    // GH-2698: lookback for escaped dollar signs in replacement must look beyond first backslash
+    query(func.args("full stop.", "\\.", "\\\\$1"), "full stop\\");
+
+    query(func.args("Chapter 9", "[0-9]+", " fn($k, $g) { string(number($k) + 1) }"),
+        "Chapter 10");
+    query("let $map := { 'LAX': 'Los Angeles', 'LHR': 'London' } return"
+        + func.args("LHR to LAX", "[A-Z]{3}", " fn($s, $g) { $map($s) }"),
+        "London to Los Angeles");
+    query(func.args("57°43′30″", "([0-9]+)°([0-9]+)′([0-9]+)″", " fn($s, $g) "
+        + "{ string(number($g?1) + number($g?2) div 60 + number($g?3) div 3600) || '°' }"),
+        "57.725°");
+    query(func.args("A1 B234", "([A-Z]+)([0-9]+)",
+        " fn($s, $g) { string-join(characters($g?2) ! ($g?1 || .)) }"),
+        "A1 B2B3B4");
+    query(func.args("A(0)B(1)C(0)D(9)", "(.)\\((\\d)\\)",
+        " fn($s, $g) { $g?1[$g?2 != '0'] }"),
+        "BD");
+    query(func.args("chop first character ", "(.).*? ", " fn($s, $g) "
+        + "{ substring-after($s, $g?1) }"),
+        "hop irst haracter ");
+    query(func.args("12345678", ".(.)", " fn($s, $g) { replace($s, $g?1, '') }"),
+        1357);
+    query("for $function in (head#1, tail#1) return" +
+        func.args("1234", "(.)(.)", " fn($s, $g) { $function($g?*) }"),
+        "13\n24");
+    query("for $function in (substring-before#2, substring-after#2) return" +
+        func.args("1234", ".(..)", " fn($s, $g) { $function($s, $g?1) }"),
+        "14\n4");
+    query("for $before in (true(), false()) "
+        + "let $name := 'fn:substring-' || (if($before) then 'before' else 'after') "
+        + "let $function := function-lookup(xs:QName($name), 2) "
+        + "return" + func.args("1234", ".(..)", " fn($s, $g) { $function($s, $g?1) }"),
+        "14\n4");
+    query(func.args("X", ".", " fn($s, $g) { map:size($g) = 0 }"), true);
+    query(func.args("1", "(.)", " fn($n, $_) { $n + 1 }"), 2);
+
+    query(func.args("bab", "a", " fn($_, $__) {}"), "bb");
+    query(func.args("bab", "(a)", " fn($_, $__) {}"), "bb");
+    query(func.args("bab", "(a)", " fn($_, $__) { '' }"), "bb");
+    query(func.args("abcde", "b(.)d", "$1"), "ace");
+
+    query(func.args("W", ".*", " fn($k, $g) { '~' }"), "~~");
+
+    // named capturing groups in replacement strings
+    query(func.args("2026-06-25", "(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})",
+        "$<day>/$<month>/$<year>"), "25/06/2026");
+    query(func.args("ab", "(?<first>a)(b)", "$2$<first>"), "ba");
+    query(func.args("b", "(?<a>a)|b", "[$<a>]"), "[]");
+    query(func.args("x$<a>x", "$<a>", "y", "q"), "xyx");
+    error(func.args("x", "(?<a>x)", "$<b>"), REGGROUP_X);
+    error(func.args("x", "(?<a>x)", "$<a"), REGDOLLAR_X);
+    error(func.args("x", "x", "$x"), REGDOLLAR_X);
+
+    // named capturing groups in replacement functions
+    query(func.args("42 plus 7", "(?<first>\\d+) plus (?<second>\\d+)",
+        " fn($s, $g) { string($g?first + $g?second) }"), "49");
+    query(func.args("A1", "(?<letter>[A-Z])([0-9])",
+        " fn($s, $g) { string-join(map:keys($g), ',') }"), "letter,2");
+    query(func.args("b", "(?<a>a)|(?<b>b)",
+        " fn($s, $g) { string-join(map:keys($g), ',') }"), "b");
+
+    // named back-references
+    query(func.args("cool food", "(?<c>[od])\\k<c>", "X"), "cXl fXd");
+    query(func.args("'a' \"b\"", "(?<quote>['\"]).*?\\k<quote>", "Q"), "Q Q");
+    error(func.args("x", "(?<a>x)\\k<b>", ""), REGINVALID_X);
+    error(func.args("x", "\\k<a>(?<a>x)", ""), REGINVALID_X);
+    error(func.args("x", "[\\k<a>](?<a>x)", ""), REGINVALID_X);
+
+    // deprecated: groups are passed on as sequence
+    query(func.args("A1 B234", "([A-Z]+)([0-9]+)",
+        " fn($s, $g as xs:untypedAtomic*) { $g[2] || $g[1] }"), "1A 234B");
+    query(func.args("a", "(a)|(b)", " fn($s, $g as xs:untypedAtomic*) { count($g) }"), 2);
+    query(func.args("a", "(a)|(b)", " fn($s as xs:untypedAtomic, $g as xs:untypedAtomic*) "
+        + "as xs:string { string-join($g, ',') }"), "a,");
+    query(func.args("1234", ".(..)", " substring-after#2"), "4");
+  }
+
+  /** Test method. */
+  @Test public void replicate() {
+    final Function func = REPLICATE;
+
+    query(func.args(" ()", 0), "");
+    query(func.args(" ()", 1), "");
+    query(func.args(1, 0), "");
+    query(func.args("A", 1), "A");
+    query(func.args("A", 2), "A\nA");
+    query(func.args(" (0, 'A')", 1), "0\nA");
+    query(func.args(" (0, 'A')", 2), "0\nA\n0\nA");
+    query(func.args(" 1 to 10000", 10000) + "[last()]", "10000");
+    query(func.args(" 1 to 10000", 10000) + "[1]", "1");
+    query(func.args(" 1 to 10000", 10000) + "[10000]", "10000");
+    query(func.args(" 1 to 10000", 10000) + "[10001]", "1");
+    query("count(" + func.args(" 1 to 1_000_000", 1_000_000) + ")", 1000000000000L);
+
+    // value-based input
+    query("declare %basex:inline(0) function local:f($s as item()*) { foot(" +
+        func.args(" $s", 2) + ") }; local:f((1, 2))", 2);
+    // repeated evaluations: results must not be materialized
+    query("head(" + func.args(" random:integer(1)", 100_000_000, " true()") + ')', 0);
+    query("count(" + func.args(func.args(" 1 to 3", 3), 3) + ")", 27);
+
+    // single item: total size fits into the integer range
+    query("count(" + func.args("A", 4611686018427387904L) + ")", 4611686018427387904L);
+    // multiple items: total size exceeds the integer range (clean error, not out of memory)
+    error("count(" + func.args(" (1, 2, 3)", 4611686018427387904L) + ")", RANGE_X);
+    error("subsequence(" + func.args(" (1, 2, 3)", 4611686018427387904L) + ", 5, 2)", RANGE_X);
+
+    query("for $i in 1 to 2 return " + func.args(1, " $i"), "1\n1\n1");
+    query(func.args(" <a/>", 2), "<a/>\n<a/>");
+    query(func.args(" <a/>", wrap(2)), "<a/>\n<a/>");
+
+    query(func.args(" 1[. = 1]", 2), "1\n1");
+    error(func.args(" <a/>", -1), INVTYPE_X);
+
+    check(func.args(" <a/>", 0), "", empty());
+    check(func.args(" ()", wrap(2)), "", empty());
+    check(func.args(" <a/>", 1), "<a/>", empty(func));
+    check(func.args(" <a/>", 2), "<a/>\n<a/>", type(func, "element(a)+"));
+    check(func.args(" <a/>", wrap(2)), "<a/>\n<a/>", type(func, "element(a)*"));
+
+    check(func.args(func.args(" <a/>", 2), 2),
+        "<a/>\n<a/>\n<a/>\n<a/>", count(func, 1));
+    check(func.args(" <_/>", 2) + " ! " + func.args(" .", 2),
+        "<_/>\n<_/>\n<_/>\n<_/>", count(func, 1));
+    check("(1, 1) ! " + func.args(" .", 2),
+        "1\n1\n1\n1", empty(func));
+    check("(1, 1) ! " + func.args(" .", 2),
+        "1\n1\n1\n1", empty(func));
+  }
+
+  /** Test method. */
+  @Test public void resolveQName() {
+    final Function func = RESOLVE_QNAME;
+    query("sort(<e xmlns:p='u'>{" + func.args("p:p", " <e/>") + "}</e>/text()/tokenize(.))", "p:p");
+  }
+
+  /** Test method. */
+  @Test public void resolveUri() {
+    final Function func = RESOLVE_URI;
+    final String base = "http://a/b/c/d;p?q";
+
+    // RFC 3986, 5.4.1: normal examples
+    query(func.args("g:h", base), "g:h");
+    query(func.args("g", base), "http://a/b/c/g");
+    query(func.args("./g", base), "http://a/b/c/g");
+    query(func.args("g/", base), "http://a/b/c/g/");
+    query(func.args("/g", base), "http://a/g");
+    query(func.args("//g", base), "http://g");
+    query(func.args("?y", base), "http://a/b/c/d;p?y");
+    query(func.args("g?y", base), "http://a/b/c/g?y");
+    query(func.args("#s", base), "http://a/b/c/d;p?q#s");
+    query(func.args("g#s", base), "http://a/b/c/g#s");
+    query(func.args("g?y#s", base), "http://a/b/c/g?y#s");
+    query(func.args(";x", base), "http://a/b/c/;x");
+    query(func.args("g;x", base), "http://a/b/c/g;x");
+    query(func.args("g;x?y#s", base), "http://a/b/c/g;x?y#s");
+    query(func.args("", base), "http://a/b/c/d;p?q");
+    query(func.args(".", base), "http://a/b/c/");
+    query(func.args("./", base), "http://a/b/c/");
+    query(func.args("..", base), "http://a/b/");
+    query(func.args("../", base), "http://a/b/");
+    query(func.args("../g", base), "http://a/b/g");
+    query(func.args("../..", base), "http://a/");
+    query(func.args("../../", base), "http://a/");
+    query(func.args("../../g", base), "http://a/g");
+
+    // RFC 3986, 5.4.2: abnormal examples
+    query(func.args("../../../g", base), "http://a/g");
+    query(func.args("../../../../g", base), "http://a/g");
+    query(func.args("/./g", base), "http://a/g");
+    query(func.args("/../g", base), "http://a/g");
+    query(func.args("g.", base), "http://a/b/c/g.");
+    query(func.args(".g", base), "http://a/b/c/.g");
+    query(func.args("g..", base), "http://a/b/c/g..");
+    query(func.args("..g", base), "http://a/b/c/..g");
+    query(func.args("./../g", base), "http://a/b/g");
+    query(func.args("./g/.", base), "http://a/b/c/g/");
+    query(func.args("g/./h", base), "http://a/b/c/g/h");
+    query(func.args("g/../h", base), "http://a/b/c/h");
+    query(func.args("g;x=1/./y", base), "http://a/b/c/g;x=1/y");
+    query(func.args("g;x=1/../y", base), "http://a/b/c/y");
+    // dot segments are only removed from the path
+    query(func.args("g?y/./x", base), "http://a/b/c/g?y/./x");
+    query(func.args("g?y/../x", base), "http://a/b/c/g?y/../x");
+    query(func.args("g#s/./x", base), "http://a/b/c/g#s/./x");
+    query(func.args("g#s/../x", base), "http://a/b/c/g#s/../x");
+    // strict parser: 'http' is a scheme, not the first path segment
+    query(func.args("http:g", base), "http:g");
+
+    // IRIs (RFC 3987) and LEIRIs: no percent-encoding takes place
+    query(func.args("ç.html", "http://a/à.html"), "http://a/ç.html");
+    query(func.args("%C3%A0.html", "http://a/%C3%A7.html"), "http://a/%C3%A0.html");
+    query(func.args("this doc.html", "http://a/that doc.html"), "http://a/this doc.html");
+    query(func.args("a^b", "http://a/b/"), "http://a/b/a^b");
+    query(func.args("a{b}c", "http://a/b/"), "http://a/b/a{b}c");
+    query(func.args("a|b", "http://a/b/"), "http://a/b/a|b");
+    query(func.args("a\\b", "http://a/b/"), "http://a/b/a\\b");
+    query(func.args("g", "http://a/b^c/"), "http://a/b^c/g");
+
+    // fragment identifiers in the base URI are ignored
+    query(func.args("b.html", "http://a/c.html#s"), "http://a/b.html");
+    query(func.args("", "http://a/c.html#s"), "http://a/c.html");
+    query(func.args("#t", "http://a/c.html#s"), "http://a/c.html#t");
+
+    // empty sequences, static base URI
+    query(func.args(" ()", base), "");
+    query(func.args(" ()", " ()"), "");
+    query(func.args("g:h", " ()"), "g:h");
+    query(func.args("a.html") + " => ends-with('/a.html')", true);
+    query(func.args("a.html", " ()") + " => ends-with('/a.html')", true);
+    query(func.args("g:h") + " instance of xs:anyURI", true);
+
+    // invalid URI reference
+    error(func.args(":", base), URIARG_X);
+    // relative base URI (includes database paths, see GH-1172)
+    error(func.args("a.html", "b.html"), URIARG_X);
+    error(func.args("a.xml", "/db/path/b.xml"), URIARG_X);
+    // non-hierarchical base URI
+    error(func.args("a.html", "urn:doi:234567"), URIARG_X);
+  }
+
+  /** Tests the rewritings of arguments that only reorder or deduplicate their own input. */
+  @Test public void reorderedInput() {
+    final String seq = " (1 to 6)[. > " + wrap(3) + ']';
+    check(MIN.args(REVERSE.args(seq)), 4, empty(REVERSE));
+    check(MAX.args(REVERSE.args(seq)), 6, empty(REVERSE));
+    check(SUM.args(REVERSE.args(seq)), 15, empty(REVERSE));
+    check(AVG.args(REVERSE.args(seq)), 5, empty(REVERSE));
+
+    check(MIN.args(SORT.args(seq)), 4, empty(SORT));
+    check(SUM.args(SORT.args(seq)), 15, empty(SORT));
+    check(SUM.args(SORT_BY.args(seq, " { 'key': data#1 }")), 15, empty(SORT_BY));
+    check(SUM.args(SORT_WITH.args(seq, " fn($a, $b) { $a - $b }")), 15, empty(SORT_WITH));
+    // the zero argument of fn:sum is preserved
+    check(SUM.args(REVERSE.args(" (1 to 6)[. > " + wrap(6) + ']'), "x"), "x", empty(REVERSE));
+
+    // duplicates are irrelevant for fn:min, fn:max and general comparisons
+    final String dupl = " (1, 1, 2)[. > " + wrap(0) + ']';
+    check(MIN.args(DISTINCT_VALUES.args(dupl)), 1, empty(DISTINCT_VALUES));
+    check(MAX.args(DISTINCT_VALUES.args(dupl)), 2, empty(DISTINCT_VALUES));
+    check(wrap(2) + " = " + DISTINCT_VALUES.args(dupl), true, empty(DISTINCT_VALUES));
+    check(DISTINCT_VALUES.args(DISTINCT_VALUES.args(dupl)), "1\n2",
+        "count(//FnDistinctValues) = 1");
+
+    // duplicates are relevant for fn:sum and fn:all-different
+    check(SUM.args(DISTINCT_VALUES.args(dupl)), 3, exists(DISTINCT_VALUES));
+    check(ALL_DIFFERENT.args(REPLICATE.args(dupl, 2)), false, exists(REPLICATE));
+    // a collation argument is preserved
+    check(MIN.args(DISTINCT_VALUES.args(dupl,
+        "http://www.w3.org/2005/xpath-functions/collation/codepoint")), 1,
+        exists(DISTINCT_VALUES));
+  }
+
+  /** Test method. */
+  @Test public void reverse() {
+    final Function func = REVERSE;
+    query(func.args(" ()"), "");
+    query(func.args(" 1"), 1);
+    query(func.args(" 1 to 3"), "3\n2\n1");
+    query(func.args(" (<a/>, <b/>)"), "<b/>\n<a/>");
+    query(func.args(wrap(1) + "[. = 1]"), 1);
+    query(func.args(" (1, 2)[. != 2]"), 1);
+    query(func.args(" tokenize(<a/>)"), "");
+    query(func.args(" tokenize(<a>1</a>)"), 1);
+    query(func.args(" tokenize(<a>1 2</a>)"), "2\n1");
+    query(func.args(" (1 to 2) ! 1"), "1\n1");
+    query(func.args(" (1 to 2) ! (1, 2)"), "2\n1\n2\n1");
+
+    check(func.args(" tail((<a/>, <b/>, <c/>))"),
+        "<c/>\n<b/>", empty(TRUNK));
+    check(func.args(" (<a/>, <b/>, <c/>)[position() < last()]"),
+        "<b/>\n<a/>", empty(TAIL));
+    check(func.args(" tail(" + func.args(" (1 to " + wrap(2) + ")[. > 0]") + ")"),
+        1, exists(TRUNK));
+    check(func.args(" (" + func.args(" (1 to " + wrap(2) + ")[. > 0]") + ")[position() < last()]"),
+        2, exists(TAIL));
+    check(func.args(REPLICATE.args(" <a/>", 2)),
+        "<a/>\n<a/>", empty(func));
+    check(func.args(REPLICATE.args(" (<a/>, <b/>)", 2)),
+        null, exists(func));
+    check(func.args(" (1, <a/>[. = ''])"),
+        "<a/>\n1", root(List.class));
+
+    check(func.args(" (<_/>, ('a', 'b'))"),
+        "b\na\n<_/>", empty(func));
+    check("(<a/>, <b/>)[. = ''] =>" + func.args() + " =>" + func.args(),
+        "<a/>\n<b/>", empty(func));
+
+    check(func.args(" (1 to 6, (7 to " + wrap(13) + ")[. > 12], (14 to " + wrap(20) + ")[. > 18])"),
+        "20\n19\n13\n6\n5\n4\n3\n2\n1", count(REVERSE, 2));
+  }
+
+  /** Test method. */
+  @Test public void scan() {
+    final Function func = SCAN;
+
+    query(func.args(" ()", 0, " op('+')"), "[0]");
+    query(func.args(" 1 to 5", 0, " op('+')"), "[0]\n[1]\n[3]\n[6]\n[10]\n[15]");
+    query(func.args(" 1 to 3", " ()", " fn($acc, $item) { $item, $acc }"),
+        "[()]\n[1]\n[(2,1)]\n[(3,2,1)]");
+    query(func.args(" ('a', 'b', 'c')", " ()", " fn($acc, $item, $pos) { $acc, $pos }"),
+        "[()]\n[1]\n[(1,2)]\n[(1,2,3)]");
+
+    // examples of the specification
+    query("tail(" + func.args(" (150, -60, -40, 300, -25)", 0, " op('+')") + ") ! ?*",
+        "150\n90\n50\n350\n325");
+    query("tail(" + func.args(" ('usr', 'local', 'bin')", "",
+        " fn($path, $step) { $path || '/' || $step }") + ") ! ?*",
+        "/usr\n/usr/local\n/usr/local/bin");
+    query("take-while(" + func.args(" (3, 4, 5, 2)", 0, " op('+')") +
+        ", fn($total) { $total?* le 7 })", "[0]\n[3]\n[7]");
+
+    // results are computed lazily
+    query("head(" + func.args(" 1 to 1_000_000_000", 0, " op('+')") + ")", "[0]");
+    query("subsequence(" + func.args(" 1 to 1_000_000_000", 0, " op('+')") + ", 3, 2)", "[3]\n[6]");
+
+    check(func.args(" ()", " (1, 2)", " op('+')"), "[(1,2)]", empty(func));
+    check(func.args(" (1 to 5)[. > 4]", 0, " op('+')"), "[0]\n[5]",
+        type(func, "array(xs:anyAtomicType?)+"));
+
+    error(func.args(" 1 to 5", 0, " fn($acc, $item, $pos, $x) { $acc }"), INVARITY_X_X);
+    error(func.args(" 1 to 5", "a", " fn($acc as xs:integer, $item) { $acc + $item }"),
+        INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void schemaType() {
+    final Function func = SCHEMA_TYPE;
+
+    query(" declare type t as xs:integer; " + func.args(" #t"), "");
+    query(func.args(" #fn:schema-type-record"), "");
+    query(func.args(" #xs:integer") + " ? name", "#xs:integer");
+    query(func.args(" #xs:long") + " ? primitive-type() ? name", "#xs:decimal");
+    query(func.args(" #xs:positiveInteger") + " ? base-type() ? name", "#xs:nonNegativeInteger");
+    query(func.args(" #xs:integer") + " ? matches(23)", true);
+    query(func.args(" #xs:numeric") + " ? variety", "union");
+    query(func.args(" #xs:numeric") + " ? members() ? name", "#xs:double\n#xs:float\n#xs:decimal");
+  }
+
+  /** Test method. */
+  @Test public void serialize() {
+    final Function func = SERIALIZE;
+    contains(func.args(" <x/>"), "<x/>");
+    contains(func.args(" <x/>", " {}"), "<x/>");
+    contains(func.args(" <x>a</x>", " { 'method': 'text' }"), "a");
+
+    // control characters: rejected by XML 1.0 and HTML below 5.0, escaped in JSON
+    final String ctrl = " <x>{ codepoints-to-string(1) }</x>";
+    error(func.args(ctrl), SERCHAR_X);
+    error(func.args(ctrl, " { 'method': 'xhtml' }"), SERCHAR_X);
+    query(func.args(ctrl, " { 'method': 'xhtml', 'version': '1.1' }"), "<x>&#x1;</x>");
+    error(func.args(ctrl, " { 'method': 'html', 'html-version': 4.01 }"), SERILL_X);
+    query(func.args(ctrl, " { 'version': '1.1' }"), "<x>&#x1;</x>");
+    query(func.args(ctrl, " { 'method': 'html', 'html-version': 5.0 }"), "<x>&#x1;</x>");
+    query("string-to-codepoints(" + func.args(ctrl, " { 'method': 'text' }") + ')', 1);
+    query(func.args(" [ codepoints-to-string(1) ]", " { 'method': 'json' }"), "[\"\\u0001\"]");
+    query(func.args(" [ codepoints-to-string(31) ]", " { 'method': 'json' }"), "[\"\\u001F\"]");
+
+    // character maps
+    query(func.args("1;2", " { 'use-character-maps': { ';': ',' } }"), "1,2");
+    error(func.args("1;2", " { 'use-character-maps': ';=,,' }"), INVALIDOPTION_X_X_X_X);
+    // delimiters and whitespace can be mapped
+    query(func.args("1=2", " { 'use-character-maps': { '=': 'EQ' } }"), "1EQ2");
+    query(func.args("1,2", " { 'use-character-maps': { '1': 'x', ',': 'CM' } }"), "xCM2");
+    query(func.args("1 2", " { 'use-character-maps': { ' ': 'SP' } }"), "1SP2");
+    query(func.args("1%2", " { 'use-character-maps': { '%': 'PC' } }"), "1PC2");
+    query(func.args("1", " { 'use-character-maps': { '1': 'a,b=c' } }"), "a,b=c");
+    error(func.args("1", " { 'use-character-maps': { 'ab': 'x' } }"), SERPARAM_X);
+
+    // CSV output method: maps, arrays and nodes are serialized as CSV
+    query(func.args(" parse-csv('a,b')", " { 'method': 'csv' }"), "a,b\n");
+    query(func.args(" csv-to-arrays('a,b' || char('\\n') || 'c,d')", " { 'method': 'csv' }"),
+        "a,b\nc,d\n");
+    query(func.args(" <csv><record><A>1</A></record></csv>", " { 'method': 'csv' }"), "1\n");
+    // CSV output method: flat parameters
+    query(func.args(" parse-csv('a,b')", " { 'method': 'csv', 'csv-separator': ';' }"), "a;b\n");
+    query(func.args(" { 'rows': [ 'a;b' ] }", " { 'method': 'csv', 'csv-separator': ';' }"),
+        "\"a;b\"\n");
+    query(func.args(" { 'rows': [ 'a|b' ] }", " { 'method': 'csv', 'csv-quote-character': '|' }"),
+        "|a||b|\n");
+    query(func.args(" parse-csv('a,b' || char('\\n') || '1,2', { 'header': true() })",
+        " { 'method': 'csv', 'csv-header': true() }"), "a,b\n1,2\n");
+    // CSV output method: flat parameters override format-specific options
+    query(func.args(" parse-csv('a,b')",
+        " { 'method': 'csv', 'csv': { 'separator': ';' }, 'csv-separator': '|' }"), "a|b\n");
+    // CSV output method: quoting
+    query(func.args(" { 'rows': [ 'a' || char('\\t') || 'b', 'c' ] }", " { 'method': 'csv' }"),
+        "a\tb,c\n");
+    query(func.args(" { 'rows': [ 'a' || char('\\r') || 'b' ] }", " { 'method': 'csv' }"),
+        "\"a\nb\"\n");
+    // CSV output method: mapped characters are normalized and quoted
+    query(func.args(" { 'rows': [ 'a;b' ] }",
+        " { 'method': 'csv', 'use-character-maps': { ';': ',' } }"), "\"a,b\"\n");
+    query(func.args(" { 'rows': [ 'x' ] }",
+        " { 'method': 'csv', 'use-character-maps': { 'x': '\"' } }"), "\"\"\"\"\n");
+    // CSV output method: members are coerced to atomic items and cast to strings
+    query(func.args(" [ <x>1</x>, 2, xs:date('2026-09-22'), [ 'a' ] ]", " { 'method': 'csv' }"),
+        "1,2,2026-09-22,a\n");
+    // CSV output method: absent entries are empty, other entries are ignored
+    query(func.args(" { 'no-rows': 1 }", " { 'method': 'csv' }"), "");
+    query(func.args(" { 'rows': [ 'a' ] }", " { 'method': 'csv', 'csv-header': true() }"),
+        "a\n");
+    // CSV output method: invalid structures
+    error(func.args(" (parse-csv('a'), parse-csv('b'))", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args(" (csv-to-arrays('a'), parse-csv('b'))", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args(" [ (1, 2) ]", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args(" [ () ]", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args(" [ {} ]", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args(" { 'rows': 1 }", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args(" { 'columns': 1, 'rows': [ 'a' ] }", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args(" true#0", " { 'method': 'csv' }"), SERCSV_X_X);
+    error(func.args("x", " { 'method': 'csv' }"), SERCSV_X);
+    // CSV output method: invalid flat parameters
+    error(func.args(" parse-csv('a,b')", " { 'method': 'csv', 'csv-separator': 'XX' }"),
+        SERPARAM_X);
+    error(func.args(" parse-csv('a,b')", " { 'method': 'csv', 'csv-separator': char('\\n') }"),
+        SERPARAM_X);
+    error(func.args(" parse-csv('a,b')", " { 'method': 'csv', 'csv-separator': char('\\r') }"),
+        SERPARAM_X);
+    error(func.args(" parse-csv('a,b')",
+        " { 'method': 'csv', 'csv-quote-character': char('\\r') }"), SERPARAM_X);
+    error(func.args(" parse-csv('a,b')", " { 'method': 'csv', 'csv-separator': '\"' }"),
+        SERPARAM_X);
+
+    // boolean arguments
+    query(func.args("1", " { 'indent': false() }"), 1);
+    query(func.args("1", " { 'indent': true() }"), 1);
+    query(func.args("1", " { 'indent': xs:untypedAtomic('true') }"), 1);
+    query(func.args("1", " { 'indent': () }"), 1);
+    error(func.args("1", " { 'indent': 'yes' }"), INVALIDOPTION_X_X_X_X);
+    error(func.args("1", " { 'indent': 1 }"), INVALIDOPTION_X_X_X_X);
+
+    query(func.args("<html/>", " { 'html-version': 5 }"), "&lt;html/&gt;");
+    query(func.args("<html/>", " { 'html-version': 5.0 }"), "&lt;html/&gt;");
+    query(func.args("<html/>", " { 'html-version': 5.0000 }"), "&lt;html/&gt;");
+    error(func.args("<html/>", " { 'html-version': '5.0' }"), INVALIDOPTION_X_X_X_X);
+
+    // QName arguments
+    query(func.args(" <a>1</a>", " { 'cdata-section-elements': xs:QName('a') }"),
+        "<a><![CDATA[1]]></a>");
+    error(func.args(" <a>1</a>", " { 'cdata-section-elements': 'a' }"), INVALIDOPTION_X_X_X_X);
+
+    // option names: implementation-defined parameters must have a namespace
+    query(func.args("1", " { QName('http://vendor.example.com/', 'xindent'): true() }"), 1);
+    error(func.args("1", " { QName('', 'indent'): true() }"), INVALIDOPTION_X);
+
+    query("declare namespace p = 'Q';\n"
+        + "declare option output:method 'text';\n"
+        + "<x xmlns:p='P'>{\n"
+        + "  let $params :=\n"
+        + "    <output:serialization-parameters>\n"
+        + "      <output:method value='xml'/>\n"
+        + "      <output:indent value='yes'/>\n"
+        + "      <output:cdata-section-elements value='p:y z'/>\n"
+        + "    </output:serialization-parameters>\n"
+        + "  return " + func.args(" <x><p:y>abc</p:y><z>def</z></x>", " $params") + "\n"
+        + "}</x>",
+          "<x>\n"
+        + "  <p:y xmlns:p=\"P\"><![CDATA[abc]]></p:y>\n"
+        + "  <z><![CDATA[def]]></z>\n"
+        + "</x>");
+
+    final String canonicalXml = " { 'method': 'xml', 'canonical': true() }";
+    query(func.args(" <a xmlns:p='urn:test:x' p:z='1' a='2'/>", canonicalXml),
+        "<a xmlns:p=\"urn:test:x\" a=\"2\" p:z=\"1\"></a>");
+    query(func.args(" parse-xml(`<q:a xmlns:p='urn:test:x' xmlns:q='urn:test:y' p:z='1' a='2'/>`)",
+        canonicalXml),
+        "<q:a xmlns:p=\"urn:test:x\" xmlns:q=\"urn:test:y\" a=\"2\" p:z=\"1\"></q:a>");
+
+    final String canonicalJson = " {'method': 'json', 'canonical': true()}";
+    query(func.args(" [0x7fff_ffff_ffff_ffff]", canonicalJson), "[9223372036854776000]");
+    query(func.args(" [xs:double('-0')]", " {'method': 'json'}"), "[-0]");
+    query(func.args(" [xs:double('-0')]", canonicalJson), "[0]");
+
+    // The tests below were adapted from Apache 2.0–licensed code from project
+    // erdtman/java-json-canonicalization at https://github.com/erdtman/java-json-canonicalization
+
+    // arrays
+    query(func.args(" parse-json('[\n  56,\n  {\n    \"d\": true,\n    \"10\": null,\n    \"1\": [ "
+        + "]\n  }\n]')", canonicalJson),
+        "[56,{\"1\":[],\"10\":null,\"d\":true}]");
+    // french
+    query(func.args(" parse-json('{\n  \"peach\": \"This sorting order\",\n  \"p\u00E9ch\u00E9\": "
+        + "\"is wrong according to French\",\n  \"p\u00EAche\": \"but canonicalization MUST\",\n  "
+        + "\"sin\":   \"ignore locale\"\n}')", canonicalJson),
+        "{\"peach\":\"This sorting order\",\"p\u00E9ch\u00E9\":\"is wrong according to French\",\""
+        + "p\u00EAche\":\"but canonicalization MUST\",\"sin\":\"ignore locale\"}");
+    // structures
+    query(func.args(" parse-json('{\n  \"1\": {\"f\": {\"f\": \"hi\",\"F\": 5} ,\"\\n\": 56.0},\n  "
+        + "\"10\": { },\n  \"\": \"empty\",\n  \"a\": { },\n  \"111\": [ {\"e\": \"yes\",\"E\": \"n"
+        + "o\" } ],\n  \"A\": {\"b\": \"123\"}\n}')", canonicalJson),
+        "{\"\":\"empty\",\"1\":{\"\\n\":56,\"f\":{\"F\":5,\"f\":\"hi\"}},\"10\":{},\"111\":[{\"E\":"
+        + "\"no\",\"e\":\"yes\"}],\"A\":{\"b\":\"123\"},\"a\":{}}");
+    // values
+    query(func.args(" parse-json('{\n  \"numbers\": [333333333.33333329, 1E30, 4.50, 2e-3, 0.000000"
+        + "000000000000000000001],\n  \"string\": \"\\u20ac$\\u000D\\u000aA''\\u0042\\u0022\\u005c"
+        + "\\\\\\\"\\/\",\n  \"literals\": [null, true, false]\n}')", canonicalJson),
+        "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"st"
+        + "ring\":\"\u20AC$\\r\\nA'B\\\"\\\\\\\\\\\"/\"}");
+    // weird
+    query(func.args(" parse-json('{\r\n  \"\u20AC\": \"Euro Sign\",\r\n  \"1\": \"One\",\r\n  \"\\u"
+        + "0080\": \"Control\",\r\n  \"\\ud83d\\ude02\": \"Smiley\",\r\n  \"\u00F6\": \"Latin Small"
+        + " Letter O With Diaeresis\",\r\n  \"\uFB33\": \"Hebrew Letter Dalet With Dagesh\",\r\n  "
+        + "\"</script>\": \"Browser Challenge\"\r\n}')", canonicalJson),
+        "{\"1\":\"One\",\"</script>\":\"Browser Challenge\",\"\u0080\":\"Control\",\"\u00F6\":\"Lat"
+        + "in Small Letter O With Diaeresis\",\"\u20AC\":\"Euro Sign\",\"\uD83D\uDE02\":\"Smiley\","
+        + "\"\uFB33\":\"Hebrew Letter Dalet With Dagesh\"}");
+  }
+
+  /** Test method. */
+  @Test public void slice() {
+    final Function func = SLICE;
+
+    String in = "() =>";
+    check(in + func.args(+0), "", empty());
+    check(in + func.args(+1, +2, +3), "", empty());
+    check(in + func.args(-1, -2, -3), "", empty());
+    check(in + func.args(+0, +0, +0), "", empty());
+
+    in = "'a' =>";
+    check(in + func.args(0), "a", root(Str.class));
+    check(in + func.args(0, 0), "a", root(Str.class));
+    check(in + func.args(0, 0, 0), "a", root(Str.class));
+
+    in = "('a', 'b', 'c', 'd', 'e', 'f', 'g') =>";
+    query(in + func.args(+2, +4), "b\nc\nd");
+    query(in + func.args(+2, +4), "b\nc\nd");
+    query(in + func.args(+2), "b\nc\nd\ne\nf\ng");
+    query(in + func.args(" ()", +2), "a\nb");
+    query(in + func.args(+3, +3), "c");
+    query(in + func.args(+4, +3), "d\nc");
+    query(in + func.args(+2, +5, +2), "b\nd");
+    query(in + func.args(+5, +2, -2), "e\nc");
+    check(in + func.args(+2, +5, -2), "", empty());
+    check(in + func.args(+5, +2, +2), "", empty());
+    query(in + func.args(), "a\nb\nc\nd\ne\nf\ng");
+    query(in + func.args(-1), "g");
+    query(in + func.args(-3), "e\nf\ng");
+    query(in + func.args(" ()", -2), "a\nb\nc\nd\ne\nf");
+    query(in + func.args(+2, -2), "b\nc\nd\ne\nf");
+    query(in + func.args(-2, +2), "f\ne\nd\nc\nb");
+    query(in + func.args(-4, -2), "d\ne\nf");
+    query(in + func.args(-2, -4), "f\ne\nd");
+    query(in + func.args(-4, -2, +2), "d\nf");
+    query(in + func.args(-2, -4, -2), "f\nd");
+    // negative step with omitted bounds reverses the sequence
+    query(in + func.args(+0, +0, -1), "g\nf\ne\nd\nc\nb\na");
+    query(in + func.args(+3, +0, -1), "c\nb\na");
+    query(in + func.args(+0, +3, -1), "g\nf\ne\nd\nc");
+
+    in = "('a', 'b', 'c', 'd', 'e', 'f', 'g')[. < 'c'] =>";
+    query(in + func.args(+0), "a\nb");
+    query(in + func.args(+1), "a\nb");
+    query(in + func.args(-1), "b");
+    query(in + func.args(+1, +2), "a\nb");
+    query(in + func.args(-1, +2), "b");
+    query(in + func.args(+1, -2), "a");
+    query(in + func.args(-1, -2), "b\na");
+    query(in + func.args(+1, +2, +3), "a");
+    query(in + func.args(+1, +2, -3), "");
+    query(in + func.args(+1, -2, +3), "a");
+    query(in + func.args(+1, -2, -3), "a");
+    query(in + func.args(-1, +2, +3), "b");
+    query(in + func.args(-1, +2, -3), "b");
+    query(in + func.args(-1, -2, +3), "");
+    query(in + func.args(-1, -2, -3), "b");
+
+    in = "('a', 'b', 'c', 'd', 'e', 'f', 'g')[. < 'b'] =>";
+    query(in + func.args(+0), "a");
+    query(in + func.args(+1), "a");
+    query(in + func.args(-1), "a");
+    query(in + func.args(+1, +2), "a");
+    query(in + func.args(-1, +2), "a");
+    query(in + func.args(+1, -2), "a");
+    query(in + func.args(-1, -2), "a");
+    query(in + func.args(+1, +2, +3), "a");
+    query(in + func.args(+1, +2, -3), "");
+    query(in + func.args(+1, -2, +3), "");
+    query(in + func.args(+1, -2, -3), "a");
+    query(in + func.args(-1, +2, +3), "a");
+    query(in + func.args(-1, +2, -3), "");
+    query(in + func.args(-1, -2, +3), "");
+    query(in + func.args(-1, -2, -3), "a");
+
+    in = "(1 to 1000) =>";
+    query(in + func.args(-1001) + " => count()", 1000);
+    query(in + func.args(-1000) + " => count()", 1000);
+    query(in + func.args(-999) + " => count()", 999);
+    query(in + func.args(-2) + " => count()", 2);
+    query(in + func.args(-1) + " => count()", 1);
+    query(in + func.args(0) + " => count()", 1000);
+    query(in + func.args(1) + " => count()", 1000);
+    query(in + func.args(2) + " => count()", 999);
+    query(in + func.args(999) + " => count()", 2);
+    query(in + func.args(1000) + " => count()", 1);
+    query(in + func.args(1001) + " => count()", 1);
+
+    query(in + func.args(wrap(1000)), 1000);
+    query(in + func.args(1000, wrap(1000)), 1000);
+    query(in + func.args(1000, 1000, wrap(1)), 1000);
+
+    check(func.args(" (" + wrap("1") + " + 1, 3)", 1, 2), "2\n3", root(List.class));
+    check(func.args(" (" + wrap("1") + " + 1, 3)", 1, 2), "2\n3", root(List.class));
+    check(func.args(" replicate(" + wrap("1") + " + 1, 3)", 2), "2\n2", root(REPLICATE));
+
+    check(func.args(" doc('" + DOC + "')//*", 1) + " => void()",
+        "", empty(func));
+    check(func.args(" doc('" + DOC + "')//*", 2) + " => void()",
+        "", empty(func), exists(TAIL));
+    check(func.args(" doc('" + DOC + "')//*", 9) + " => void()",
+        "", empty(func), exists(_UTIL_RANGE));
+    check(func.args(" doc('" + DOC + "')//*", 10) + " => void()",
+        "", empty(func), exists(FOOT));
+    check(func.args(" doc('" + DOC + "')//*", 11) + " => void()",
+        "", empty(func), exists(FOOT));
+    check(func.args(" doc('" + DOC + "')//*", 10, 9) + " => void()",
+        "", empty(func), exists(_UTIL_RANGE));
+  }
+
+  /** Test method. */
+  @Test public void some() {
+    final Function func = SOME;
+
+    query(func.args(" (1 to 10) ! boolean(.)"), true);
+    query(func.args(" reverse(1 to 10) ! boolean(.)"), true);
+    query(func.args(" reverse(0 to 9) ! boolean(.)"), true);
+
+    query(func.args(" ()", " boolean#1"), false);
+    query(func.args(1, " boolean#1"), true);
+    query(func.args(" 0 to 1", " boolean#1"), true);
+    query(func.args(" (1, 3, 7)", " function($n) { $n mod 2 = 1 }"), true);
+    query(func.args(" -5 to 5", " function($n) { $n ge 0 }"), true);
+    query(func.args(" ('January', 'February', 'March', 'April', 'September', 'October',"
+        + "'November', 'December')", " contains(?, 'r')"), true);
+    query(func.args(" ('January', 'February', 'March', 'April', 'September', 'October',"
+        + "'November', 'December')", " contains(?, 'z')"), false);
+    check(func.args(" -3 to 3", " function($n) { abs($n) >= 0 }"), true,
+        exists(CmpG.class), empty(EVERY));
+
+    query(func.args(1, " op('=')"), true);
+    query(func.args(2, " op('=')"), false);
+    query(func.args(" 1 to 6", " op('=')"), true);
+    query(func.args(" 2 to 7", " op('=')"), false);
+    query(func.args(" reverse(1 to 9)", " op('=')"), true);
+
+    // an empty predicate result is treated as false (no match)
+    query(func.args(" (1, 2)", " fn($x, $p) { if($x eq 2) then true() else () }"), true);
+    query(func.args(" (1, 2)", " fn($x, $p) { () }"), false);
+
+    final String lookup = "function-lookup(xs:QName(<?_ fn:some?>), 2)";
+    query(lookup + "(1 to 9, boolean#1)", true);
+    query(lookup + "(1 to 9, not#1)", false);
+    query(lookup + "(0 to 9, boolean#1)", true);
+    query(lookup + "(0 to 9, not#1)", true);
+  }
+
+  /** Test method. */
+  @Test public void sort() {
+    final Function func = SORT;
+    query(func.args(" ('b', 'a')", "http://www.w3.org/2005/xpath-functions/collation/codepoint"),
+        "a\nb");
+
+    query(func.args(" (1, 4, 6, 5, 3)"), "1\n3\n4\n5\n6");
+    query(func.args(" (1, -2, 5, 10, -10, 10, 8)", " ()", " abs#1"), "1\n-2\n5\n8\n10\n-10\n10");
+    query(func.args(" ((1, 0), (1, 1), (0, 1), (0, 0))"), "0\n0\n0\n0\n1\n1\n1\n1");
+    query(func.args(" ('9', '8', '29', '310', '75', '85', '36-37', '93', '72', '185', '188', '86', "
+        + "'87', '83', '79', '82', '71', '67', '63', '58', '57', '53', '31', '26', '22', '21', "
+        + "'20', '15', '10')", " ()", " function($s) { number($s) }") + "[1]",
+        "36-37");
+    query(func.args(" (1, 2)", " ()", " function($s) { [$s] }"), "1\n2");
+
+    query("for $i in (10000, 10001) return " + func.args(" 1 to $i") + "[1]", "1\n1");
+    query("for $i in (10000, 10001) return " + func.args(" reverse(1 to $i)") + "[1]", "1\n1");
+    query("for $i in (10000, 10001) return " + func.args(func.args(" reverse(1 to $i)")) + "[1]");
+    query("for $i in (1, 2) return " + func.args(func.args(" (1, $i)")) + "[1]", "1\n1");
+
+    // sort is stable: an inner sort key orders value-equal items and must not be dropped
+    query("sort(sort((1, 1.0)[. ge 0], (), fn($x) { if($x instance of xs:integer) then 2 else 1 }))"
+        + " ! (if(. instance of xs:integer) then 'i' else 'd')", "d\ni");
+
+    check(func.args(" ()"), "", empty());
+    check(func.args(1), 1, empty(func));
+
+    // closure
+    check("for $a in (1 to 2)[. > 0] return " +
+        func.args(" 1 to 6", " ()", " fn($x) { (1 to 100)[$a + $x] }"),
+        "1\n2\n3\n4\n5\n6\n1\n2\n3\n4\n5\n6",
+        exists(ITEMS_AT), empty(HoistedFilter.class), empty(CachedFilter.class));
+
+    check(func.args(" 1 to 100_000_000") + "[1]", 1, empty(func));
+    check(func.args(" reverse(1 to 100_000_000)") + "[1]", 1, empty(func));
+    check(func.args(" (1 to 100_000_000) ! 1") + "[1]", 1, empty(func));
+    check(func.args(" reverse((1 to 100_000_000) ! 1)") + "[1]", 1, empty(func));
+
+    check("(" + _RANDOM_DOUBLE.args() + " =>" + REPLICATE.args(10) + " => " +
+        func.args() + ")[. > 1]", "", empty(func));
+    check("(" + _RANDOM_DOUBLE.args() + " => " + REPLICATE.args(10, true) + " => " +
+        func.args() + ")[. > 1]", "", exists(func));
+
+    query(func.args(" true#0"), "fn:true#0");
+    error(func.args(" (1 to 2) ! true#0"), FIATOMIZE_X);
+  }
+
+  /** Test method. */
+  @Test public void sortBy() {
+    final Function func = SORT_BY;
+    final String input = " ('b', 'a')";
+    query(func.args(input, " ()"), "a\nb");
+    query(func.args(input, " {}"), "a\nb");
+    query(func.args(input, " { 'key': data#1 }"), "a\nb");
+    query(func.args(input, " { 'key': data#1, 'order': 'descending' }"), "b\na");
+    query(func.args(input, " { 'order': 'descending' }"), "b\na");
+  }
+
+  /** Test method. */
+  @Test public void sortWith() {
+    final Function func = SORT_WITH;
+    final String input = " ('b', 'a')";
+    query(func.args(input, " compare#2"), "a\nb");
+    query(func.args(input, " fn($a, $b) { -compare($a, $b) }"), "b\na");
+  }
+
+  /** Test method. */
+  @Test public void staticBaseUri() {
+    final Function func = STATIC_BASE_URI;
+    query("declare base-uri 'a/'; ends-with(" + func.args() + ", '/')", true);
+    query("declare base-uri '.' ; ends-with(" + func.args() + ", '/')", true);
+    query("declare base-uri '..'; ends-with(" + func.args() + ", '/')", true);
+  }
+
+  /** Test method. */
+  @Test public void string() {
+    final Function func = STRING;
+
+    query(func.args(" ()"), "");
+    query(func.args("A"), "A");
+    query(func.args(wrap("A")), "A");
+    query("(" + wrap("A") + ", 1, 'X') ! " + func.args(), "A\n1\nX");
+    query(func.args(" xs:float('-0')"), "-0");
+    query(func.args(" xs:double('-0')"), "-0");
+
+    check("for $s in ('a', 'b') return " + func.args(" $s"), "a\nb", empty(func));
+    check("for $s in (<a/>, <b/>) return " + func.args(" $s"), "\n", exists(func));
+    check("for $s in ('a', 'b') return $s[" + func.args() + ']', "a\nb", empty(func));
+    check("for $s in ('a', 'b') return $s[" + func.args() + " = 'a']", "a", empty(func));
+    check("for $s in (<a/>, <b/>) return $s[" + func.args() + ']', "", empty(func));
+
+    check(func.args(" 'x' || " + wrap("x")), "xx", empty(func));
+    check("('x' || " + wrap("x") + ") => " + func.args(), "xx", empty(func));
+    check("exists((1 to 10)[" + func.args() + "])", true, root(Bln.class));
+    check("exists((1 to 10)[" + func.args(" .") + "])", true, root(Bln.class));
+    check("<a>x</a>[" + func.args() + " = 'x']", "<a>x</a>", empty(func));
+    check("<a>x</a>[" + func.args(" .") + " = 'x']", "<a>x</a>", empty(func));
+    check("(1 to 6) ! (. || 'x')[" + func.args() + " = 'x']", "", empty(func));
+    check("(1 to 6) ! (. || 'x')[" + func.args(" .") + " = 'x']", "", empty(func));
+
+    error(func.args(), NOCTX_X);
+    error(func.args(" true#0"), FISTRING_X);
+    error("true#0 ! " + func.args(), FISTRING_X);
+  }
+
+  /** Test method. */
+  @Test public void stringJoin() {
+    final Function func = STRING_JOIN;
+    check(func.args(CHARACTERS.args(wrap("ABC"))), "ABC", root(STRING));
+    check(func.args(" string-to-codepoints(" + wrap("ABC") + ") ! codepoints-to-string(.)"),
+        "ABC", root(STRING));
+
+    query(func.args(" ()", ""), "");
+    query(func.args(" ()", "x"), "");
+    query(func.args("", "x"), "");
+    query(func.args(" (1 to 10_000_000) ! ''"), "");
+
+    query(func.args("x", ""), "x");
+    query(func.args("x", "x"), "x");
+    query(func.args(" ('', '')", "x"), "x");
+    query(func.args(" ('x', '')", ""), "x");
+    query(func.args(" ('', 'x')", ""), "x");
+    query(func.args(" ('', 'x')", "x"), "xx");
+    query(func.args(" 1 to 6"), "123456");
+    query(func.args(" (1 to 6) ! 'x'"), "xxxxxx");
+
+    // GH-2326
+    query(func.args(" ()", "") + " => boolean()", false);
+    query(func.args(" ()", "x") + " => boolean()", false);
+    query(func.args("", "x") + " => boolean()", false);
+    query(func.args(" (1 to 10_000_000) ! ''") + " => boolean()", false);
+
+    query(func.args("x", "") + " => boolean()", true);
+    query(func.args("x", "x") + " => boolean()", true);
+    query(func.args(" ('', '')", "x") + " => boolean()", true);
+    query(func.args(" ('x', '')", "") + " => boolean()", true);
+    query(func.args(" ('', 'x')", "") + " => boolean()", true);
+    query(func.args(" ('', 'x')", "x") + " => boolean()", true);
+    query(func.args(" 1 to 10_000_000") + " => boolean()", true);
+    query(func.args(" (1 to 10_000_000) ! 'x'") + " => boolean()", true);
+  }
+
+  /** Test method. */
+  @Test public void stringLength() {
+    final Function func = STRING_LENGTH;
+    query(func.args(" ()"), 0);
+    query(func.args("A"), 1);
+    query(func.args(111), 3);
+    query(func.args(" ([ (), 'a' ])"), 1);
+
+    query("<_>A</_>[" + func.args() + ']', "<_>A</_>");
+    query("<_>A</_>[" + func.args(" .") + ']', "<_>A</_>");
+
+    check("(1 to 6) ! string() ! " + func.args(), "1\n1\n1\n1\n1\n1", empty(STRING));
+    check("(1 to 6) ! string(.) ! " + func.args(), "1\n1\n1\n1\n1\n1", empty(STRING));
+
+    check("boolean(" + func.args(wrap("123")) + ")", true, empty(func));
+    check(func.args(" string-join((" + wrap("A") + "," + wrap("B") + "))"), 2, empty(STRING_JOIN));
+    check(func.args(" (" + wrap("A") + " || " + wrap("B") + ")"), 2, empty(CONCAT));
+
+    // comparisons with a constant: predicate is always true or always false
+    check("<a/>[" + func.args() + " >  -1]", "<a/>", empty(IterFilter.class));
+    check("<a/>[" + func.args() + " != -1]", "<a/>", empty(IterFilter.class));
+    check("<a/>[" + func.args() + " ge  0]", "<a/>", empty(IterFilter.class));
+    check("<a/>[" + func.args() + " ne 1.1]", "<a/>", empty(IterFilter.class));
+
+    check("<a/>[" + func.args() + " <   0]", "", empty(IterFilter.class));
+    check("<a/>[" + func.args() + " <= -1]", "", empty(IterFilter.class));
+    check("<a/>[" + func.args() + " eq -1]", "", empty(IterFilter.class));
+    check("<a/>[" + func.args() + " eq 1.1]", "", empty(IterFilter.class));
+
+    // comparisons with zero: rewritten to an existence check
+    check("<a/>[" + func.args() + " >  0]", "", exists(SingleIterPath.class));
+    check("<a/>[" + func.args() + " >= 0.5]", "", exists(SingleIterPath.class));
+    check("<a/>[" + func.args() + " ne 0]", "", exists(SingleIterPath.class));
+
+    check("<a/>[" + func.args() + " <  0.5]", "<a/>", exists(SingleIterPath.class));
+    check("<a/>[" + func.args() + " <= 0.5]", "<a/>", exists(SingleIterPath.class));
+    check("<a/>[" + func.args() + " eq 0]", "<a/>", exists(SingleIterPath.class));
+
+    // no rewritings
+    check("<a/>[" + func.args() + " gt 1]", "", exists(func));
+    check("<a/>[" + func.args() + " = <a>1</a>]", "", exists(func));
+
+    error("true#0[" + func.args() + ']', FIATOMIZE_X);
+  }
+
+  /** Test method. */
+  @Test public void stringToCodepoints() {
+    final Function func = STRING_TO_CODEPOINTS;
+    query(func.args("ab"), "97\n98");
+    query(func.args(wrap("ab")), "97\n98");
+
+    query("subsequence(" + func.args(wrap("aaa")) + ", 3)", 97);
+    query("subsequence(" + func.args(wrap("äaaa")) + ", 3)", "97\n97");
+
+    check(func.args(wrap("ab")) + " = 98", true, root(CONTAINS));
+    check(func.args(wrap("ab")) + " = 0xD800", false, exists(func));
+  }
+
+  /** Test method. */
+  @Test public void subsequence() {
+    final Function func = SUBSEQUENCE;
+
+    // merge with count() of the same input; the size of the input must not be known statically,
+    // otherwise the length is pre-evaluated and an earlier rewrite applies
+    final String opaque = "let $o := tokenize(" + wrap("a b c d e") + ") return ";
+    check(opaque + '(' + func.args(" $o", 1, " count($o) - 1") + ')', "a\nb\nc\nd",
+        empty(func), exists(TRUNK));
+    check(opaque + '(' + func.args(" $o", 1, " count($o) + 10") + ')', "a\nb\nc\nd\ne",
+        empty(func), empty(TRUNK));
+    check(opaque + '(' + func.args(" $o", 3, " count($o) + 1") + ')', "c\nd\ne", exists(func));
+    check(opaque + '(' + func.args(" $o", " count($o)", 0) + ')', "", empty());
+
+    // static rewrites
+    query(func.args(" ()", 0), "");
+    query(func.args("A", 0), "A");
+    query(func.args("A", 0, 0), "");
+    query(func.args("A", 1), "A");
+    query(func.args("A", 1), "A");
+    query(func.args("A", 1, 1), "A");
+    query(func.args(" (1, 2)", 2, 0), "");
+    query(func.args(" (1, 2)", 2, 1), 2);
+    query(func.args(" (1 to 3)", 2, 2), "2\n3");
+
+    // special offset and length values
+    query(func.args("A", 0.5), "A");
+    query(func.args("A", " xs:double('NaN')"), "");
+    query(func.args("A", 1, " xs:double('NaN')"), "");
+
+    // known result size, iterative evaluation
+    query(func.args(" (1 to 2) ! (. + 1)", 2), 3);
+    query(func.args(" (1 to 3) ! (. + 1)", 2, 1), 3);
+    query(func.args(" (1 to 3) ! (. + 1)", 2), "3\n4");
+    query(func.args(" (1 to 3) ! (. + 1)", 3), 4);
+    query(func.args(" (1 to 3) ! (. + 1)", 4), "");
+
+    // non-numeric offsets and lengths
+    query(func.args(" (1 to 3)", wrap(0)), "1\n2\n3");
+    query(func.args(" (1 to 3)", wrap(0), 10), "1\n2\n3");
+    query(func.args(" (1 to 3)", wrap(0), wrap(10)), "1\n2\n3");
+    query(func.args(" (1 to 3)", 0, wrap(10)), "1\n2\n3");
+    query(func.args(" (1 to 2)", wrap(2)), 2);
+    query(func.args(" (1 to 2)", wrap(2), 1), 2);
+    query(func.args(" (1 to 2)", wrap(2), wrap(1)), 2);
+    query(func.args(" (1 to 2)", 2, wrap(1)), 2);
+
+    // known result size
+    query(func.args(wrap(1) + "+ 1", 1), 2);
+    query(func.args(" (" + wrap(1) + "+ 1, 2)", 2), 2);
+    query(func.args(" (" + wrap(1) + "+ 1, 2)", 3), "");
+    query(func.args(" (" + wrap(1) + "+ 1, 2, 3)", 2) + "[2]", 3);
+    query(func.args(" void(())", 1), "");
+    query(func.args(" void(())", 2), "");
+
+    // unknown result size
+    query(func.args(wrap(1) + "[. = 0]", 1), "");
+    query(func.args(wrap(1) + "[. = 1]", 1), 1);
+    query(func.args(wrap(1) + "[. = 0]", 2), "");
+    query(func.args(wrap(1) + "[. = 1]", 2), "");
+    query(func.args(" (1 to 2)[. = 0]", 1), "");
+    query(func.args(" (1 to 4)[. < 3]", 1), "1\n2");
+    query(func.args(" (1 to 2)[. = 0]", 2), "");
+    query(func.args(" (1 to 2)[. = 0]", 2, 1), "");
+    query(func.args(" (1 to 2)[. = 0]", 2, 2), "");
+    query(func.args(" (1 to 4)[. < 3]", 2), 2);
+
+    // value-based iterator
+    query(func.args(" tokenize(<_></_>)", 3), "");
+    query(func.args(" tokenize(<_>W</_>)", 3), "");
+    query(func.args(" tokenize(<_>W X</_>)", 3), "");
+    query(func.args(" tokenize(<_>W X Y</_>)", 3), "Y");
+    query(func.args(" tokenize(<_>W X Y Z</_>)", 3), "Y\nZ");
+
+    query(func.args(1, wrap("NaN")), "");
+    query(func.args(" (1 to 3)[. != 1]", wrap(2)), 3);
+    query(func.args(" (1 to 4)[. != 1]", wrap(2)), "3\n4");
+    query(func.args(" (1 to 5)[. != 1]", wrap(2), 2), "3\n4");
+    query(func.args(" (1 to 4) ! (.*.)", 3), "9\n16");
+    query(func.args(" reverse((<a/>, <b/>, <c/>, <d/>))", 3), "<b/>\n<a/>");
+    query(func.args(" reverse((<a/>, <b/>, <c/>, <d/>))", wrap(1)),
+        "<d/>\n<c/>\n<b/>\n<a/>");
+    query(func.args(" reverse((<a/>, <b/>, <c/>, <d/>))", wrap(1), 4),
+        "<d/>\n<c/>\n<b/>\n<a/>");
+    query(func.args(" reverse((<a/>, <b/>, <c/>, <d/>))", wrap(2)) + "[2]", "<b/>");
+
+    query("xs:integer(" + func.args(" (1, 2, 3)[. != 0]", 3) + ')', 3);
+    query(func.args(" (1 to 6)[. != 0]", 3) + " instance of xs:integer+", true);
+    query(func.args(" (1 to 6)[. != 0]", 3, 2) + " instance of xs:integer+", true);
+
+    check(func.args(wrap(1) + "[. != 0]", 1, 2), 1, empty(func));
+    check(func.args(wrap(1) + "[. != 0]", 2), "", empty());
+
+    query(func.args(" reverse((<a/>, <b/>, <c/>))", wrap(2)) + "instance of node()+", true);
+    query(func.args(" reverse((<a/>, <b/>, <c/>))", wrap(1) + ", 3") + " instance of node()+",
+        true);
+
+    query(func.args(" <_/>", " xs:double('-INF')", " xs:double('-INF')"), "");
+    query(func.args(" <_/>", " xs:double('-INF')", " xs:double('INF')"), "");
+    query(func.args(" <_/>", " xs:double('INF')", " xs:double('INF')"), "");
+    query(func.args(" <_/>", " xs:double('NaN')"), "");
+    query(func.args(" <_/>", 1, " xs:double('NaN')"), "");
+
+    query(func.args(1, wrap("NaN")) + " instance of xs:integer", false);
+    query(func.args(1, wrap(1)) + " instance of xs:integer", true);
+
+    query(func.args(" <_/>", 1, 1), "<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>, <_/>)", 1, 2), "<_/>\n<_/>");
+
+    query(func.args(" (<_/>, <_/>, <_/>)", 1, 0), "");
+    query(func.args(" (<_/>, <_/>, <_/>)", 1, 1), "<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>)", 1, 2), "<_/>\n<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>)", 1, 3), "<_/>\n<_/>\n<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>)", 2, 1), "<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>)", 2, 2), "<_/>\n<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>)", 3, 1), "<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>)", 3, 2), "<_/>");
+    query(func.args(" (<_/>, <_/>, <_/>)", 4, 0), "");
+    query(func.args(" (<_/>, <_/>, <_/>)", 4, 1), "");
+
+    check(func.args(" (<a/>, <b/>, <c/>, <d/>)", 2, 2), "<b/>\n<c/>",
+        root(List.class));
+    check(func.args(REPLICATE.args(" <a/>", 5), 2, 2), "<a/>\n<a/>",
+        root(REPLICATE));
+    check(func.args(REPLICATE.args(" <a/>", 5), 2, 3), "<a/>\n<a/>\n<a/>",
+        root(REPLICATE));
+
+    query("sort(" + func.args(" tokenize(<_/>)", 3) + ')', "");
+
+    check(func.args(" ('x', (1 to 3)[.])", 2, 2), "1\n2", empty(Str.class), empty(List.class));
+    check(func.args(" ('x', (1 to 3)[.], 4 to 6)", 2, 2), "1\n2", empty(Str.class));
+    check(func.args(" ('x', (1 to 3)[.], 4 to 6)", 2, 4), "1\n2\n3\n4", empty(Str.class));
+
+    // GH-2214
+    query("<x/> ! subsequence((., *), 1)", "<x/>");
+    query("<x/> ! subsequence((., *), 1, 1)", "<x/>");
+    query("<x/> ! subsequence((., *), 1, 2)", "<x/>");
+    query("<x/> ! subsequence((., *), 1, 3)", "<x/>");
+
+    // GH-2315
+    check("(1 to 6) ! " + func.args(" <a/>/*", " .", 1), "", root(_UTIL_RANGE));
+
+    // large offsets and lengths (no integer overflow)
+    query(func.args(" 1 to 2000", 2000, 9223372036854775807L), 2000);
+    query(func.args(" 1 to 5", 2, 9223372036854775807L), "2\n3\n4\n5");
+    query(func.args(" 1 to 5", 3, 2147483648L), "3\n4\n5");
+  }
+
+  /** Test method. */
+  @Test public void subsequenceWhere() {
+    final Function func = SUBSEQUENCE_WHERE;
+
+    check(func.args(" ()", " function($x, $p) { true() }"), "", empty());
+    query(func.args(" 1 to 5", " ()", " ()"), "1\n2\n3\n4\n5");
+    query(func.args(" 1 to 5", " function($x, $p) { $x ge 3 }"), "3\n4\n5");
+    query(func.args(" 1 to 9", " function($x, $p) { $x ge 3 }", " function($x, $p) { $x ge 6 }"),
+        "3\n4\n5\n6");
+    query(func.args(" 1 to 9", " ()", " function($x, $p) { $x ge 3 }"), "1\n2\n3");
+
+    // a 'from' predicate may never match: the result can be empty for a non-empty input
+    check("empty(" + func.args(" (1, (2 to 9)[. > 0])", " function($x, $p) { $x > 100 }") + ")",
+        true, type(func, "xs:integer*"));
+    // a 'to'-only call always starts at the first item, so it preserves one-or-more
+    check(func.args(" (1, (2 to 9)[. > 0])", " ()", " function($x, $p) { $x ge 3 }"),
+        "1\n2\n3", type(func, "xs:integer+"));
+  }
+
+  /** Test method. */
+  @Test public void substring() {
+    final Function func = SUBSTRING;
+    contains(func.args("'ab'", " [2]"), "b");
+    check(func.args(wrap("A"), 1), "A", empty(SUBSTRING), exists(STRING));
+    check(func.args(wrap("A"), 0), "A", empty(SUBSTRING), exists(STRING));
+    check(func.args(wrap("A"), " xs:double('NaN')"), "", root(Str.class));
+    check(func.args(wrap("A"), 1, 0), "", root(Str.class));
+
+    check(func.args(" ()", wrap(1), wrap(1)), "", root(Str.class));
+    check(func.args("", wrap(1), wrap(1)), "", root(Str.class));
+
+    check(wrap("abc") + "-> " + func.args(" .", 2, " string-length(.)"), "bc",
+        empty(STRING_LENGTH));
+
+    // rewrite to prefix check
+    check(func.args(wrap("abcd"), 1, 3) + " = 'abc'", true, root(STARTS_WITH));
+    check(func.args(wrap("abcd"), 1, 3) + " eq 'abc'", true, root(STARTS_WITH));
+    check(func.args(wrap("abcd"), 1, 3) + " != 'abc'", false, root(NOT));
+    check(func.args(wrap("a€c"), 1, 3) + " = 'a€c'", true, root(STARTS_WITH));
+    check(func.args(wrap("abcd"), 1, 3) + " = xs:untypedAtomic('abc')", true, root(STARTS_WITH));
+    check(func.args(wrap("ab"), 1, 3) + " = 'abc'", false, root(STARTS_WITH));
+    check(func.args(" ()", 1, 3) + " = 'abc'", false, empty(STARTS_WITH));
+    // no rewrite: length differs from the compared string, start is not 1, no equality test
+    check(func.args(wrap("abcd"), 1, 3) + " = 'ab'", false, exists(func));
+    check(func.args(wrap("abcd"), 2, 3) + " = 'bcd'", true, exists(func));
+    check(func.args(wrap("abcd"), 1, 3) + " < 'abd'", true, exists(func));
+
+    // large positions and lengths (no integer overflow)
+    query(func.args("hello", 1, 9223372036854775807L), "hello");
+    query(func.args("hello", 2, 9223372036854775807L), "ello");
+    query(func.args("hello", 3, 2147483648L), "llo");
+    query(func.args("hello", -2, 9223372036854775807L), "hello");
+  }
+
+  /** Test method. */
+  @Test public void substringAfter() {
+    final Function func = SUBSTRING_AFTER;
+    check(func.args(" ()", wrap(1)), "", root(Str.class));
+    check(func.args("", wrap(1)), "", root(Str.class));
+    check(func.args(wrap(1), wrap(1)), "", root(Str.class));
+    check(func.args(wrap(1), " () "), 1, root(STRING));
+    check(func.args(wrap(1), ""), 1, root(STRING));
+
+    check(func.args(wrap(1), wrap("")), 1, root(func));
+    check(func.args(wrap(""), wrap(1)), "", root(func));
+
+    check(func.args("12", "1"), 2, root(Str.class));
+    check(func.args(wrap(12), "1"), 2, root(func));
+    check(func.args("12", wrap(1)), 2, root(func));
+    check(func.args(wrap(12), wrap(1)), 2, root(func));
+
+    check(func.args(wrap(12), wrap(13)), "", root(func));
+    check(func.args("A", "B", "?lang=de"), "", root(Str.class));
+  }
+
+  /** Test method. */
+  @Test public void substringBefore() {
+    final Function func = SUBSTRING_BEFORE;
+    check(func.args(" ()", wrap(1)), "", root(Str.class));
+    check(func.args("", wrap(1)), "", root(Str.class));
+    check(func.args(wrap(1), wrap(1)), "", root(Str.class));
+    check(func.args(" ()", wrap(1)), "", root(Str.class));
+    check(func.args("", wrap(1)), "", root(Str.class));
+    check(func.args(wrap(1), " ()"), "", root(Str.class));
+    check(func.args(wrap(1), ""), "", root(Str.class));
+
+    check(func.args(wrap(1), wrap("")), "", root(func));
+    check(func.args(wrap(""), wrap(1)), "", root(func));
+
+    check(func.args("12", "2"), 1, root(Str.class));
+    check(func.args(wrap(12), "2"), 1, root(func));
+    check(func.args("12", wrap(2)), 1, root(func));
+    check(func.args(wrap(12), wrap(2)), 1, root(func));
+
+    check(func.args(wrap(12), wrap(13)), "", root(func));
+    check(func.args("A", "B", "?lang=de"), "", root(Str.class));
+  }
+
+  /** Test method. */
+  @Test public void sum() {
+    final Function func = SUM;
+    query(func.args(1), 1);
+    query(func.args(" 1 to 10"), 55);
+    query(func.args(" 1 to 3037000499"), 4611686016981624750L);
+    query(func.args(" 1 to 3037000500"), 4611686020018625250L);
+    query(func.args(" 1 to 4294967295"), 9223372034707292160L);
+    query(func.args(" 1 to <x>4294967295</x>"), 9223372034707292160L);
+    query(func.args(" 1 to <x>0</x>"), 0);
+    query(func.args(" reverse(1 to 10)"), 55);
+    query(func.args(" sort(reverse(distinct-values(1 to 4294967295)))"), 9223372034707292160L);
+    error(func.args(" 1 to 10_000_000_000_000"), RANGE_X);
+
+    query(func.args(" (1 to 10) ! 1"), 10);
+    query(func.args(" (1 to 10) ! 10"), 100);
+    query(func.args(" (1 to 1_000_000) ! 1_000_000"), 1000000000000L);
+    query(func.args(" (1 to 10) ! xs:untypedAtomic('10')"), 100);
+    error(func.args(" (1 to 10) ! 'a'"), NUMDUR_X_X);
+    error(func.args(" (1 to 1_000_000) ! 'b'"), NUMDUR_X_X);
+
+    query("for $i in 1 to 2 return " + func.args(" ()", " $i"), "1\n2");
+    query(func.args(" ()", wrap(0)), 0);
+    query(func.args(" ()", "A"), "A");
+    query(func.args(" ()", " 1"), 1);
+    query(func.args(" ()", " ()"), "");
+    query(func.args(" ()", " void('x')"), "");
+
+    query("for $i in 1 to 2 return " + func.args(" void('x')", " $i"), "1\n2");
+    query(func.args(" void('x')", wrap(0)), 0);
+    query(func.args(" void('x')", "A"), "A");
+    query(func.args(" void('x')", " 1"), 1);
+    query(func.args(" void('x')", " ()"), "");
+    query(func.args(" void('x')", " void('x')"), "");
+
+    query(func.args(" 2 to 10"), 54);
+    query(func.args(" 9 to 10"), 19);
+    query(func.args(" -3037000500 to 3037000500"), 0);
+    query(func.args(" ()", " ()"), "");
+    query(func.args(1, "x"), 1);
+    error(func.args(" ()", " (1, 2)"), INVTYPE_X);
+
+    query(func.args(" (1, 3, 5)"), 9);
+    query(func.args(" (-3, -1, 1, 3)"), 0);
+    query(func.args(" (1, 1.1, 1e0)"), 3.1);
+
+    check("for $i in (1 to 2)[. != 0] return " + func.args(" $i"),
+        "1\n2", type(SUM, "xs:integer"));
+    check("for $i in (1 to 2)[. != 0] return " + func.args(" $i", "a"),
+        "1\n2", type(SUM, "xs:integer"));
+    check(func.args(" (1, 2)[. = 1]", " 0.0"),
+        1, type(SUM, "xs:decimal"));
+    check(func.args(" (1, 2)[. = 1]", "a"),
+        1, type(SUM, "xs:anyAtomicType"));
+    check(func.args(" (1, 2)[. = 1]", " (1, 2)[. = 1]"),
+        1, type(SUM, "xs:integer?"));
+    check(func.args(" (1, 2)[. = 1]", " ('a', 'b')[. = 'a']"),
+        1, type(SUM, "xs:anyAtomicType?"));
+  }
+
+  /** Test method. */
+  @Test public void systemProperties() {
+    final Function func = SYSTEM_PROPERTIES;
+
+    query("map:size(" + func.args() + ')', 12);
+    query(func.args() + "?#xpath-version", 4);
+    query(func.args() + "?#xsd-version", 1.1);
+    query(func.args() + "?#product-name", Prop.NAME);
+    query(func.args() + "?#product-version", Prop.VERSION);
+    query(func.args() + "?#schema-aware", false);
+    query(func.args() + "?#accepts-typed-data", false);
+    query(func.args() + "?#supports-xinclude", true);
+    query(func.args() + "?#supports-dtd-validation", true);
+    query(func.args() + "?#supports-dtd-attribute-typing", false);
+    query(func.args() + "?#supports-invisible-xml", FnInvisibleXml.available());
+    query(func.args() + "?#supports-dynamic-xquery", true);
+    query(func.args() + "?#supports-dynamic-xslt", false);
+
+    query("every $k in map:keys(" + func.args() + ") satisfies $k instance of xs:QName", true);
+    query("every $v in " + func.args() + "?* satisfies $v instance of xs:anyAtomicType", true);
+  }
+
+  /** Test method. */
+  @Test public void tail() {
+    final Function func = TAIL;
+
+    // merge with nested positional functions (the let prevents the operand from being unrolled)
+    check(OPAQUE + "(" + func.args(" " + func.args(" $o")) + ','
+        + func.args(" " + SUBSEQUENCE.args(" $o", 2, 3)) + ')', "3\n4\n5\n3\n4", empty(func));
+
+    // static rewrites
+    query(func.args(" ()"), "");
+    query(func.args("A"), "");
+    query(func.args(" (1, 2)"), 2);
+    query(func.args(" (1 to 3)"), "2\n3");
+
+    // known result size
+    query(func.args(wrap(1) + "+ 1"), "");
+    query(func.args(" (" + wrap(1) + "+ 1, 3)"), 3);
+    query(func.args(" void(())"), "");
+
+    // unknown result size
+    query(func.args(wrap(1) + "[. = 0]"), "");
+    query(func.args(wrap(1) + "[. = 1]"), "");
+    query(func.args(" (1 to 2)[. = 0]"), "");
+    query(func.args(" (1 to 4)[. < 3]"), 2);
+
+    // value-based iterator
+    query(func.args(" tokenize(<_></_>)"), "");
+    query(func.args(" tokenize(<_>X</_>)"), "");
+    query(func.args(" tokenize(<_>X Y</_>)"), "Y");
+    query(func.args(" tokenize(<_>X Y Z</_>)"), "Y\nZ");
+
+    // nested function calls
+    query(func.args(func.args(" tokenize(<_>X Y Z</_>)")), "Z");
+    query(func.args(" subsequence(tokenize(<_>W X Y Z</_>), 3)"), "Z");
+    query(func.args(" subsequence(tokenize(<_/>)," + wrap(1) + ")"), "");
+    query(func.args(_UTIL_RANGE.args(" tokenize(<_>W X Y Z</_>)", 3, 4)), "Z");
+    query(func.args(_UTIL_RANGE.args(" tokenize(<_/>)," + wrap(1), 1)), "");
+
+    check(func.args(REPLICATE.args(" <a/>", 2)), "<a/>", root(CElem.class));
+    check(func.args(REPLICATE.args(" <a/>", 3)), "<a/>\n<a/>", root(REPLICATE));
+    check(func.args(REPLICATE.args(" <a/>[. = '']", 2)), "<a/>", root(IterFilter.class));
+
+    check(func.args(" (<a/>, <b/>)"), "<b/>", root(CElem.class), empty(TAIL));
+    check(func.args(" (<a/>, <b/>, <c/>)"), "<b/>\n<c/>", root(List.class), empty(TAIL));
+    check(func.args(" (1 to 2, <a/>)"), "2\n<a/>", root(List.class), empty(TAIL));
+  }
+
+  /** Test method. */
+  @Test public void takeWhile() {
+    final Function func = TAKE_WHILE;
+
+    query(func.args(" <x><a/><a/><c/></x>/*", " fn($n) { boolean($n/self::a) }"), "<a/>\n<a/>");
+
+    // closure
+    check("for $a in (1 to 2)[. > 0] return " +
+        func.args(" 1 to 6", " fn($x) { exists((1 to 100)[$a + $x]) }"),
+        "1\n2\n3\n4\n5\n6\n1\n2\n3\n4\n5\n6",
+        exists(ITEMS_AT), empty(HoistedFilter.class), empty(CachedFilter.class));
+
+    // rewrite to FLWOR expression
+    check(func.args(" (1 to 6)[. > 0]", " fn($x) { $x < 4 }"), "1\n2\n3",
+        empty(func), exists(While.class));
+    check(func.args(" (1 to 6)[. > 0]", " fn($x, $p) { $p <= 2 }"), "1\n2",
+        empty(func));
+    check("let $f := fn($x) { $x < 3 } return " + func.args(" (1 to 6)[. > 0]", " $f"), "1\n2",
+        empty(func));
+  }
+
+  /** Test method. */
+  @Test public void tokenize() {
+    final Function func = TOKENIZE;
+    query(func.args("a", ""), "a");
+    query(func.args(wrap("a"), ""), "a");
+    query(func.args("a", wrap("")), "a");
+    query(func.args(wrap("a"), wrap("")), "a");
+
+    query("subsequence(" + func.args(wrap("a b c d")) + ", 3)", "c\nd");
+    query("subsequence(" + func.args(wrap("a,b,c,d"), ",") + ", 3)", "c\nd");
+    query("subsequence(" + func.args(wrap("a!!b!!c!!d"), "!!") + ", 3)", "c\nd");
+    query("subsequence(" + func.args(wrap("")) + ", 3)", "");
+    query("subsequence(" + func.args(wrap(""), "!!") + ", 3)", "");
+
+    query("subsequence(" + func.args(wrap("aXbXcXd"), "x", "i") + ", 3)", "c\nd");
+
+    query(func.args(wrap("a b c d")), "a\nb\nc\nd");
+    query(func.args(wrap("a,b,c,d"), ","), "a\nb\nc\nd");
+    query(func.args(wrap("a!!b!!c!!d"), "!!"), "a\nb\nc\nd");
+    query(func.args(wrap("")), "");
+    query(func.args(wrap(""), "!!"), "");
+
+    check(func.args(" normalize-space(" + wrap("A") + ")", " ' '"), "A", empty(NORMALIZE_SPACE));
+    check("(<_>A</_>, <_>B</_>) ! " + func.args(" normalize-space()", " ' '"), "A\nB",
+        empty(NORMALIZE_SPACE));
+    check(func.args(" normalize-space(" + wrap("A") + ")", wrap(";")), "A",
+        exists(NORMALIZE_SPACE));
+    check(func.args(" normalize-space(" + wrap("A") + ")", ";"), "A",
+        exists(NORMALIZE_SPACE));
+
+    query(func.args("a", ""), "a");
+  }
+
+  /** Test method. */
+  @Test public void transform() {
+    final Function func = TRANSFORM;
+    final String xsl = "<xsl:stylesheet xmlns:xsl='http://www.w3.org/1999/XSL/Transform' "
+        + "version='1.0'><xsl:param name='v'/><xsl:template match='/'>"
+        + "<out><xsl:value-of select='//b'/><xsl:value-of select='$v'/></out>"
+        + "</xsl:template></xsl:stylesheet>";
+    final String opts = " { 'stylesheet-text': \"" + xsl + "\", 'source-node': <a><b>89</b></a>";
+
+    query(func.args(opts + " }") + "?output", "<out>89</out>");
+    query(func.args(opts + ", 'delivery-format': 'serialized', 'serialization-params': "
+        + "{ 'omit-xml-declaration': true() } }") + "?output", "<out>89</out>");
+    query(func.args(opts + ", 'stylesheet-params': { QName('', 'v'): 'X' } }") + "?output",
+        "<out>89X</out>");
+    query("map:keys(" + func.args(opts + ", 'base-output-uri': 'http://x/y' }") + ")",
+        "http://x/y");
+    query(func.args(opts + ", 'post-process': fn($uri, $result) { $uri } }") + "?output",
+        "output");
+
+    // document results are built directly, without serializing and parsing the result
+    final String html = "<xsl:stylesheet xmlns:xsl='http://www.w3.org/1999/XSL/Transform' "
+        + "version='1.0'><xsl:output method='html'/><xsl:template match='/'><div><br/></div>"
+        + "</xsl:template></xsl:stylesheet>";
+    query("count(" + func.args(" { 'stylesheet-text': \"" + html + "\", 'source-node': <a/> }")
+        + "?output//br)", 1);
+    final String text = "<xsl:stylesheet xmlns:xsl='http://www.w3.org/1999/XSL/Transform' "
+        + "version='1.0'><xsl:template match='/'><xsl:value-of select='//b'/>"
+        + "</xsl:template></xsl:stylesheet>";
+    query(func.args(" { 'stylesheet-text': \"" + text + "\", 'source-node': <a><b>89</b></a> }")
+        + "?output ! (. instance of document-node(), string())", "true\n89");
+    // source documents with multiple roots are not serialized
+    query(func.args(opts.replace("<a><b>89</b></a>", "parse-xml-fragment('<a><b>89</b></a><c/>')")
+        + " }") + "?output", "<out>89</out>");
+
+    // requests that cannot be served by the XSLT processor
+    error(func.args(opts + ", 'initial-template': QName('', 'main') }"), TRANSFORM_PROCESSOR_X);
+    error(func.args(opts + ", 'delivery-format': 'raw' }"), TRANSFORM_PROCESSOR_X);
+    error(func.args(opts + ", 'xslt-version': 99.0 }"), TRANSFORM_PROCESSOR_X);
+    // missing and conflicting options
+    error(func.args(" { }"), TRANSFORM_OPTIONS_X);
+    error(func.args(opts + ", 'stylesheet-location': 'x.xsl' }"), TRANSFORM_OPTIONS_X);
+    // values that are not permitted for an option
+    error(func.args(opts + ", 'delivery-format': 'doc' }"), TRANSFORM_OPTIONS_X);
+    // invalid stylesheet and options
+    error(func.args(" { 'stylesheet-text': '<oops/>', 'source-node': <a/> }"), TRANSFORM_ERROR_X);
+    error(func.args(opts + ", 'unknown': 1 }"), INVALIDOPTION_X);
+  }
+
+  /** Test method. */
+  @Test public void translate() {
+    final Function func = TRANSLATE;
+    query(func.args("a", "a", "b"), "b");
+    query(func.args("a", "", "b"), "a");
+
+    check(func.args("a", wrap(""), "b"), "a", root(func));
+    check(func.args(wrap(""), "a", "b"), "", root(func));
+    check(func.args(wrap("abcd"), "bd", "B"), "aBc", root(func));
+
+    query(func.args(" string-join((1 to 100000) ! 'a')",
+        " string-join((1 to 100000) ! 'b') || 'a'", ""), "");
+  }
+
+  /** Test method. */
+  @Test public void trunk() {
+    final Function func = TRUNK;
+
+    // static rewrites
+    query(func.args(" ()"), "");
+    query(func.args("A"), "");
+    query(func.args(" (1, 2)"), 1);
+    query(func.args(" (1 to 3)"), "1\n2");
+
+    // known result size
+    query(func.args(wrap(1) + "+ 1"), "");
+    query(func.args(" (" + wrap(1) + "+ 1, 3)"), 2);
+    query(func.args(" void(())"), "");
+
+    // unknown result size
+    query(func.args(" 1[. = 0]"), "");
+    query(func.args(" 1[. = 1]"), "");
+    query(func.args(" (1 to 2)[. = 0]"), "");
+    query(func.args(" (1 to 4)[. < 3]"), 1);
+
+    // value-based iterator
+    query(func.args(" tokenize(<_></_>)"), "");
+    query(func.args(" tokenize(<_>X</_>)"), "");
+    query(func.args(" tokenize(<_>X Y</_>)"), "X");
+    query(func.args(" tokenize(<_>X Y Z</_>)"), "X\nY");
+
+    // iterator with known result size
+    check(func.args(" (<a/>, <b/>)"), "<a/>", root(CElem.class));
+    check(func.args(" sort((1 to 3) ! <_>{ . }</_>)"), "<_>1</_>\n<_>2</_>", exists(func));
+    check("reverse(" + func.args(" (<a/>, <b/>, <c/>))"), "<b/>\n<a/>", root(List.class));
+
+    // nested function calls
+    check(func.args(func.args(" ()")), "", empty());
+    check(func.args(func.args(" (<a/>)")), "", empty());
+    check(func.args(func.args(" (<a/>, <b/>)")), "", empty());
+    check(func.args(func.args(" (<a/>, <b/>, <c/>)")), "<a/>", root(CElem.class));
+    check(func.args(func.args(" (<a/>, <b/>, <c/>, <d/>)")), "<a/>\n<b/>", root(List.class));
+    check(func.args(func.args(" (1 to 10) ! <a>{. }</a>")),
+        "<a>1</a>\n<a>2</a>\n<a>3</a>\n<a>4</a>\n<a>5</a>\n<a>6</a>\n<a>7</a>\n<a>8</a>",
+        root(DualMap.class));
+
+    check(func.args(REPLICATE.args(" <a/>", 2)), "<a/>", root(CElem.class));
+    check(func.args(REPLICATE.args(" <a/>", 3)), "<a/>\n<a/>", root(REPLICATE));
+    check(func.args(REPLICATE.args(" <a/>[. = '']", 2)), "<a/>", root(IterFilter.class));
+
+    check(func.args(" (<a/>, <b/>)"), "<a/>", root(CElem.class), empty(TRUNK));
+    check(func.args(" (<a/>, <b/>, <c/>)"), "<a/>\n<b/>", root(List.class), empty(TRUNK));
+    check(func.args(" (<a/>, 1 to 2)"), "<a/>\n1", root(List.class), empty(TRUNK));
+
+    check(func.args(" subsequence((1 to 10) ! <_>{ . }</_>, 1, 1)"),
+        "", empty());
+    check(func.args(" subsequence((1 to 10) ! <_>{ . }</_>, 1, 2)"),
+        "<_>1</_>", root(CElem.class));
+    check(func.args(" subsequence((1 to 10) ! <_>{ . }</_>, 1, 3)"),
+        "<_>1</_>\n<_>2</_>", root(DualMap.class));
+    check(func.args(" subsequence((1 to 10) ! <_>{ . }</_>, 2, 3)"),
+        "<_>2</_>\n<_>3</_>", root(DualMap.class));
+    check(func.args(" subsequence((1 to 10) ! <_>{ . }</_>, 4, 2)"),
+        "<_>4</_>", root(CElem.class));
+    check(func.args(" subsequence((1 to 10) ! <_>{ . }</_>, 5, 1)"),
+        "", empty());
+
+    // GH-2225
+    check(func.args(" for $i at $p in 1 to 2 return <a>{ $i * $p }</a>"),
+        "<a>1</a>", root(HEAD));
+    check(func.args(func.args(" for $i at $p in 1 to 4 return <a>{ $i * $p }</a>")),
+        "<a>1</a>\n<a>4</a>", root(SUBSEQUENCE));
+    check(func.args(func.args(func.args(" for $i at $p in 1 to 5 return <a>{ $i * $p }</a>"))),
+        "<a>1</a>\n<a>4</a>", root(SUBSEQUENCE));
+
+    query(func.args(" subsequence(<x><a/><a/><a/></x>/*, 3)"), "");
+  }
+
+  /** Test method. */
+  @Test public void unordered() {
+    final Function func = UNORDERED;
+
+    // unordered(E) → E
+    check(func.args(" ()"), "", empty());
+    check(func.args(" (1, 2)"), "1\n2", empty(func));
+    check(func.args(" (1 to 3)[. > 1]"), "2\n3", empty(func));
+  }
+
+  /** Test method. */
+  @Test public void unixDateTime() {
+    final Function func = UNIX_DATETIME;
+    query(func.args(), "1970-01-01T00:00:00Z");
+    query(func.args(0), "1970-01-01T00:00:00Z");
+    query(func.args(86400000), "1970-01-02T00:00:00Z");
+  }
+
+  /** Test method. */
+  @Test public void unparsedBinary() {
+    final Function func = UNPARSED_BINARY;
+    query(func.args(DOC) + " => bin:length() = (395, 413)", true);
+    error(func.args(DOC + ".xyz"), RESWHICH_X);
+    error(func.args(DOC + "#xyz"), RESFRAG_X);
+  }
+
+  /** Test method. */
+  @Test public void unparsedText() {
+    final Function func = UNPARSED_TEXT;
+    contains(func.args(DOC), "<html");
+    contains(func.args(DOC, "US-ASCII"), "<html");
+    error(func.args(DOC, "xyz"), RESENCODING_X);
+
+    // permitted characters (XML 1.1 repertoire)
+    final IOFile file = new IOFile(sandbox(), "controls.txt");
+    final StringBuilder sb = new StringBuilder();
+    for(int cp = 1; cp <= 31; cp++) sb.append((char) cp);
+    write(file, sb.toString());
+    query("string-to-codepoints(" + func.args(file.path()) + ") => count()", 31);
+  }
+
+  /** Test method. */
+  @Test public void unparsedTextLines() {
+    final Function func = UNPARSED_TEXT_LINES;
+    query(func.args(" ()"), "");
+  }
+
+  /** Test method. */
+  @Test public void voidd() {
+    final Function func = VOID;
+    query(func.args(" ()"), "");
+    query(func.args(1), "");
+    query(func.args("1, 2"), "");
+    query(func.args("1, 2", true), "");
+    check(func.args(" (1 to 10_000_000_000_000) ! string()", true), "", empty());
+
+    error(func.args(" 1 + <a/>"), FUNCCAST_X_X);
+    error(func.args(" 1 + <a/>", false), FUNCCAST_X_X);
+    query(func.args(" 1 + <a/>", true), "");
+
+    // GH-2139: Simplify inlined nondeterministic code
+    check("let $doc := doc('" + DOC + "') let $a := 1 return $a", 1, root(Itr.class));
+  }
+
+  /** Test method. */
+  @Test public void whileDo() {
+    final Function func = WHILE_DO;
+    query(func.args(1, " not#1", " fn($_) { error() }"), 1);
+    error(func.args(1, " boolean#1", " fn($_) { error() }"), FUNERR1);
+    query(func.args(1, " empty#1", " identity#1"), 1);
+    query(func.args(" ()", " empty#1", " string#1"), "");
+    query(func.args(" (21 to 24)", " fn($s) { head($s) < 23 }", " tail#1"), "23\n24");
+    query(func.args(" (6 to 8)", " fn($s) { sum($s) > 10 }",
+        " fn($s) { $s ! (. - 1) }"), "2\n3\n4");
+    query(func.args(" reverse(1 to 100)", " fn($s) { sum($s) > 20 or head($s) > 4 }",
+        " fn($s) { tail($s) }"), "4\n3\n2\n1");
+
+    query(func.args(1, " fn($x) { $x < 10000 }", " fn($x) { $x + 1 }"), 10000);
+    query(func.args(2, " fn($x) { $x < 1000 }", " fn($x) { $x * $x }"), 65536);
+    query(func.args(1, " fn($x) { count($x) < 3 }", " fn($x) { $x, $x }"),
+        "1\n1\n1\n1");
+    query(func.args(" (1 to 100)", " fn($s) { $s[last()] - $s[1] > 1 }",
+        " fn($s) { subsequence($s, 2, count($s) - 2) }"),
+        "50\n51");
+
+    query(func.args(" 1e0", " fn($n) { $n instance of xs:float }",
+        " fn($n) { if($n instance of xs:double) then xs:float($n) else xs:double($n) }"),
+        1);
+    query(func.args(1, " fn($n) { not($n instance of xs:byte) }",
+        " fn($n) { if($n instance of xs:short) then xs:byte($n) else xs:short($n) }"),
+        1);
+
+    query(func.args(" { 'string': 'muckanaghederdauhaulia', 'remove': 'a' }",
+        " fn($map) { characters($map?string) = $map?remove }",
+        " fn($map) { { 'string': replace($map?string, $map?remove, ''),"
+        + "'remove': $map?remove =!> string-to-codepoints() "
+        + "  =!> (fn($n) { $n + 2 })() =!> codepoints-to-string() } }")
+        + "?string", "unhdrduhul");
+
+    query("let $s := (1 to 1000) return " +
+        func.args(1, " fn { . = $s }", " fn { . + 1 }"), 1001);
+    query("let $i := 3936256 return " +
+        func.args(" $i", " fn($n) { abs($n * $n - $i) >= 0.0000000001 }",
+        " fn($n) { ($n + $i div $n) div 2 }"), 1984);
+
+    query(func.args(1, " fn($x) { $x < 1000 }", " fn($x) { $x * 2 }"), 1024);
+    query(func.args(1, " fn($xs) { count($xs) <= 3 }", " fn($x) { $x, $x }"),
+        "1\n1\n1\n1");
+
+    query(func.args(1, " fn($_, $p) { $p <= 10 }", " op('*')"), 3628800);
+
+    check(func.args(1, " false#0", " identity#1"), 1, root(Itr.class));
+    check(func.args(" (1, 2)", " false#0", " identity#1"), "1\n2", root(RangeSeq.class));
+
+    // GH-2257
+    query("head(" + func.args(" (1, 2)", " fn($x, $p) { $p < 2 }",
+        " identity#1") + ')', 1);
+    query("head(" + func.args(" (1, 2)", " fn($x, $p) { $p < 2 }",
+        " fn($s as xs:integer+) { $s[2], $s[1] }") + ')', 2);
+    error("head(" + func.args(" (1, 2)", " fn($x, $p) { $p < 2 }",
+        " fn($s as xs:integer) { $s[2], 1 }") + ')', INVTYPE_X);
+
+    // closure
+    check("for $a in (1 to 2)[. > 0] return " +
+        func.args(" $a", " fn($x) { $x < 5 }", " fn($x) { (1 to 100)[$x + $a] }"),
+        "5\n6", exists(ITEMS_AT), empty(HoistedFilter.class), empty(CachedFilter.class));
+  }
+
+  /** Test method. */
+  @Test public void xmlToJson() {
+    final Function func = XML_TO_JSON;
+    query(func.args(" <map xmlns='http://www.w3.org/2005/xpath-functions'>"
+        + "<string key=''>í</string></map>", " { 'indent': false() }"), "{\"\":\"\u00ed\"}");
+    query(func.args(" <fn:string key='root'>X</fn:string>"), "\"X\"");
+  }
+
+  /** Test method. */
+  @Test public void xsdValidator() {
+    final Function func = XSD_VALIDATOR;
+    final String xsd = "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+        + "<xs:element name='distance' type='xs:decimal'/></xs:schema>";
+    final String validator = func.args(" { 'schema': " + xsd + " }");
+    final String valid = "(<distance>8.5</distance>)", invalid = "(<distance>8.5km</distance>)";
+
+    query(validator + "(())", "");
+    query(validator + valid + "?is-valid", true);
+    query(validator + valid + "?typed-node", "<distance>8.5</distance>");
+    query(validator + valid + "?typed-node/parent::node()", "");
+    query(validator + "(document { <distance>8.5</distance> })?typed-node",
+        "<distance>8.5</distance>");
+    query(validator + invalid + "?is-valid", false);
+    query(validator + invalid + "?typed-node", "");
+    query(validator + invalid + "?error-details", "");
+
+    // details on invalidities
+    final String details = func.args(
+        " { 'schema': " + xsd + ", 'return-error-details': true() }");
+    query("exists(" + details + invalid + "?error-details?message)", true);
+    query(details + invalid + "?error-details?location instance of fn:location-record+", true);
+    query(details + invalid + "?error-details[1]?location?line-number"
+        + " instance of xs:positiveInteger", true);
+    // the result of an invalid document is discarded while it is still being built
+    query("exists(" + details + "(document { <distance>8.5km</distance> })?error-details)", true);
+
+    // namespaces and default values of the validated node
+    final String ns = " { 'schema': <xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema' "
+        + "targetNamespace='urn:t' elementFormDefault='qualified'>"
+        + "<xs:element name='box'><xs:complexType><xs:sequence>"
+        + "<xs:element name='in' type='xs:string'/></xs:sequence>"
+        + "<xs:attribute name='unit' type='xs:string' default='cm'/>"
+        + "</xs:complexType></xs:element></xs:schema> }";
+    query(func.args(ns) + "(<t:box xmlns:t='urn:t'><t:in>x</t:in></t:box>)?typed-node",
+        "<t:box xmlns:t=\"urn:t\" unit=\"cm\"><t:in>x</t:in></t:box>");
+    // comments and processing instructions are preserved
+    query(func.args(ns) + "(<t:box xmlns:t='urn:t'><!--c--><t:in>x</t:in><?p i?></t:box>)"
+        + "?typed-node/node() ! name()", "\nt:in\np");
+    query("count(" + validator + "(document { <!--c-->, <distance>8.5</distance>, <?p i?> })"
+        + "?typed-node/node())", 3);
+
+    // unknown element declaration
+    query(func.args() + "(<unknown/>)?is-valid", false);
+    // features that require a schema-aware processor
+    error(func.args(" { 'validation-mode': 'lax' }"), NOSCHEMAAWARENESS_X);
+    error(func.args(" { 'type': xs:QName('xs:integer') }"), NOSCHEMAAWARENESS_X);
+    error(func.args(" { 'target-namespace': 'http://x.com' }"), NOSCHEMAAWARENESS_X);
+    // invalid schema
+    error(func.args(" { 'schema': <schema/> }"), SCHEMAASSEMBLY_X);
+    // invalid options
+    error(func.args(" { 'validation-mode': 'unknown' }"), INVALIDOPTIONVALUE_X);
+    error(validator + "(<a/>, <b/>)", INVARITY_X_X);
+    error(validator + "(<!--comment-->)", INVTYPE_X);
+  }
+}

@@ -1,0 +1,92 @@
+package org.basex.core.cmd;
+
+import static org.basex.core.Text.*;
+
+import java.io.*;
+
+import org.basex.core.*;
+import org.basex.core.parse.*;
+import org.basex.core.parse.Commands.*;
+import org.basex.core.users.*;
+import org.basex.data.*;
+import org.basex.index.*;
+import org.basex.util.ft.*;
+
+/**
+ * Evaluates the 'create db' command and creates a new index.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class CreateIndex extends ACreate {
+  /**
+   * Default constructor.
+   * @param type index type, defined in {@link CmdIndex} (can be {@code null})
+   */
+  public CreateIndex(final Object type) {
+    super(Perm.WRITE, true, type != null ? type.toString() : null);
+  }
+
+  @Override
+  protected boolean run() {
+    final Data data = context.data();
+
+    final CmdIndex ci = getOption(CmdIndex.class);
+    final IndexType type;
+    switch(ci) {
+      case TEXT -> type = IndexType.TEXT;
+      case ATTRIBUTE -> type = IndexType.ATTRIBUTE;
+      case TOKEN -> type = IndexType.TOKEN;
+      case FULLTEXT -> {
+        type = IndexType.FULLTEXT;
+        data.meta.ftmixed = options.get(MainOptions.FTMIXED);
+        data.meta.stemming = options.get(MainOptions.STEMMING);
+        data.meta.casesens = options.get(MainOptions.CASESENS);
+        data.meta.diacritics = options.get(MainOptions.DIACRITICS);
+        data.meta.language(Language.get(options));
+        data.meta.stopwords = options.get(MainOptions.STOPWORDS);
+      }
+      default -> {
+        return error(UNKNOWN_CMD_X, this);
+      }
+    }
+    data.meta.create(type, true);
+    data.meta.names(type, options);
+
+    return update(data, () -> {
+      create(type, data, this);
+      return info(INDEX_CREATED_X_X, type, jc().performance);
+    });
+  }
+
+  @Override
+  public void build(final CmdBuilder cb) {
+    cb.init(Cmd.CREATE + " " + CmdCreate.INDEX).args();
+  }
+
+  /**
+   * Builds the index structures.
+   * @param data data reference
+   * @param cmd calling command
+   * @throws IOException I/O exception
+   */
+  static void create(final Data data, final ACreate cmd) throws IOException {
+    for(final IndexType type : IndexType.VALUE_INDEXES) {
+      if(data.meta.create(type)) create(type, data, cmd);
+    }
+  }
+
+  /**
+   * Builds the specified index.
+   * @param type index to be built
+   * @param data data reference
+   * @param cmd calling command
+   * @throws IOException I/O exception
+   */
+  static void create(final IndexType type, final Data data, final ACreate cmd) throws IOException {
+    DropIndex.drop(type, data);
+    data.createIndex(type, cmd);
+    data.meta.index(type, true);
+    data.meta.optimized.add(type);
+  }
+}

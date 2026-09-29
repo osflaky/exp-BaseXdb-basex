@@ -1,0 +1,43 @@
+package org.basex.query.func.map;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class MapFilter extends MapFn {
+  @Override
+  public XQMap value(final QueryContext qc) throws QueryException {
+    final XQMap map = toMap(arg(0), qc);
+    final FItem predicate = toFunction(arg(1), 3, qc);
+
+    final MapBuilder mb = new MapBuilder();
+    final HofArgs args = new HofArgs(3, predicate);
+    map.forEach((key, value) -> {
+      if(test(predicate, args.set(0, key).set(1, value).inc(), qc)) mb.put(key, value);
+    });
+    return mb.map(this);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr map = arg(0);
+    // map:filter({}, $predicate) → {}
+    if(map == XQMap.empty()) return map;
+
+    if(map.seqType().type instanceof final MapType mt) {
+      final SeqType kt = mt.keyType().seqType(), vt = mt.valueType();
+      arg(1, arg -> arg.refineFunc(cc, kt, vt, Types.INTEGER_O));
+      exprType.assign(MapType.get(mt));
+    }
+    return this;
+  }
+}

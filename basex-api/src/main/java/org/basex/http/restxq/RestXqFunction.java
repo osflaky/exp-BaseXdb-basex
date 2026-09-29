@@ -1,0 +1,583 @@
+package org.basex.http.restxq;
+
+import static org.basex.http.web.WebText.*;
+import static org.basex.query.QueryError.*;
+import static org.basex.query.ann.Annotation.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.regex.*;
+
+import org.basex.build.csv.*;
+import org.basex.build.html.*;
+import org.basex.build.json.*;
+import org.basex.core.*;
+import org.basex.http.*;
+import org.basex.http.web.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.ann.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.func.*;
+import org.basex.query.util.hash.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.http.*;
+import org.basex.util.list.*;
+import org.basex.util.options.*;
+
+import jakarta.servlet.http.*;
+
+/**
+ * This class represents a single RESTXQ function.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class RestXqFunction extends WebFunction {
+  /** EQName pattern. */
+  private static final Pattern EQNAME = Pattern.compile("^Q\\{(.*?)}(.*)$");
+  /** Separator of header values. */
+  private static final Pattern HEADER_SEP = Pattern.compile(", *");
+
+  /** Returned media types. */
+  public final ArrayList<MediaType> produces = new ArrayList<>();
+  /** Consumed media types. */
+  public final ArrayList<MediaType> consumes = new ArrayList<>();
+  /** Query parameters. */
+  final ArrayList<WebParam> queryParams = new ArrayList<>();
+  /** Form parameters. */
+  final ArrayList<WebParam> formParams = new ArrayList<>();
+  /** Header parameters. */
+  final ArrayList<WebParam> headerParams = new ArrayList<>();
+
+  /** Supported methods. */
+  public final Set<String> methods = new HashSet<>();
+  /** Permissions (can be empty). */
+  final TokenList allows = new TokenList();
+
+  /** Error parameters. */
+  private final ArrayList<WebParam> errorParams = new ArrayList<>();
+  /** Cookie parameters. */
+  private final ArrayList<WebParam> cookieParams = new ArrayList<>();
+  /** Variables of all path templates. */
+  private final QNmSet pathVars = new QNmSet();
+  /** Index of the assigned path annotation. */
+  final int index;
+
+  /** Path (can be {@code null}). */
+  public WebPath path;
+  /** Number of path annotations. */
+  private int paths;
+  /** Singleton ID (can be {@code null}). */
+  String singleton;
+
+  /** Post/Put variable (can be {@code null}). */
+  private QNm requestBody;
+
+  /** Error (can be {@code null}). */
+  RestXqError error;
+  /** Permission (can be {@code null}). */
+  private RestXqPerm permission;
+
+  /**
+   * Constructor.
+   * @param function associated user function
+   * @param module web module
+   * @param qc query context
+   * @param index index of the path annotation to be assigned
+   */
+  public RestXqFunction(final StaticFunc function, final WebModule module, final QueryContext qc,
+      final int index) {
+    super(function, module, qc);
+    this.index = index;
+  }
+
+  /**
+   * Returns the number of path annotations.
+   * @return number of annotations
+   */
+  public int paths() {
+    return paths;
+  }
+
+  @Override
+  public boolean parseAnnotations(final MainOptions mopts) throws QueryException, IOException {
+    // parse all annotations
+    final boolean[] declared = new boolean[function.arity()];
+    boolean found = false;
+
+    AnnList starts = AnnList.EMPTY;
+    Ann pathAnn = null;
+    final Set<String> templates = new HashSet<>();
+    for(final Ann ann : function.anns) {
+      final Annotation def = ann.definition;
+      if(def == null) continue;
+
+      found |= eq(def.name.uri(), QueryText.REST_URI, QueryText.PERM_URI);
+      final Value value = ann.value();
+      if(def == _REST_PATH) {
+        final WebPath wp;
+        try {
+          wp = new WebPath(toString(value.itemAt(0)), ann.info, BASEX_RESTXQ_X);
+        } catch(final IllegalArgumentException ex) {
+          throw error(ann.info, ex.getMessage());
+        }
+        // identical templates always conflict: all other constraints are shared
+        if(!templates.add(wp.regex())) throw error(ann.info, PATH_DUPL_X, wp);
+        // a function is registered once for each of its path annotations
+        if(paths++ == index) path = wp;
+        pathAnn = ann;
+        final QNmSet vars = new QNmSet();
+        for(final QNm name : wp.varNames()) {
+          // a variable may be declared by several path templates, but only once per template
+          if(!vars.add(resolve(name))) throw error(ann.info, PARAM_DUPL_X, name.string());
+          if(pathVars.add(name)) checkVariable(name, declared);
+        }
+      } else if(def == _REST_ERROR) {
+        error(ann);
+        // function can have multiple error annotations
+        if(!starts.contains(def)) starts = starts.attach(ann);
+      } else if(def == _REST_CONSUMES) {
+        strings(ann, consumes);
+      } else if(def == _REST_PRODUCES) {
+        strings(ann, produces);
+      } else if(def == _REST_QUERY_PARAM) {
+        queryParams.add(param(ann, declared));
+      } else if(def == _REST_FORM_PARAM) {
+        formParams.add(param(ann, declared));
+      } else if(def == _REST_HEADER_PARAM) {
+        headerParams.add(param(ann, declared));
+      } else if(def == _REST_COOKIE_PARAM) {
+        cookieParams.add(param(ann, declared));
+      } else if(def == _REST_ERROR_PARAM) {
+        errorParams.add(param(ann, declared));
+      } else if(def == _REST_METHOD) {
+        final String mth = toString(value.itemAt(0)).toUpperCase(Locale.ENGLISH);
+        final Item body = value.size() > 1 ? value.itemAt(1) : null;
+        addMethod(mth, body, declared, ann.info);
+      } else if(def == _REST_SINGLE) {
+        singleton = '\u0001' + (!value.isEmpty() ? toString(value.itemAt(0)) :
+          function.info.path() + ':' + function.info.line());
+      } else if(eq(def.name.uri(), QueryText.REST_URI)) {
+        final Item body = value.isEmpty() ? null : value.itemAt(0);
+        addMethod(string(def.name.local()), body, declared, ann.info);
+      } else if(eq(def.name.uri(), QueryText.OUTPUT_URI)) {
+        // serialization parameters
+        final String name = string(def.name.local()), val = toString(value.itemAt(0));
+        try {
+          sopts.assign(name, val);
+        } catch(final BaseXException ex) {
+          throw error(ann.info, UNKNOWN_PARAMETER_X, ex);
+        }
+      } else if(def == _PERM_ALLOW) {
+        for(final Item arg : value) allows.add(toString(arg));
+      } else if(def == _PERM_CHECK) {
+        final String p = value.isEmpty() ? "" : toString(value.itemAt(0));
+        final QNm v = value.size() > 1 ? checkVariable(toString(value.itemAt(1)), declared) : null;
+        permission = new RestXqPerm(p, v);
+        starts = starts.attach(ann);
+      } else if(mopts != null) {
+        if(def == _INPUT_CSV) {
+          final CsvParserOptions opts = new CsvParserOptions(mopts.get(MainOptions.CSVPARSER));
+          mopts.set(MainOptions.CSVPARSER, parse(opts, ann));
+        } else if(def == _INPUT_JSON) {
+          final JsonParserOptions opts = new JsonParserOptions(mopts.get(MainOptions.JSONPARSER));
+          mopts.set(MainOptions.JSONPARSER, parse(opts, ann));
+        } else if(def == _INPUT_HTML) {
+          final HtmlOptions opts = new HtmlOptions(mopts.get(MainOptions.HTMLPARSER));
+          mopts.set(MainOptions.HTMLPARSER, parse(opts, ann));
+        }
+      }
+    }
+
+    // a path combined with error annotations restricts the scope of the error handler
+    if(pathAnn != null && error == null) starts = starts.attach(pathAnn);
+
+    // check validity of quality factors
+    for(final MediaType produce : produces) {
+      final String qs = produce.parameter("qs");
+      if(qs != null) {
+        final double d = toDouble(token(qs));
+        // NaN will be included if negated condition is used...
+        if(d < 0 || d > 1) throw error(ERROR_QS_X, qs);
+      }
+    }
+    return checkParsed(found, starts, declared);
+  }
+
+  /**
+   * Binds the annotated variables.
+   * @param ext extended processing information (can be {@code null})
+   * @param conn HTTP connection
+   * @param qc query context
+   * @param mopts main options
+   * @return arguments
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  Expr[] bind(final Object ext, final HTTPConnection conn, final QueryContext qc,
+      final MainOptions mopts) throws QueryException, IOException {
+
+    // bind variables from segments
+    final Expr[] args = new Expr[function.arity()];
+    if(path != null) {
+      final QNmMap<String> qnames = path.values(conn.path());
+      for(final QNm qname : pathVars) {
+        final QNm qnm = new QNm(qname.string(), function.sc);
+        if(function.sc.elemNS != null && eq(qnm.uri(), function.sc.elemNS)) qnm.uri(EMPTY);
+        // variables of other path templates are bound to an empty sequence
+        final String segment = qnames.get(qname);
+        bind(qnm, args, segment != null ? Atm.get(segment) : Empty.VALUE, qc,
+          "Path segment $" + string(qname.string()));
+      }
+    }
+
+    // bind request body in the correct format
+    if(requestBody != null) {
+      final MediaType type = conn.mediaType();
+      final IO body = conn.requestCtx.body();
+      final Value value;
+      try {
+        value = Payload.value(body, type, mopts);
+      } catch(final IOException | QueryException ex) {
+        throw badRequest(Util.info(BODY_TYPE_X_X, type, ex));
+      }
+      bind(requestBody, args, value, qc, "Request body");
+    }
+
+    // bind query and form parameters
+    for(final WebParam rxp : queryParams) {
+      bind(rxp, args, conn.requestCtx.queryValues().get(Str.get(rxp.name())), qc,
+          "Query parameter");
+    }
+    for(final WebParam rxp : formParams) {
+      bind(rxp, args, conn.requestCtx.formValues(mopts, qc).get(Str.get(rxp.name())), qc,
+          "Form parameter");
+    }
+
+    // bind header parameters
+    final RequestState state = conn.requestCtx.state();
+    for(final WebParam rxp : headerParams) {
+      final TokenList tl = new TokenList();
+      for(final String header : state.headers(rxp.name())) {
+        for(final String value : HEADER_SEP.split(header)) tl.add(value);
+      }
+      bind(rxp, args, StrSeq.get(tl, BasicType.UNTYPED_ATOMIC), qc, "Header");
+    }
+
+    // bind cookie parameters
+    final Cookie[] cookies = state.cookies();
+    for(final WebParam rxp : cookieParams) {
+      Value value = Empty.VALUE;
+      if(cookies != null) {
+        for(final Cookie c : cookies) {
+          if(rxp.name().equals(c.getName())) value = Atm.get(c.getValue());
+        }
+      }
+      bind(rxp, args, value, qc, "Cookie");
+    }
+
+    // bind errors
+    final XQMap errors = ext instanceof final QueryException qe ? qe.map() : XQMap.empty();
+    for(final WebParam rxp : errorParams) {
+      bind(rxp, args, errors.get(Str.get(rxp.name())), qc, "Error parameter");
+    }
+
+    // bind permission information
+    if(ext instanceof final WebFunction wf && permission.var != null) {
+      bind(permission.var, args, RestXqPerm.map(wf, conn), qc, "Error info");
+    }
+    return args;
+  }
+
+  /**
+   * Checks if an HTTP request matches this function and its constraints.
+   * @param conn HTTP connection
+   * @param err error code (can be {@code null}; assigned if error function is to be called)
+   * @param perm permission flag
+   * @return result of check
+   */
+  public boolean matches(final HTTPConnection conn, final QNm err, final boolean perm) {
+    if(!matchesMethod(conn) || !matchesConsumes(conn) || !matchesProduces(conn)) return false;
+
+    if(perm) return permission != null && permission.matches(conn);
+    // an error handler with a path is limited to errors that are raised under this path
+    if(err != null) return error != null && error.matches(err) &&
+        (path == null || path.matches(conn.path()));
+
+    // a method-agnostic target is not triggered by OPTIONS requests (preflight, run as admin)
+    final boolean optionsPreflight = methods.isEmpty() && conn.method.equals(Method.OPTIONS.name());
+    return !optionsPreflight && matchesPath(conn);
+  }
+
+  /**
+   * Checks if the requested path is addressed by this function.
+   * @param conn HTTP connection
+   * @return result of check
+   */
+  public boolean matchesPath(final HTTPConnection conn) {
+    // error handlers are not addressed by a path
+    return error == null && path != null && path.matches(conn.path());
+  }
+
+  /**
+   * Checks if the HTTP method matches.
+   * @param conn HTTP connection
+   * @return result of check
+   */
+  public boolean matchesMethod(final HTTPConnection conn) {
+    return methods.isEmpty() || methods.contains(conn.method);
+  }
+
+  /**
+   * Checks if the consumed content type matches.
+   * @param conn HTTP connection
+   * @return result of check
+   */
+  public boolean matchesConsumes(final HTTPConnection conn) {
+    // check if any combination matches
+    final MediaType mt = conn.mediaType();
+    for(final MediaType consume : consumes) {
+      if(mt.matches(consume)) return true;
+    }
+    // return true if no type is given
+    return consumes.isEmpty();
+  }
+
+  /**
+   * Checks if the produced media type matches.
+   * @param conn HTTP connection
+   * @return result of check
+   */
+  public boolean matchesProduces(final HTTPConnection conn) {
+    // return true if no type is given
+    if(produces.isEmpty()) return true;
+    // check if any combination matches
+    for(final MediaType accept : conn.accepts()) {
+      for(final MediaType produce : produces) {
+        if(produce.matches(accept)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns the most specific consume type for the specified type.
+   * @param type media type
+   * @return most specific type
+   */
+  public MediaType consumedType(final MediaType type) {
+    MediaType mt = null;
+    for(final MediaType consume : consumes) {
+      if(type.matches(consume) && (mt == null || mt.compareTo(consume) > 0)) mt = consume;
+    }
+    return mt == null ? MediaType.ALL_ALL : mt;
+  }
+
+  @Override
+  public QueryException error(final String msg, final Object... ext) {
+    return error(function.info, msg, ext);
+  }
+
+  @Override
+  protected QueryException bindError(final String input, final SeqType st, final Value value) {
+    return badRequest(value.isEmpty() ? Util.info(ARG_MISSING_X_X, input, st) :
+      Util.info(ARG_TYPE_X_X_X, input, st, value));
+  }
+
+  /**
+   * Returns an exception for input that was supplied by the client.
+   * @param message error message
+   * @return exception
+   */
+  private QueryException badRequest(final String message) {
+    final QNm qname = new QNm(concat(QueryText.STATUS, HttpServletResponse.SC_BAD_REQUEST),
+        QueryText.REST_URI);
+    return new QueryException(function.info, qname, message);
+  }
+
+  /**
+   * Creates an exception with the specified message.
+   * @param info input info (can be {@code null})
+   * @param msg error message
+   * @param ext error extension
+   * @return query exception
+   */
+  static QueryException error(final InputInfo info, final String msg, final Object... ext) {
+    return BASEX_RESTXQ_X.get(info, Util.info(msg, ext));
+  }
+
+  @Override
+  public int compareTo(final WebFunction func) {
+    if(!(func instanceof final RestXqFunction rxf)) return -1;
+    if(error != null) {
+      final int diff = path == null ? rxf.path == null ? 0 : 1 :
+        rxf.path == null ? -1 : path.compareTo(rxf.path);
+      return diff != 0 ? diff : error.compareTo(rxf.error);
+    }
+    if(path != null) return path.compareTo(rxf.path);
+    return permission.compareTo(rxf.permission);
+  }
+
+  @Override
+  public String toString() {
+    final StringBuilder sb = new StringBuilder(super.toString());
+    if(!produces.isEmpty()) sb.append(' ').append(produces);
+    return sb.toString();
+  }
+
+  // PRIVATE METHODS ==============================================================================
+
+  /**
+   * Assigns annotation values as options.
+   * @param <O> option type
+   * @param options options instance
+   * @param ann annotation
+   * @return options instance
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private static <O extends Options> O parse(final O options, final Ann ann)
+      throws QueryException, IOException {
+    for(final Item arg : ann.value()) options.assign(string(arg.string(ann.info)));
+    return options;
+  }
+
+  /**
+   * Adds an HTTP method to the list of supported methods by this RESTXQ function.
+   * @param method HTTP method as a string
+   * @param body variable to bind the HTTP request body to (can be {@code null})
+   * @param declared variable declaration flags
+   * @param info input info (can be {@code null})
+   * @throws QueryException query exception
+   */
+  private void addMethod(final String method, final Item body, final boolean[] declared,
+      final InputInfo info) throws QueryException {
+
+    if(body != null) {
+      final Method m = Method.get(method);
+      if(m != null && !m.body) throw error(info, METHOD_BODY_X, m);
+      if(requestBody != null) throw error(info, ANN_BODY_TWICE);
+      requestBody = checkVariable(toString(body), declared);
+    }
+    if(methods.contains(method)) throw error(info, ANN_TWICE_X_X, "%", method);
+    methods.add(method);
+  }
+
+  /**
+   * Binds the specified parameter to a variable.
+   * @param param parameter
+   * @param args argument array
+   * @param value values to be bound; the default value is assigned if the argument is empty
+   * @param qc query context
+   * @param kind kind of parameter
+   * @throws QueryException query exception
+   */
+  private void bind(final WebParam param, final Expr[] args, final Value value,
+      final QueryContext qc, final String kind) throws QueryException {
+    bind(param.var(), args, value.isEmpty() ? param.value() : value, qc,
+      kind + " '" + param.name() + "'");
+  }
+
+  /**
+   * Adds items to the specified list.
+   * @param ann annotation
+   * @param list list to add values to
+   */
+  private static void strings(final Ann ann, final ArrayList<MediaType> list) {
+    for(final Item arg : ann.value()) list.add(new MediaType(toString(arg)));
+  }
+
+  /**
+   * Returns a parameter.
+   * @param ann annotation
+   * @param declared variable declaration flags
+   * @return parameter
+   * @throws QueryException query exception
+   */
+  private WebParam param(final Ann ann, final boolean... declared) throws QueryException {
+    // name of parameter
+    final Value value = ann.value();
+    final String name = toString(value.itemAt(0));
+    // variable template
+    final QNm var = checkVariable(toString(value.itemAt(1)), declared);
+    // default value
+    final long al = value.size();
+    final ItemList items = new ItemList(al - 2);
+    for(int a = 2; a < al; a++) items.add(value.itemAt(a));
+    return new WebParam(var, name, items.value());
+  }
+
+  /**
+   * Creates an error function.
+   * @param ann annotation
+   * @throws QueryException query exception
+   */
+  private void error(final Ann ann) throws QueryException {
+    if(error == null) error = new RestXqError();
+
+    // name of parameter
+    for(final Item arg : ann.value()) {
+      final String err = toString(arg);
+      final QNm name;
+      final NameTest.Scope scope;
+      if(err.equals("*")) {
+        name = null;
+        scope = null;
+      } else if(err.startsWith("*:")) {
+        final byte[] local = token(err.substring(2));
+        if(!XMLToken.isNCName(local)) throw error(INV_CODE_X, err);
+        name = new QNm(local);
+        scope = NameTest.Scope.LOCAL;
+      } else if(err.endsWith(":*")) {
+        final byte[] prefix = token(err.substring(0, err.length() - 2));
+        if(!XMLToken.isNCName(prefix)) throw error(INV_CODE_X, err);
+        name = new QNm(concat(prefix, cpToken(':')), function.sc);
+        scope = NameTest.Scope.URI;
+      } else {
+        final Matcher m = EQNAME.matcher(err);
+        if(m.matches()) {
+          final byte[] uri = token(m.group(1)), local = token(m.group(2));
+          if(local.length == 1 && local[0] == '*') {
+            name = new QNm(cpToken(':'), uri);
+            scope = NameTest.Scope.URI;
+          } else {
+            if(!XMLToken.isNCName(local) || !Uri.get(uri).isValid()) throw error(INV_CODE_X, err);
+            name = new QNm(local, uri);
+            scope = NameTest.Scope.FULL;
+          }
+        } else {
+          final byte[] nm = token(err);
+          if(!XMLToken.isQName(nm)) throw error(INV_CODE_X, err);
+          name = new QNm(nm, function.sc);
+          scope = NameTest.Scope.FULL;
+        }
+      }
+
+      // message
+      if(name != null && name.hasPrefix() && !name.hasURI())
+        throw error(INV_NONS_X, name.prefixString());
+      final NameTest nt = scope != null ? (NameTest) Test.get(Kind.ELEMENT, name, scope, null) :
+        null;
+
+      final Function<NameTest, String> toString = t -> t != null ? t.toString() : "*";
+      if(!error.isEmpty()) {
+        final NameTest first = error.get(0);
+        if(first != null ? first.scope != scope : scope != null) {
+          throw error(INV_PRECEDENCE_X_X, toString.apply(first), toString.apply(nt));
+        }
+      }
+      if(!error.add(nt)) throw error(INV_ERR_TWICE_X, toString.apply(nt));
+    }
+  }
+}

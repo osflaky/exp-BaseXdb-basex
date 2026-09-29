@@ -1,0 +1,46 @@
+package org.basex.query.value.seq;
+
+import org.basex.core.jobs.*;
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+
+/**
+ * A sequence that defines a sub-range of another sequence.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public final class SubSeq extends Seq {
+  /** Underlying sequence. */
+  private final Seq sub;
+  /** Starting index in {@link #sub}. */
+  private final long start;
+
+  /**
+   * Constructor.
+   * @param sub underlying sequence
+   * @param start starting index
+   * @param length length of the subsequence
+   */
+  SubSeq(final Seq sub, final long start, final long length) {
+    super(length, sub.type);
+    this.sub = sub;
+    this.start = start;
+  }
+
+  @Override
+  public Item itemAt(final long index) {
+    return sub.itemAt(start + index);
+  }
+
+  @Override
+  protected Seq subSeq(final long pos, final long length, final Job job) {
+    return new SubSeq(sub, start + pos, length);
+  }
+
+  @Override
+  public Value shrink(final QueryContext qc) throws QueryException {
+    return rebuild(qc);
+  }
+}

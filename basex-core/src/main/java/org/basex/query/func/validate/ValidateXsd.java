@@ -1,0 +1,199 @@
+package org.basex.query.func.validate;
+
+import java.io.*;
+import java.math.*;
+import java.util.*;
+import java.util.Map.*;
+
+import javax.xml.*;
+import javax.xml.transform.stream.*;
+import javax.xml.validation.*;
+
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+import org.w3c.dom.ls.*;
+import org.xml.sax.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class ValidateXsd extends ValidateFn {
+  /** Schema factory. */
+  private static final String FACTORY = "http://www.w3.org/2001/XMLSchema";
+  /** Saxon version URI. */
+  private static final String SAXON_VERSION_URI = "http://saxon.sf.net/feature/xsd-version";
+  /** Saxon URI for resolving xsi:schemaLocation attributes. */
+  private static final String SAXON_XSI_URI = "http://saxon.sf.net/feature/useXsiSchemaLocation";
+
+  /** XSD implementations. */
+  private static final String[] IMPL = {
+    "com.saxonica.ee.jaxp.SchemaFactoryImpl", "Saxon EE", "1.1",
+    "org.apache.xerces.jaxp.validation.XMLSchema11Factory", "Xerces", "1.1",
+    "org.apache.xerces.jaxp.validation.XMLSchemaFactory", "Xerces", "1.0",
+    "", "Java", "1.0",
+  };
+
+  /** Implementation offset. */
+  private static final int OFFSET;
+  /** Saxon flag. */
+  private static final boolean SAXON;
+  /** Java flag. */
+  private static final boolean JAVA;
+
+  static {
+    int i = 0;
+    final int il = IMPL.length;
+    while(i + 3 < il && Reflect.find(IMPL[i]) == null) i += 3;
+    OFFSET = i;
+    SAXON = i == 0;
+    JAVA = i == 9;
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return check(qc);
+  }
+
+  /**
+   * Creates a schema factory for the most powerful available XSD implementation.
+   * @param options main options
+   * @return schema factory
+   * @throws BaseXException database exception
+   * @throws SAXException SAX exception
+   */
+  public static SchemaFactory factory(final MainOptions options)
+      throws BaseXException, SAXException {
+
+    final SchemaFactory sf;
+    if(JAVA) {
+      sf = SchemaFactory.newInstance(FACTORY);
+    } else {
+      final Class<?> clz = Reflect.find(IMPL[OFFSET]);
+      // catch Saxon errors (e.g. NoClassDefFoundError: org/xmlresolver/Resolver)
+      try {
+        sf = (SchemaFactory) clz.getDeclaredConstructor().newInstance();
+      } catch(final Exception ex) {
+        throw new BaseXException(ex);
+      }
+      // Saxon: use version 1.1
+      if(SAXON) sf.setProperty(SAXON_VERSION_URI, version());
+    }
+    final LSResourceResolver ls = options.resolver().lsResourceResolver();
+    if(ls != null) sf.setResourceResolver(ls);
+    return sf;
+  }
+
+  /**
+   * Denies access to schema documents that are referenced by other schema documents.
+   * @param factory schema factory
+   */
+  public static void restrict(final SchemaFactory factory) {
+    property(factory::setProperty, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+    property(factory::setProperty, XMLConstants.ACCESS_EXTERNAL_DTD, "");
+  }
+
+  /**
+   * Denies access to schema documents that are referenced by the validated document.
+   * @param handler validating handler
+   */
+  public static void restrict(final ValidatorHandler handler) {
+    property(handler::setProperty, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+    // Saxon rejects the JAXP property and supplies its own switch
+    property(handler::setProperty, SAXON_XSI_URI, Boolean.FALSE);
+  }
+
+  /**
+   * Assigns a property. Properties that are rejected by the processor are ignored: the
+   * implementations differ in which of them they support.
+   * @param setter property setter
+   * @param name property name
+   * @param value property value
+   */
+  private static void property(final PropertySetter setter, final String name,
+      final Object value) {
+    try {
+      setter.set(name, value);
+    } catch(final SAXException ex) {
+      Util.debug(ex);
+    }
+  }
+
+  /** Setter for a JAXP property. */
+  @FunctionalInterface
+  private interface PropertySetter {
+    /**
+     * Assigns a property.
+     * @param name property name
+     * @param value property value
+     * @throws SAXException SAX exception
+     */
+    void set(String name, Object value) throws SAXException;
+  }
+
+  /**
+   * Returns the name of the XSD processor.
+   * @return processor
+   */
+  public static String processor() {
+    return IMPL[OFFSET + 1];
+  }
+
+  /**
+   * Returns the supported XSD version.
+   * @return version
+   */
+  public static String version() {
+    return IMPL[OFFSET + 2];
+  }
+
+  /**
+   * Checks if the requested XSD version is supported.
+   * @param version requested version
+   * @return result of check
+   */
+  public static boolean supports(final BigDecimal version) {
+    return version.compareTo(new BigDecimal(version())) <= 0;
+  }
+
+  @Override
+  public final ArrayList<ErrorInfo> errors(final QueryContext qc) throws QueryException {
+    return validate(new Validation() {
+      @Override
+      void validate() throws IOException, SAXException, QueryException {
+        final IO input = read(toNodeOrAtomItem(arg(0), false, qc), null);
+        final Item schema = toNodeOrAtomItem(arg(1), true, qc);
+        final HashMap<String, String> options = toOptions(arg(2), qc);
+
+        final String url = schema == null ? "" : prepare(read(schema, null)).url();
+        final String caching = options.remove("cache");
+        final boolean cache = Strings.isTrue(caching);
+
+        Schema s = cache ? MAP.get(url) : null;
+        if(s == null) {
+          final SchemaFactory sf = factory(qc.context.options);
+          sf.setErrorHandler(this);
+
+          // assign parser features
+          for(final Entry<String, String> entry : options.entrySet()) {
+            sf.setFeature(entry.getKey(), Strings.isTrue(entry.getValue()));
+          }
+          // schema declaration is included in document, or specified as string
+          s = url.isEmpty() ? sf.newSchema() : sf.newSchema(IOUrl.url(url));
+          if(cache) MAP.put(url, s);
+        }
+
+        final Validator v = s.newValidator();
+        v.setErrorHandler(this);
+        v.validate(input instanceof IOContent || input instanceof IOStream ?
+            new StreamSource(input.inputStream()) : new StreamSource(input.url()));
+      }
+    });
+  }
+}

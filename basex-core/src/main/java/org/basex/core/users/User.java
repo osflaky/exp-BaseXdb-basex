@@ -1,0 +1,326 @@
+package org.basex.core.users;
+
+import static org.basex.core.users.UserText.*;
+import static org.basex.util.Token.*;
+import static org.basex.util.XMLAccess.*;
+
+import java.util.*;
+import java.util.Map.Entry;
+
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.util.*;
+
+/**
+ * This class contains information on a single user.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class User {
+  /** Stored password codes. */
+  private final EnumMap<Algorithm, EnumMap<Code, String>> passwords;
+  /** Database patterns for local permissions. */
+  private final LinkedHashMap<String, Perm> patterns;
+  /** Permission. */
+  private Perm permission;
+  /** Name. */
+  private String name;
+  /** Info node (can be {@code null}). */
+  private XNode info;
+
+  /**
+   * Constructor.
+   * @param name username
+   */
+  public User(final String name) {
+    this.name = name;
+    passwords = new EnumMap<>(Algorithm.class);
+    patterns = new LinkedHashMap<>();
+    permission = Perm.NONE;
+  }
+
+  /**
+   * Constructor with password.
+   * @param name username
+   * @param password password
+   * @param algorithms algorithms for which passwords are computed
+   */
+  public User(final String name, final String password, final Algorithm[] algorithms) {
+    this(name);
+    password(password, algorithms);
+  }
+
+  /**
+   * Copy constructor.
+   * @param user parent user
+   */
+  public User(final User user) {
+    name = user.name;
+    passwords = user.passwords;
+    patterns = user.patterns;
+    permission = user.permission;
+    info = user.info;
+  }
+
+  /**
+   * Indicates if passwords are stored for a user.
+   * @return result of check
+   */
+  public boolean enabled() {
+    return !passwords.isEmpty();
+  }
+
+  /**
+   * Parses a single user from the specified node.
+   * @param user user node
+   * @param file input file
+   * @throws BaseXException database exception
+   */
+  User(final XNode user, final IOFile file) throws BaseXException {
+    name = string(attribute(user, Q_NAME, "Root"));
+    passwords = new EnumMap<>(Algorithm.class);
+    patterns = new LinkedHashMap<>();
+    permission = attribute(name, user, Q_PERMISSION, Perm.values());
+
+    for(final GNode gchild : children(user)) {
+      final XNode child = (XNode) gchild;
+      final QNm qname = child.qname();
+      if(qname.eq(Q_PASSWORD)) {
+        final EnumMap<Code, String> ec = new EnumMap<>(Code.class);
+        final Algorithm algorithm = attribute(name, child, Q_ALGORITHM, Algorithm.values());
+        if(passwords.containsKey(algorithm)) throw new BaseXException(
+            "%: Algorithm % supplied more than once.", name, algorithm);
+        passwords.put(algorithm, ec);
+
+        for(final GNode code : children(child)) {
+          final Code cd = value(name, code.qname().unique(), algorithm.codeTypes);
+          if(ec.containsKey(cd)) throw new BaseXException(
+              "%, %: Code % supplied more than once.", name, algorithm, code);
+          ec.put(cd, string(code.string()));
+        }
+        for(final Code code : algorithm.codeTypes) {
+          if(ec.get(code) == null)
+            throw new BaseXException("%, %: Code '%' missing.", name, algorithm, code);
+        }
+      } else if(qname.eq(Q_DATABASE)) {
+        // parse local permissions
+        final String nm = string(attribute(child, Q_PATTERN, name));
+        final Perm perm = attribute(name, child, Q_PERMISSION, Perm.values());
+        patterns.put(nm, perm);
+      } else if(qname.eq(Q_INFO)) {
+        if(info != null) throw new BaseXException("%: <%/> occurs more than once.", file, qname);
+        info = child;
+      } else {
+        throw new BaseXException("%: invalid element <%/>.", file, qname);
+      }
+    }
+  }
+
+  /**
+   * Returns user information as XML.
+   * @param qc query context ({@code null} if element will only be created for serialization)
+   * @param ii input info (can be {@code null})
+   * @return user element
+   * @throws QueryException query exception
+   */
+  public synchronized FNode toXml(final QueryContext qc, final InputInfo ii) throws QueryException {
+    final FBuilder user = FElem.build(Q_USER).attr(Q_NAME, name).attr(Q_PERMISSION, permission);
+    passwords.forEach((key, value) -> {
+      final FBuilder pw = FElem.build(Q_PASSWORD).attr(Q_ALGORITHM, key);
+      value.forEach((k, v) -> {
+        if(!v.isEmpty()) pw.node(FElem.build(new QNm(k.toString())).text(v));
+      });
+      user.node(pw.finish());
+    });
+    patterns.forEach((key, value) -> user.node(FElem.build(Q_DATABASE).attr(Q_PATTERN, key).
+        attr(Q_PERMISSION, value).finish()));
+    if(info != null) {
+      if(qc != null) {
+        // create copy of the info node if query context is available
+        user.node(info.materialize(n -> false, ii, qc));
+      } else {
+        // otherwise, referenced original info node and invalidate parent reference
+        user.node(info);
+        info.parent(null);
+      }
+    }
+    return user.finish();
+  }
+
+  /**
+   * Sets the username.
+   * @param nm name
+   */
+  public synchronized void name(final String nm) {
+    name = nm;
+  }
+
+  /**
+   * Drops the specified database pattern.
+   * @param pattern database pattern
+   */
+  public synchronized void drop(final String pattern) {
+    patterns.remove(pattern);
+  }
+
+  /**
+   * Returns the username.
+   * @return name
+   */
+  public synchronized String name() {
+    return name;
+  }
+
+  /**
+   * Assigns a new password and discards all codes of the old one.
+   * @param password password (plain text)
+   * @param algorithms algorithms for which password codes are computed
+   */
+  public synchronized void password(final String password, final Algorithm[] algorithms) {
+    passwords.clear();
+    recode(password, algorithms);
+  }
+
+  /**
+   * Recomputes the codes of the specified algorithms and preserves all others.
+   * @param password password (plain text)
+   * @param algorithms algorithms for which password codes are computed
+   */
+  synchronized void recode(final String password, final Algorithm[] algorithms) {
+    for(final Algorithm algorithm : algorithms) {
+      passwords.put(algorithm, algorithm.create(name, password));
+    }
+  }
+
+  /**
+   * Returns the specified code.
+   * @param algorithm used algorithm
+   * @param code code to be returned
+   * @return code, or {@code null} if the algorithm or code does not exist
+   */
+  public synchronized String code(final Algorithm algorithm, final Code code) {
+    final EnumMap<Code, String> codes = passwords.get(algorithm);
+    return codes != null ? codes.get(code) : null;
+  }
+
+  /**
+   * Returns the global permission, or the permission for the specified database.
+   * @param db database pattern (can be {@code null})
+   * @return permission
+   */
+  public synchronized Perm permission(final String db) {
+    if(db != null) {
+      final Entry<String, Perm> entry = find(db);
+      if(entry != null) return entry.getValue();
+    }
+    return permission;
+  }
+
+  /**
+   * Returns the first entry for the specified database.
+   * @param pattern database pattern
+   * @return entry, or {@code null} if no entry exists
+   */
+  synchronized Entry<String, Perm> find(final String pattern) {
+    for(final Entry<String, Perm> entry : patterns.entrySet()) {
+      if(Databases.regex(entry.getKey()).matcher(pattern).matches()) return entry;
+    }
+    return null;
+  }
+
+  /**
+   * Sets a global permission.
+   * @param perm permission
+   * @return self reference
+   */
+  public synchronized User permission(final Perm perm) {
+    permission = perm;
+    return this;
+  }
+
+  /**
+   * Sets a permission for a specific pattern.
+   * @param perm permission
+   * @param pattern database pattern (if empty, a global permission is set)
+   * @return self reference
+   */
+  public synchronized User permission(final Perm perm, final String pattern) {
+    if(pattern.isEmpty()) {
+      permission(perm);
+    } else {
+      patterns.put(pattern, perm);
+    }
+    return this;
+  }
+
+  /**
+   * Tests if the user has the specified permission.
+   * @param perm permission to be checked
+   * @return result of check
+   */
+  public synchronized boolean has(final Perm perm) {
+    return has(perm, null);
+  }
+
+  /**
+   * Tests if the user has the specified permission.
+   * @param perm permission to be checked
+   * @param db database pattern (can be {@code null})
+   * @return result of check
+   */
+  public synchronized boolean has(final Perm perm, final String db) {
+    return permission(db).ordinal() >= perm.ordinal();
+  }
+
+  /**
+   * Checks if the specified password is correct.
+   * @param password password (plain text)
+   * @param algorithms algorithms to check
+   * @return result of check
+   */
+  public synchronized boolean matches(final String password, final Algorithm[] algorithms) {
+    for(final Algorithm algorithm : algorithms) {
+      final EnumMap<Code, String> codes = passwords.get(algorithm);
+      if(codes != null && algorithm.verify(name, password, codes)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Checks if stored password codes should be recomputed.
+   * @param algorithms configured algorithms
+   * @return result of check
+   */
+  synchronized boolean outdated(final Algorithm[] algorithms) {
+    for(final Algorithm algorithm : algorithms) {
+      final EnumMap<Code, String> codes = passwords.get(algorithm);
+      if(codes == null || !algorithm.current(codes)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns the info element.
+   * @return info element (can be {@code null})
+   */
+  public synchronized XNode info() {
+    return info;
+  }
+
+  /**
+   * Sets the info element.
+   * @param elem info element
+   */
+  public synchronized void info(final XNode elem) {
+    info = elem.hasChildren() || elem.hasAttributes() ? elem : null;
+  }
+
+  @Override
+  public String toString() {
+    return Util.className(this) + '[' + name + '/' + permission + ']';
+  }
+}

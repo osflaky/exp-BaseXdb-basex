@@ -1,0 +1,43 @@
+package org.basex.query.func.db;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.core.*;
+import org.basex.query.*;
+import org.basex.query.up.primitives.name.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.list.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class DbRestore extends BackupFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final String name = toBackup(arg(0), qc);
+
+    checkCreate(Databases.name(name), qc);
+    final StringList backups = qc.context.databases.backups(name);
+    if(backups.isEmpty()) throw DB_NOBACKUP_X.get(info, name);
+
+    final String backup = backups.get(0), db = Databases.name(backup);
+    qc.updates().add(new DBRestore(db, backup, qc, info), qc);
+    return Empty.VALUE;
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return dataLock(arg(0), true, true, visitor) && super.accept(visitor);
+  }
+
+  @Override
+  boolean backupWriteLock() {
+    // the backup is only read
+    return false;
+  }
+}

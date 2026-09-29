@@ -1,0 +1,725 @@
+package org.basex.data;
+
+import static org.basex.core.Text.*;
+import static org.basex.data.DataText.*;
+import static org.basex.util.Strings.*;
+
+import java.io.*;
+import java.util.*;
+
+import org.basex.build.*;
+import org.basex.core.*;
+import org.basex.core.cmd.*;
+import org.basex.index.*;
+import org.basex.index.resource.*;
+import org.basex.io.*;
+import org.basex.io.in.DataInput;
+import org.basex.io.out.DataOutput;
+import org.basex.util.*;
+import org.basex.util.ft.*;
+import org.basex.util.list.*;
+
+/**
+ * This class provides meta information on a database.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class MetaData {
+  /** Database name. */
+  public String name;
+
+  /** Path to initially imported resources. */
+  public String original = "";
+  /** Size of initially imported resources. */
+  public long inputsize;
+  /** Database timestamp. */
+  public long time;
+  /** Number of stored XML documents. */
+  public int ndocs;
+
+  /** Indicates if a text index exists. */
+  public boolean textindex;
+  /** Indicates if an attribute index exists. */
+  public boolean attrindex;
+  /** Indicates if a token index exists. */
+  public boolean tokenindex;
+  /** Indicates if a full-text index exists. */
+  public boolean ftindex;
+
+  /** Flag for activated automatic index update. */
+  public boolean updindex;
+  /** Flag for automatic index updating. */
+  public boolean autooptimize;
+
+  /** Indicates if the text index is to be recreated. */
+  public boolean createtext;
+  /** Indicates if the attribute index is to be recreated. */
+  public boolean createattr;
+  /** Indicates if the token index is to be recreated. */
+  public boolean createtoken;
+  /** Indicates if the full-text index is to be recreated. */
+  public boolean createft;
+  /** Text index: names to include. */
+  public String textinclude;
+  /** Attribute index: names to include. */
+  public String attrinclude;
+  /** Token index: names to tokenize. */
+  public String tokeninclude;
+  /** Full-text index: names to include. */
+  public String ftinclude;
+  /** Full-text index: string values of mixed-content elements. */
+  public boolean ftmixed;
+  /** Full-text index: indicates if unsegmented index will be adopted as first segment. */
+  public boolean ftadopt;
+  /** Updatable indexes: numbers of segments, oldest first ({@code -1}: base structure). */
+  public final EnumMap<IndexType, String> segments = new EnumMap<>(IndexType.class);
+  /** Updatable indexes: log length, references, covered IDs, and index-specific values. */
+  public final EnumMap<IndexType, String> buffers = new EnumMap<>(IndexType.class);
+
+  /** Flag for full-text stemming. */
+  public boolean stemming;
+  /** Flag for full-text case-sensitivity. */
+  public boolean casesens;
+  /** Flag for full-text diacritics removal. */
+  public boolean diacritics;
+  /** Full-text stopword file. */
+  public String stopwords;
+
+  /** Maximum number of categories. */
+  public int maxcats;
+  /** Maximum length of index entries. */
+  public int maxlen;
+
+  /** Language of full-text search index (can be {@code null}). */
+  private Language language;
+  /** Language option, resolved by {@link #language()} (can be {@code null}). */
+  private String langOption;
+
+  /** Indicates if all metadata is exact. */
+  public boolean uptodate = true;
+  /** Indicates if the statistics counts are exact (implied by {@link #uptodate}). */
+  public boolean counts = true;
+  /** Indicates if the path and name indexes are complete (implied by {@link #counts}). */
+  public boolean complete = true;
+  /** Value indexes whose structures are optimized. */
+  public final EnumSet<IndexType> optimized = EnumSet.noneOf(IndexType.class);
+  /** Indicate if the database may be corrupt. */
+  public boolean corrupt;
+  /** Dirty flag. */
+  public boolean dirty;
+
+  /** Indicates if this instance is shared and must not be modified. */
+  public boolean shared;
+
+  /** Number of nodes of a closed database (see {@link Data#nodes()}). */
+  public int size;
+  /** Last (highest) ID assigned to a node of a closed database (see {@link Data#lastid}). */
+  public int lastid = -1;
+  /** Committed length of the ID-PRE log ({@code 0} if there is no log). */
+  public long idplog;
+
+
+  /** Database directory. Set to {@code null} if database is in main memory. */
+  private final IOFile dir;
+  /** Flag for out-of-date indexes. */
+  private boolean oldindex;
+  /** Serialized XML parsing options (main-memory instances). */
+  public String docOpts;
+
+  /**
+   * Constructor for a main-memory database instance.
+   * @param options main options
+   */
+  public MetaData(final MainOptions options) {
+    this("", null, options);
+  }
+
+  /**
+   * Constructor.
+   * @param name name of the database
+   * @param options main options
+   * @param sopts static options
+   */
+  public MetaData(final String name, final MainOptions options, final StaticOptions sopts) {
+    this(name, sopts.dbPath(name), options);
+  }
+
+  /**
+   * Copy constructor.
+   * @param meta meta data to be copied
+   */
+  public MetaData(final MetaData meta) {
+    name = meta.name;
+    dir = meta.dir;
+    original = meta.original;
+    inputsize = meta.inputsize;
+    time = meta.time;
+    ndocs = meta.ndocs;
+    size = meta.size;
+    lastid = meta.lastid;
+    idplog = meta.idplog;
+    textindex = meta.textindex;
+    attrindex = meta.attrindex;
+    tokenindex = meta.tokenindex;
+    ftindex = meta.ftindex;
+    updindex = meta.updindex;
+    autooptimize = meta.autooptimize;
+    createtext = meta.createtext;
+    createattr = meta.createattr;
+    createtoken = meta.createtoken;
+    createft = meta.createft;
+    textinclude = meta.textinclude;
+    attrinclude = meta.attrinclude;
+    tokeninclude = meta.tokeninclude;
+    ftinclude = meta.ftinclude;
+    ftmixed = meta.ftmixed;
+    ftadopt = meta.ftadopt;
+    segments.putAll(meta.segments);
+    buffers.putAll(meta.buffers);
+    stemming = meta.stemming;
+    casesens = meta.casesens;
+    diacritics = meta.diacritics;
+    stopwords = meta.stopwords;
+    maxcats = meta.maxcats;
+    maxlen = meta.maxlen;
+    language = meta.language;
+    langOption = meta.langOption;
+    uptodate = meta.uptodate;
+    counts = meta.counts;
+    complete = meta.complete;
+    optimized.addAll(meta.optimized);
+    corrupt = meta.corrupt;
+    dirty = meta.dirty;
+    oldindex = meta.oldindex;
+    docOpts = meta.docOpts;
+  }
+
+  /**
+   * Constructor.
+   * @param name name of the database
+   * @param dir database directory ({@code null} if database is in main memory)
+   * @param options main options
+   */
+  private MetaData(final String name, final IOFile dir, final MainOptions options) {
+    this.name = name;
+    this.dir = dir;
+    createtext = options.get(MainOptions.TEXTINDEX);
+    createattr = options.get(MainOptions.ATTRINDEX);
+    createtoken = options.get(MainOptions.TOKENINDEX);
+    createft = options.get(MainOptions.FTINDEX);
+    diacritics = options.get(MainOptions.DIACRITICS);
+    stemming = options.get(MainOptions.STEMMING);
+    casesens = options.get(MainOptions.CASESENS);
+    updindex = options.get(MainOptions.UPDINDEX);
+    autooptimize = options.get(MainOptions.AUTOOPTIMIZE);
+    maxlen = options.get(MainOptions.MAXLEN);
+    maxcats = options.get(MainOptions.MAXCATS);
+    stopwords = options.get(MainOptions.STOPWORDS);
+    langOption = options.get(MainOptions.LANGUAGE);
+    textinclude = options.get(MainOptions.TEXTINCLUDE);
+    attrinclude = options.get(MainOptions.ATTRINCLUDE);
+    tokeninclude = options.get(MainOptions.TOKENINCLUDE);
+    ftinclude = options.get(MainOptions.FTINCLUDE);
+    ftmixed = options.get(MainOptions.FTMIXED);
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Normalizes a database path. Converts backslashes and removes duplicate and leading slashes.
+   * Returns {@code null} if the path contains invalid characters.
+   * @param path input path
+   * @return normalized path or {@code null}
+   */
+  public static String normPath(final String path) {
+    // scan path segments
+    final StringList list = new StringList();
+    final StringBuilder sb = new StringBuilder();
+    final int pl = path.length();
+    for(int p = 0; p < pl; p++) {
+      final char ch = path.charAt(p);
+      if(ch == '\\' || ch == '/') {
+        if(!addToPath(sb, list)) return null;
+      } else {
+        if(Prop.WIN && ":*?\"<>\\|".indexOf(ch) != -1) return null;
+        sb.append(ch);
+      }
+    }
+    if(!addToPath(sb, list)) return null;
+    sb.append(String.join("/", list.finish()));
+
+    // add trailing slash
+    if(pl > 0 && !sb.isEmpty()) {
+      final char ch = path.charAt(pl - 1);
+      if(ch == '\\' || ch == '/') sb.append('/');
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Adds a segment to the path if it is valid.
+   * @param sb string builder
+   * @param list list of segments
+   * @return result flag
+   */
+  private static boolean addToPath(final StringBuilder sb, final StringList list) {
+    if(!sb.isEmpty()) {
+      final String segment = sb.toString();
+      if(Strings.endsWith(segment, '.')) {
+        if(!segment.equals(".")) return false;
+      } else if(segment.equals("..")) {
+        if(list.isEmpty()) return false;
+        list.remove(list.size() - 1);
+      } else {
+        list.add(segment);
+      }
+      sb.setLength(0);
+    }
+    return true;
+  }
+
+  /**
+   * Calculates the database size.
+   * @param file current file
+   * @return file length
+   */
+  private static long dbSize(final IOFile file) {
+    long s = 0;
+    if(file.isDir()) {
+      for(final IOFile f : file.children()) s += dbSize(f);
+    } else {
+      s += file.length();
+    }
+    return s;
+  }
+
+  /**
+   * Creates a database file.
+   * @param path database path
+   * @param name filename
+   * @return database filename
+   */
+  public static IOFile file(final IOFile path, final String name) {
+    return new IOFile(path, name + IO.BASEXSUFFIX);
+  }
+
+  // PUBLIC METHODS ===============================================================================
+
+  /**
+   * Returns true if the indexes need to be updated.
+   * @return result of check
+   */
+  public boolean oldindex() {
+    return oldindex;
+  }
+
+  /**
+   * Returns the disk size of the database.
+   * @return database size
+   */
+  public long dbSize() {
+    return dir != null ? dbSize(dir) : 0;
+  }
+
+  /**
+   * Returns the disk timestamp of the database.
+   * @return database size
+   */
+  public long dbTime() {
+    return dir != null ? dir.timeStamp() : 0;
+  }
+
+  /**
+   * Returns a database file for the specified filename.
+   * Should only be called if database is disk-based.
+   * @param filename filename
+   * @return database filename
+   */
+  public IOFile dbFile(final String filename) {
+    return file(dir, filename);
+  }
+
+  /**
+   * Returns a directory with file resources.
+   * @param type resource type
+   * @return directory, or {@code null} for XML type or if this is a main-memory database
+   */
+  public IOFile dir(final ResourceType type) {
+    return dir == null ? null : type.dir(dir);
+  }
+
+  /**
+   * Returns the resource with the specified path.
+   * @param path internal file path
+   * @param type resource type
+   * @return path, or {@code null} if this is a main-memory database
+   */
+  public IOFile file(final String path, final ResourceType type) {
+    if(dir != null) {
+      final IOFile bin = dir(type), file = new IOFile(bin, path);
+      return file.isDir() ? file : type.filePath(bin, path);
+    }
+    return null;
+  }
+
+  /**
+   * Returns a file that indicates ongoing updates.
+   * @return updating file
+   */
+  public IOFile updateFile() {
+    return dbFile(DATAUPD);
+  }
+
+  /**
+   * Drops the specified database files.
+   * Should only be called if database is disk-based.
+   * @param pattern file pattern or {@code null} if all files are to be deleted
+   * @return result of check
+   */
+  public synchronized boolean drop(final String pattern) {
+    return dir != null && DropDB.drop(dir, pattern + IO.BASEXSUFFIX);
+  }
+
+  /**
+   * Reads in all meta data.
+   * @throws IOException I/O exception
+   */
+  public void read() throws IOException {
+    try(DataInput in = new DataInput(dbFile(DATAINF))) {
+      read(in);
+    }
+  }
+
+  /**
+   * Returns if the specified index exists.
+   * @param type index type
+   * @return result of check
+   */
+  public boolean index(final IndexType type) {
+    return switch(type) {
+      case TEXT      -> textindex;
+      case ATTRIBUTE -> attrindex;
+      case TOKEN     -> tokenindex;
+      case FULLTEXT  -> ftindex;
+      default        -> throw Util.notExpected();
+    };
+  }
+
+  /**
+   * Sets availability of the specified index.
+   * @param type index type
+   * @param exists indicates if the index exists
+   */
+  public void index(final IndexType type, final boolean exists) {
+    switch(type) {
+      case TEXT      -> textindex = exists;
+      case ATTRIBUTE -> attrindex = exists;
+      case TOKEN     -> tokenindex = exists;
+      case FULLTEXT  -> ftindex = exists;
+      default        -> throw Util.notExpected();
+    }
+  }
+
+  /**
+   * Indicates if the specified index is to be created.
+   * @param type index type
+   * @return result of check
+   */
+  public boolean create(final IndexType type) {
+    return switch(type) {
+      case TEXT      -> createtext;
+      case ATTRIBUTE -> createattr;
+      case TOKEN     -> createtoken;
+      case FULLTEXT  -> createft;
+      default        -> throw Util.notExpected();
+    };
+  }
+
+  /**
+   * Sets if the specified index is to be created.
+   * @param type index type
+   * @param create create flag
+   */
+  public void create(final IndexType type, final boolean create) {
+    switch(type) {
+      case TEXT      -> createtext = create;
+      case ATTRIBUTE -> createattr = create;
+      case TOKEN     -> createtoken = create;
+      case FULLTEXT  -> createft = create;
+      default        -> throw Util.notExpected();
+    }
+  }
+
+  /**
+   * Returns the included names for the specified index type.
+   * @param type index type
+   * @return index
+   */
+  public String names(final IndexType type) {
+    return switch(type) {
+      case TEXT      -> textinclude;
+      case ATTRIBUTE -> attrinclude;
+      case TOKEN     -> tokeninclude;
+      case FULLTEXT  -> ftinclude;
+      default        -> throw Util.notExpected();
+    };
+  }
+
+  /**
+   * Assigns include names options to the specified index type.
+   * @param type index type
+   * @param options main options
+   */
+  public void names(final IndexType type, final MainOptions options) {
+    switch(type) {
+      case TEXT      -> textinclude = options.get(MainOptions.TEXTINCLUDE);
+      case ATTRIBUTE -> attrinclude = options.get(MainOptions.ATTRINCLUDE);
+      case TOKEN     -> tokeninclude = options.get(MainOptions.TOKENINCLUDE);
+      case FULLTEXT  -> ftinclude = options.get(MainOptions.FTINCLUDE);
+      default        -> throw Util.notExpected();
+    }
+  }
+
+  /**
+   * Returns the language of the full-text index. The language option is resolved on demand,
+   * as the lookup of all system locales is expensive.
+   * @return language (can be {@code null})
+   */
+  public Language language() {
+    if(langOption != null) {
+      final Language ln = Language.get(langOption);
+      language = ln != null ? ln : Language.get("en");
+      langOption = null;
+    }
+    return language;
+  }
+
+  /**
+   * Assigns the language of the full-text index.
+   * @param ln language (can be {@code null})
+   */
+  public void language(final Language ln) {
+    language = ln;
+    langOption = null;
+  }
+
+  // CLASS METHODS ================================================================================
+
+  /**
+   * Reads in metadata from the specified stream.
+   * @param in input stream
+   * @throws IOException I/O exception
+   */
+  void read(final DataInput in) throws IOException {
+    // databases created before version 13 only store the up-to-date flag
+    counts = false;
+    complete = false;
+
+    String storage = "", istorage = "";
+    while(true) {
+      final String k = Token.string(in.readToken());
+      if(k.isEmpty()) break;
+      final String v = Token.string(in.readToken());
+      switch(k) {
+        case DBSTR -> storage = v;
+        case IDBSTR -> istorage = v;
+        case DBFNAME -> original = v;
+        case DBFTSW -> stopwords = v;
+        case DBFTLN -> language(Language.get(v));
+        case DBSIZE -> size = toInt(v);
+        case DBNDOCS -> ndocs = toInt(v);
+        case DBMAXLEN -> maxlen = toInt(v);
+        case DBMAXCATS -> maxcats = toInt(v);
+        case DBLASTID -> lastid = toInt(v);
+        case DBIDPLOG -> idplog = toLong(v);
+        case DBTIME -> time = toLong(v);
+        case DBFSIZE -> inputsize = toLong(v);
+        case DBFTDC -> diacritics = isTrue(v);
+        case DBUPDIDX -> updindex = isTrue(v);
+        case DBAUTOOPT -> autooptimize = isTrue(v);
+        case DBTXTIDX -> textindex = isTrue(v);
+        case DBATVIDX -> attrindex = isTrue(v);
+        case DBTOKIDX -> tokenindex = isTrue(v);
+        case DBFTXIDX -> ftindex = isTrue(v);
+        case DBTXTINC -> textinclude = v;
+        case DBATVINC -> attrinclude = v;
+        case DBTOKINC -> tokeninclude = v;
+        case DBFTXINC -> ftinclude = v;
+        case DBFTMIX -> ftmixed = isTrue(v);
+        case DBFTXSEGS -> segments.put(IndexType.FULLTEXT, v);
+        case DBFTXBUF -> buffers.put(IndexType.FULLTEXT, v);
+        case DBTXTSEGS -> segments.put(IndexType.TEXT, v);
+        case DBTXTBUF -> buffers.put(IndexType.TEXT, v);
+        case DBATVSEGS -> segments.put(IndexType.ATTRIBUTE, v);
+        case DBATVBUF -> buffers.put(IndexType.ATTRIBUTE, v);
+        case DBTOKSEGS -> segments.put(IndexType.TOKEN, v);
+        case DBTOKBUF -> buffers.put(IndexType.TOKEN, v);
+        case DBCRTTXT -> createtext = isTrue(v);
+        case DBCRTATV -> createattr = isTrue(v);
+        case DBCRTTOK -> createtoken = isTrue(v);
+        case DBCRTFTX -> createft = isTrue(v);
+        case DBFTST -> stemming = isTrue(v);
+        case DBFTCS -> casesens = isTrue(v);
+        case DBUPTODATE -> uptodate = isTrue(v);
+        case DBCOUNTS -> counts = isTrue(v);
+        case DBCOMPLETE -> complete = isTrue(v);
+        case DBOPTIMIZED -> {
+          for(final String type : split(v, ',')) optimized.add(IndexType.valueOf(type));
+        }
+      }
+    }
+    // restore implications (relevant for databases created before version 13)
+    if(uptodate) counts = true;
+    if(counts) complete = true;
+
+    // check version of database storage
+    if(!storage.equals(STORAGE) && new Version(storage).compareTo(new Version(
+        STORAGE)) > 0) throw new BuildException(H_DB_FORMAT, storage);
+    // check version of database indexes
+    oldindex = !istorage.equals(ISTORAGE) &&
+        new Version(istorage).compareTo(new Version(ISTORAGE)) > 0;
+    corrupt = dbFile(DATAUPD).exists();
+  }
+
+  /**
+   * Writes the metadata to the specified output stream.
+   * @param out output stream
+   * @param storage database version
+   * @throws IOException I/O exception
+   */
+  void write(final DataOutput out, final String storage) throws IOException {
+    writeInfo(out, DBSTR,      storage);
+    writeInfo(out, DBFNAME,    original);
+    writeInfo(out, DBTIME,     time);
+    writeInfo(out, IDBSTR,     ISTORAGE);
+    writeInfo(out, DBFSIZE,    inputsize);
+    writeInfo(out, DBNDOCS,    ndocs);
+    writeInfo(out, DBSIZE,     size);
+    writeInfo(out, DBUPDIDX,   updindex);
+    writeInfo(out, DBAUTOOPT,  autooptimize);
+    writeInfo(out, DBTXTIDX,   textindex);
+    writeInfo(out, DBATVIDX,   attrindex);
+    writeInfo(out, DBTOKIDX,   tokenindex);
+    writeInfo(out, DBFTXIDX,   ftindex);
+    writeInfo(out, DBTXTINC,   textinclude);
+    writeInfo(out, DBATVINC,   attrinclude);
+    writeInfo(out, DBTOKINC,   tokeninclude);
+    writeInfo(out, DBFTXINC,   ftinclude);
+    writeInfo(out, DBFTMIX,    ftmixed);
+    final String[][] keys = { { DBFTXSEGS, DBFTXBUF }, { DBTXTSEGS, DBTXTBUF },
+      { DBATVSEGS, DBATVBUF }, { DBTOKSEGS, DBTOKBUF } };
+    final IndexType[] values = { IndexType.FULLTEXT, IndexType.TEXT, IndexType.ATTRIBUTE,
+      IndexType.TOKEN };
+    for(int t = 0; t < values.length; t++) {
+      final String segs = segments.get(values[t]), buffer = buffers.get(values[t]);
+      if(segs != null) writeInfo(out, keys[t][0], segs);
+      if(buffer != null) writeInfo(out, keys[t][1], buffer);
+    }
+    writeInfo(out, DBCRTTXT,   createtext);
+    writeInfo(out, DBCRTATV,   createattr);
+    writeInfo(out, DBCRTTOK,   createtoken);
+    writeInfo(out, DBCRTFTX,   createft);
+    writeInfo(out, DBFTST,     stemming);
+    writeInfo(out, DBFTCS,     casesens);
+    writeInfo(out, DBFTDC,     diacritics);
+    writeInfo(out, DBFTSW,     stopwords);
+    writeInfo(out, DBMAXLEN,   maxlen);
+    writeInfo(out, DBMAXCATS,  maxcats);
+    writeInfo(out, DBUPTODATE, uptodate);
+    writeInfo(out, DBCOUNTS,   counts);
+    writeInfo(out, DBCOMPLETE, complete);
+    if(!optimized.isEmpty()) {
+      final StringList types = new StringList();
+      for(final IndexType type : optimized) types.add(type.name());
+      writeInfo(out, DBOPTIMIZED, String.join(",", types.finish()));
+    }
+    writeInfo(out, DBLASTID,   lastid);
+    if(idplog != 0) writeInfo(out, DBIDPLOG, idplog);
+    final Language ln = language();
+    if(ln != null) writeInfo(out, DBFTLN, ln.toString());
+    out.write(0);
+  }
+
+  /**
+   * Indicates if the indexes can be stored in the old format, which older versions can read.
+   * @return result of check
+   */
+  public boolean legacy() {
+    return !(ftindex && ftmixed) && segments.isEmpty() && idplog == 0;
+  }
+
+  /**
+   * Notifies the meta structures of an update and invalidates the indexes.
+   * @param accuracy metadata that remains accurate
+   */
+  public void update(final MetaUpdate accuracy) {
+    // update database timestamp
+    time = System.currentTimeMillis();
+    dirty = true;
+    if(accuracy != MetaUpdate.EXACT) {
+      uptodate = false;
+      if(accuracy != MetaUpdate.COUNTS) {
+        counts = false;
+        if(accuracy != MetaUpdate.COMPLETE) complete = false;
+      }
+    }
+    if(!updindex) {
+      textindex = false;
+      attrindex = false;
+      tokenindex = false;
+    }
+    // only a segmented, or adoptable, full-text index survives updates
+    if(!segments.containsKey(IndexType.FULLTEXT) && !ftadopt) ftindex = false;
+  }
+
+  /**
+   * Assigns parser information.
+   * @param parser parser
+   */
+  public void assign(final Parser parser) {
+    final IO source = parser.source();
+    original = source != null ? source.path() : "";
+    inputsize = source != null ? source.length() : 0;
+    time = source != null ? source.timeStamp() : System.currentTimeMillis();
+  }
+
+  // PRIVATE METHODS ==============================================================================
+
+  /**
+   * Writes a boolean option to the specified output.
+   * @param out output stream
+   * @param name key
+   * @param value value
+   * @throws IOException I/O exception
+   */
+  private static void writeInfo(final DataOutput out, final String name, final boolean value)
+      throws IOException {
+    writeInfo(out, name, value ? "1" : "0");
+  }
+
+  /**
+   * Writes a numeric option to the specified output.
+   * @param out output stream
+   * @param name key
+   * @param value value
+   * @throws IOException I/O exception
+   */
+  private static void writeInfo(final DataOutput out, final String name, final long value)
+      throws IOException {
+    writeInfo(out, name, Long.toString(value));
+  }
+
+  /**
+   * Writes a string option to the specified output.
+   * @param out output stream
+   * @param name key
+   * @param value value
+   * @throws IOException I/O exception
+   */
+  private static void writeInfo(final DataOutput out, final String name, final String value)
+      throws IOException {
+    out.writeToken(Token.token(name));
+    out.writeToken(Token.token(value));
+  }
+}

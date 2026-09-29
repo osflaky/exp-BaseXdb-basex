@@ -1,0 +1,104 @@
+package org.basex.query.func.fn;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnSubstring extends StandardFunc {
+  @Override
+  public AStr value(final QueryContext qc) throws QueryException {
+    final AStr value = toZeroStr(arg(0), qc);
+
+    final int length = value.length(info);
+    int start = start(qc);
+    long end = length(length, qc);
+    if(length == 0 || start == Integer.MIN_VALUE) return Str.EMPTY;
+
+    if(start < 0) {
+      end += start;
+      start = 0;
+    }
+    final long e = Math.min(length, defined(2) ? start + end : Integer.MAX_VALUE);
+    return start < e ? value.substring(info, start, (int) e) : Str.EMPTY;
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    // empty argument: return empty string
+    final Expr value = arg(0);
+    if(value == Empty.VALUE || value == Str.EMPTY) return Str.EMPTY;
+
+    final int start = arg(1) instanceof Value ? start(cc.qc) : Integer.MAX_VALUE;
+    final int length = !defined(2) || arg(2) instanceof Value ?
+      length(Integer.MAX_VALUE, cc.qc) : Integer.MIN_VALUE;
+
+    // invalid start offset or zero length: return empty string
+    if(start == Integer.MIN_VALUE || length == 0) return Str.EMPTY;
+
+    // substring($string, $start, string-length($string)) → substring($string, $start)
+    final Expr len = arg(2);
+    if(start >= 0 && arg(1) instanceof Value && Function.STRING_LENGTH.is(len) &&
+        len.args().length > 0 && len.arg(0).equals(value) && !value.has(Flag.NDT)) {
+      return cc.function(Function.SUBSTRING, info, value, arg(1));
+    }
+
+    // return full string or original expression
+    return start <= 0 && length == Integer.MAX_VALUE && value.seqType().type.isStringOrUntyped() ?
+      cc.function(Function.STRING, info, value) : this;
+  }
+
+  /**
+   * Evaluates the start argument.
+   * @param qc query context
+   * @return start offset
+   * @throws QueryException query exception
+   */
+  private int start(final QueryContext qc) throws QueryException {
+    final Item start = toAtomItem(arg(1), qc);
+    if(start instanceof final Itr itr) return limit(itr.itr() - 1);
+    final double dbl = start.dbl(info);
+    return Double.isNaN(dbl) ? Integer.MIN_VALUE : subPos(dbl);
+  }
+
+  /**
+   * Evaluates the length argument.
+   * @param def default length
+   * @param qc query context
+   * @return start offset
+   * @throws QueryException query exception
+   */
+  private int length(final int def, final QueryContext qc) throws QueryException {
+    final Item length = arg(2).atomItem(qc, info);
+    return length.isEmpty() ? def : length instanceof final Itr itr ? limit(itr.itr()) :
+      subPos(length.dbl(info) + 1);
+  }
+
+  /**
+   * Returns the specified substring position.
+   * @param d double value
+   * @return substring position
+   */
+  private static int subPos(final double d) {
+    final int i = (int) d;
+    return limit(d == i ? i - 1 : (long) StrictMath.floor(d - 0.5));
+  }
+
+  /**
+   * Converts long to int, and ensures that the value does not exceed the integer limits.
+   * @param l long value
+   * @return integer
+   */
+  private static int limit(final long l) {
+    return Math.clamp(l, Integer.MIN_VALUE + 1, Integer.MAX_VALUE - 1);
+  }
+}

@@ -1,0 +1,341 @@
+package org.basex.build.xml;
+
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.*;
+
+import org.basex.build.*;
+import org.basex.core.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+import org.xml.sax.*;
+import org.xml.sax.ext.*;
+
+/**
+ * SAX Parser wrapper.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class SAXHandler extends DefaultHandler2 {
+  /** Builder reference. */
+  private final Builder builder;
+
+  /** Strip namespaces. */
+  private final boolean stripNS;
+  /** Strip whitespace. */
+  private final boolean stripWS;
+  /** Whitespace handling. */
+  private final BoolList strips = new BoolList();
+  /** Temporary attribute array. */
+  private final Atts atts = new Atts();
+  /** Temporary string builder for high surrogates. */
+  private final StringBuilder sb = new StringBuilder();
+  /** Temporary namespace array. */
+  private final Atts nsp = new Atts();
+  /** URI of the document to be built (can be {@code null}). */
+  private final byte[] docUri;
+  /** Document locator (can be {@code null}). */
+  private Locator locator;
+  /** Line number of the cached text. */
+  private int textLine;
+  /** Column number of the cached text. */
+  private int textColumn;
+  /** Names of declared external general entities. */
+  private final HashSet<String> externals = new HashSet<>();
+  /** DTD flag. */
+  private boolean dtd;
+  /** Element counter. */
+  int nodes;
+  /** External resource that is currently being opened (can be {@code null}). */
+  String resource;
+
+  /**
+   * Constructor. The document node is opened and closed by the caller.
+   * @param builder builder reference
+   */
+  public SAXHandler(final Builder builder) {
+    this(builder, false, false, null);
+  }
+
+  /**
+   * Constructor for handlers that build the document node themselves.
+   * @param builder builder reference
+   * @param docUri URI of the document
+   */
+  public SAXHandler(final Builder builder, final byte[] docUri) {
+    this(builder, false, false, docUri);
+  }
+
+  /**
+   * Constructor. The document node is opened and closed by the caller.
+   * @param builder builder reference
+   * @param stripWS strip whitespace
+   * @param stripNS strip namespaces
+   */
+  public SAXHandler(final Builder builder, final boolean stripWS, final boolean stripNS) {
+    this(builder, stripWS, stripNS, null);
+  }
+
+  /**
+   * Constructor.
+   * @param builder builder reference
+   * @param stripWS strip whitespace
+   * @param stripNS strip namespaces
+   * @param docUri URI of the document to be built (can be {@code null})
+   */
+  private SAXHandler(final Builder builder, final boolean stripWS, final boolean stripNS,
+      final byte[] docUri) {
+    this.builder = builder;
+    this.stripNS = stripNS;
+    this.stripWS = stripWS;
+    this.docUri = docUri;
+    strips.push(stripWS);
+  }
+
+  @Override
+  public void startDocument() throws SAXException {
+    if(docUri == null) return;
+    try {
+      location();
+      builder.openDoc(docUri);
+    } catch(final IOException ex) {
+      throw error(ex);
+    }
+  }
+
+  @Override
+  public void endDocument() throws SAXException {
+    if(docUri == null) return;
+    try {
+      finishText();
+      builder.closeDoc();
+    } catch(final IOException ex) {
+      throw error(ex);
+    }
+  }
+
+  @Override
+  public void startElement(final String uri, final String local, final String name,
+      final Attributes attr) throws SAXException {
+
+    try {
+      finishText();
+
+      final int al = attr.getLength();
+      for(int a = 0; a < al; a++) {
+        atts.add(token(attr.getQName(a)), token(attr.getValue(a)), stripNS);
+      }
+      final byte[] en = token(name);
+      location();
+      builder.openElem(stripNS ? local(en) : en, atts, nsp);
+
+      boolean strip = strips.peek();
+      if(stripWS) {
+        final int a = atts.get(XMLToken.XML_SPACE);
+        if(a != -1) {
+          final byte[] s = atts.value(a);
+          if(eq(s, XMLToken.DEFAULT)) strip = true;
+          else if(eq(s, XMLToken.PRESERVE)) strip = false;
+        }
+      }
+      strips.push(strip);
+
+      atts.reset();
+      nsp.reset();
+      ++nodes;
+    } catch(final IOException ex) {
+      throw error(ex);
+    }
+  }
+
+  @Override
+  public void endElement(final String uri, final String local, final String name)
+      throws SAXException {
+    try {
+      finishText();
+      builder.closeElem();
+      strips.pop();
+    } catch(final IOException ex) {
+      throw error(ex);
+    }
+  }
+
+  @Override
+  public void characters(final char[] chars, final int start, final int length) {
+    if(sb.isEmpty() && locator != null) {
+      textLine = locator.getLineNumber();
+      textColumn = locator.getColumnNumber();
+    }
+    sb.append(chars, start, length);
+  }
+
+  @Override
+  public void processingInstruction(final String name, final String content) throws SAXException {
+    if(dtd) return;
+    try {
+      finishText();
+      location();
+      builder.pi(token(name + ' ' + content));
+    } catch(final IOException ex) {
+      throw error(ex);
+    }
+  }
+
+  @Override
+  public void comment(final char[] chars, final int start, final int length) throws SAXException {
+    if(dtd) return;
+    try {
+      finishText();
+      location();
+      builder.comment(token(new String(chars, start, length)));
+    } catch(final IOException ex) {
+      throw error(ex);
+    }
+  }
+
+  /**
+   * Checks if a text node has to be written.
+   * @throws IOException I/O exception
+   */
+  private void finishText() throws IOException {
+    if(!sb.isEmpty()) {
+      final byte[] text = token(sb.toString());
+      if(!(strips.peek() && ws(text))) {
+        builder.location(textLine, textColumn);
+        builder.text(text);
+      }
+      sb.setLength(0);
+    }
+  }
+
+  /**
+   * Assigns the current source location to the builder.
+   */
+  private void location() {
+    if(locator != null) builder.location(locator.getLineNumber(), locator.getColumnNumber());
+  }
+
+  /**
+   * Creates and throws a SAX exception for the specified exception.
+   * @param ex exception
+   * @return SAX exception
+   */
+  private static SAXException error(final IOException ex) {
+    final SAXException ioe = new SAXException(Util.message(ex));
+    ioe.setStackTrace(ex.getStackTrace());
+    return ioe;
+  }
+
+  // EntityResolver
+
+  /* public InputSource resolveEntity(String pub, String sys) { } */
+
+  // DTDHandler
+
+  /* public void notationDecl(String name, String pub, String sys) { } */
+  /* public void unparsedEntityDecl(String name, String pub, String sys, String not) { } */
+
+  // ContentHandler
+
+  @Override
+  public void setDocumentLocator(final Locator loc) {
+    locator = loc;
+  }
+
+  @Override
+  public void startPrefixMapping(final String prefix, final String uri) {
+    if(!stripNS) nsp.add(token(prefix), token(uri));
+  }
+
+  /*public void endPrefixMapping(String prefix) { } */
+  /*public void ignorableWhitespace(char[] ch, int s, int l) { } */
+
+  @Override
+  public void skippedEntity(final String name) {
+    // undeclared general entity: resolve HTML entity or add replacement character (see XMLScanner)
+    final char ch = name.charAt(0);
+    if(ch == '%' || ch == '[' || externals.contains(name)) return;
+    final byte[] entity = XMLToken.getEntity(token(name));
+    final char[] chars = entity != null ? string(entity).toCharArray() : new char[] { REPLACEMENT };
+    characters(chars, 0, chars.length);
+  }
+
+  // DeclHandler
+
+  @Override
+  public void externalEntityDecl(final String name, final String pid, final String sid) {
+    externals.add(name);
+  }
+
+  // ErrorHandler
+
+  /* public void warning(SAXParseException ex) { } */
+  /* public void fatalError(SAXParseException ex) { } */
+
+  @Override
+  public void error(final SAXParseException ex) throws SAXException {
+    throw new ValidationException(ex);
+  }
+
+  // LexicalHandler
+  @Override
+  public void startDTD(final String name, final String pid, final String sid) {
+    dtd = true;
+  }
+
+  @Override
+  public void endDTD() {
+    dtd = false;
+  }
+
+  @Override
+  public void startEntity(final String entity) {
+    resource = null;
+  }
+
+  /** Validation exception: wrap a SAXParseException such that it can be recognized as a validation
+   * exception.
+   */
+  public static class ValidationException extends SAXException {
+    /**
+     * Constructor.
+     * @param cause exception to be wrapped
+     */
+    public ValidationException(final SAXParseException cause) {
+      super(cause);
+    }
+  }
+
+  /** Exception raised when an external resource is encountered and trusted=false. */
+  public static class TrustedViolationException extends SAXException {
+    /**
+     * Constructor.
+     * @param resource blocked resource identifier, e.g. an entity reference
+     */
+    public TrustedViolationException(final String resource) {
+      super(resource);
+    }
+
+    /**
+     * Creates an exception for a blocked DTD or external entity.
+     * @param resource blocked resource identifier
+     * @param validation DTD validation flag
+     * @return exception
+     */
+    public static TrustedViolationException entity(final String resource,
+        final boolean validation) {
+      return new TrustedViolationException(resource + "; enable 'trust-external'" +
+          (validation ? "" : " or disable 'dtd'"));
+    }
+
+    /**
+     * Wraps this exception in an I/O exception.
+     * @return I/O exception
+     */
+    public IOException wrap() {
+      return new IOException(Util.info(Text.EXTACCESS_BLOCKED_X, getMessage()), this);
+    }
+  }
+}

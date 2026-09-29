@@ -1,0 +1,570 @@
+package org.basex.query.func;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+
+import java.util.*;
+import java.util.Map.*;
+import java.util.function.*;
+
+import org.basex.core.*;
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.ann.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.gflwor.*;
+import org.basex.query.func.fn.*;
+import org.basex.query.scope.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.util.parse.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Inline function.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public final class Closure extends Single implements Scope, XQFunctionExpr {
+  /** Function name, {@code null} if not specified. */
+  private final QNm name;
+  /** Parameters. */
+  private final Var[] params;
+  /** Value type, {@code null} if not specified. */
+  private final SeqType declType;
+  /** Annotations. */
+  private AnnList anns;
+  /** Updating flag. */
+  private boolean updating;
+  /** Indicates if the query focus is captured; implies that no variables are bound. */
+  private final boolean focus;
+
+  /** Map with requested function properties. */
+  private final EnumMap<Flag, Boolean> map = new EnumMap<>(Flag.class);
+  /** Compilation flag. */
+  private boolean compiled;
+  /** Indicates if code is currently being compiled or evaluated. */
+  private boolean dontEnter;
+
+  /** Local variables in the scope of this function. */
+  private final VarScope vs;
+  /** Non-local variable bindings. */
+  private final Map<Var, Expr> global;
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param expr function body
+   * @param params parameters
+   * @param anns annotations
+   * @param vs scope
+   * @param global bindings for non-local variables
+   */
+  public Closure(final InputInfo info, final Expr expr, final Params params, final AnnList anns,
+      final VarScope vs, final Map<Var, Expr> global) {
+    this(info, expr, params.vars(), anns, vs, global, params.seqType(), null, false);
+  }
+
+  /**
+   * Package-private constructor allowing a name.
+   * @param info input info (can be {@code null})
+   * @param expr function expression
+   * @param params parameters
+   * @param anns annotations
+   * @param vs variable scope
+   * @param global bindings for non-local variables (can be {@code null})
+   * @param declType declared type (can be {@code null})
+   * @param name function name (can be {@code null})
+   * @param focus flag for capturing the query focus
+   */
+  Closure(final InputInfo info, final Expr expr, final Var[] params, final AnnList anns,
+      final VarScope vs, final Map<Var, Expr> global, final SeqType declType, final QNm name,
+      final boolean focus) {
+    super(info, expr, Types.FUNCTION_O);
+    this.params = params;
+    this.anns = anns;
+    this.vs = vs;
+    this.global = global == null ? new HashMap<>() : new HashMap<>(global);
+    this.declType = declType == null || declType.eq(Types.ITEM_ZM) ? null : declType;
+    this.name = name;
+    this.focus = focus;
+  }
+
+  @Override
+  public int arity() {
+    return params.length;
+  }
+
+  @Override
+  public QNm funcName() {
+    return name;
+  }
+
+  @Override
+  public QNm paramName(final int pos) {
+    return params[pos].name;
+  }
+
+  @Override
+  public FuncType funcType() {
+    // before optimization, the sequence type is still the generic function type
+    final FuncType ft = super.funcType();
+    return ft.argTypes != null ? ft : FuncType.get(anns, declType, params);
+  }
+
+  @Override
+  public AnnList annotations() {
+    return anns;
+  }
+
+  @Override
+  public void reset() {
+    compiled = false;
+  }
+
+  @Override
+  public Expr compile(final CompileContext cc) throws QueryException {
+    if(compiled) return this;
+    compiled = true;
+
+    checkUpdating();
+    // if the whole focus is captured, single context values need not be bound
+    if(!focus) captureContextIfNeeded(cc);
+
+    // compile closure
+    for(final Entry<Var, Expr> entry : global.entrySet()) {
+      final Expr bound = entry.getValue().compile(cc);
+      entry.setValue(bound);
+      entry.getKey().refineType(bound.seqType(), cc);
+    }
+
+    cc.pushScope(vs);
+    try {
+      expr = cc.compileOrError(expr, false);
+    } finally {
+      cc.removeScope(this);
+    }
+    expr.markTailCalls(cc);
+
+    return optimize(cc);
+  }
+
+  /**
+   * Captures the context value if this closure wraps a static function call whose omitted default
+   * arguments depend on the context. This can happen for partial function applications.
+   * @param cc compile context
+   * @throws QueryException query exception
+   */
+  private void captureContextIfNeeded(final CompileContext cc) throws QueryException {
+    if(!(expr instanceof final StaticFuncCall sfc)) return;
+    final Var var = new Var(new QNm("ctx"), Types.ITEM_ZM, cc.qc, info);
+    final VarRef ref = new VarRef(info, var);
+    final InlineContext ic = new InlineContext(null, ref, cc);
+    if(ic.inlineOrNull(sfc) != null) global.put(vs.add(var), new ContextValue(info));
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) {
+    cc.pushScope(vs);
+    try {
+      // inline all values in the closure
+      final Iterator<Entry<Var, Expr>> iter = global.entrySet().iterator();
+      Map<Var, Expr> add = null;
+      final int limit = cc.qc.context.options.get(MainOptions.INLINELIMIT);
+      while(iter.hasNext()) {
+        final Entry<Var, Expr> entry = iter.next();
+        final Var var = entry.getKey();
+        final Expr ex = entry.getValue();
+
+        Expr inline = null;
+        if(ex instanceof final Value value) {
+          // values are always inlined into the closure
+          inline = var.checkType(value, cc.qc, cc);
+        } else if(ex instanceof final Closure cl) {
+          // nested closures are inlined if their size and number of closed-over variables is small
+          if(!cl.has(Flag.NDT) && cl.global.size() < 5
+              && expr.count(var) != VarUsage.MORE_THAN_ONCE && cl.exprSize() < limit) {
+            cc.info(OPTINLINE_X, entry);
+            for(final Entry<Var, Expr> expr2 : cl.global.entrySet()) {
+              final Var var2 = cc.copy(expr2.getKey(), null);
+              if(add == null) add = new HashMap<>();
+              add.put(var2, expr2.getValue());
+              expr2.setValue(new VarRef(cl.info, var2).optimize(cc));
+            }
+            inline = cl;
+          }
+        }
+        if(inline != null) {
+          expr = new InlineContext(var, inline, cc).inline(expr);
+          iter.remove();
+        }
+      }
+      // add all newly added bindings
+      if(add != null) global.putAll(add);
+    } catch(final QueryException ex) {
+      expr = FnError.get(ex);
+    } finally {
+      cc.removeScope(this);
+    }
+
+    // declared type for instance-of/coercion (item()* if none), body type as refined return type
+    exprType.assign(FuncType.get(anns, declType, params).withRefinedType(expr.seqType()));
+
+    // only evaluate if:
+    // - no query focus needs to be captured
+    // - the closure is empty, so we don't lose variables
+    // - the result size is not too large
+    if(!(focus && expr.has(Flag.CTX)) && global.isEmpty() && !cc.largeResult(expr)) {
+      try {
+        return cc.preEval(this);
+      } catch(final QueryException ex) {
+        expr = FnError.get(ex);
+      }
+    }
+    return this;
+  }
+
+  @Override
+  public VarUsage count(final Var var) {
+    // captured focus: the context value is bound to the function body
+    if(focus && var == null) return expr.count(var);
+    VarUsage all = VarUsage.NEVER;
+    for(final Expr ex : global.values()) {
+      if((all = all.plus(ex.count(var))) == VarUsage.MORE_THAN_ONCE) break;
+    }
+    return all;
+  }
+
+  @Override
+  public Expr refineFunc(final CompileContext cc, final SeqType... argTypes) throws QueryException {
+    // skip refinement if function has too many parameters
+    final int arity = arity();
+    if(argTypes.length < arity) return this;
+
+    // skip if no parameter type can be narrowed
+    boolean narrow = false;
+    for(int a = 0; a < arity; a++) {
+      final SeqType at = argTypes[a], pt = params[a].seqType();
+      if(at.instanceOf(pt) && !at.eq(pt)) {
+        narrow = true;
+        break;
+      }
+    }
+    if(!narrow) return this;
+
+    // clone the closure and narrow the cloned parameters
+    final Closure copy = (Closure) copy(cc, new IntObjectMap<>());
+    for(int a = 0; a < arity; a++) {
+      final Var param = copy.params[a];
+      final SeqType before = param.seqType();
+      param.refineType(argTypes[a], cc);
+      // propagate a narrowed parameter type into the body
+      if(!param.seqType().eq(before)) {
+        final InlineContext ic = new InlineContext(param, new VarRef(info, param).optimize(cc), cc);
+        if(ic.inlineable(copy.expr)) copy.expr = ic.inline(copy.expr);
+      }
+    }
+    return copy.optimize(cc);
+  }
+
+  @Override
+  public Expr simplifyFunc(final Simplify mode, final CompileContext cc)
+      throws QueryException {
+    cc.pushScope(vs);
+    try {
+      final Expr ex = expr.simplifyFor(mode, cc);
+      if(ex == expr) return this;
+      expr = ex;
+    } finally {
+      cc.removeScope(this);
+    }
+    return optimize(cc);
+  }
+
+  @Override
+  public Expr inline(final InlineContext ic) throws QueryException {
+    // captured focus: the context value is bound to the function body
+    if(focus && ic.var == null) {
+      final Expr inlined = expr.inline(ic);
+      if(inlined == null) return null;
+      expr = inlined;
+      map.clear();
+      return optimize(ic.cc);
+    }
+
+    boolean changed = false;
+    for(final Entry<Var, Expr> entry : global.entrySet()) {
+      final Expr inlined = entry.getValue().inline(ic);
+      if(inlined != null) {
+        changed = true;
+        entry.setValue(inlined);
+      }
+    }
+    if(!changed) return null;
+
+    // invalidate cached flags, optimize closure
+    map.clear();
+    return optimize(ic.cc);
+  }
+
+  @Override
+  public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    final VarScope scope = new VarScope();
+
+    final HashMap<Var, Expr> outer = new HashMap<>();
+    global.forEach((key, value) -> outer.put(key, value.copy(cc, vm)));
+
+    cc.pushScope(scope);
+    try {
+      final IntObjectMap<Var> innerVars = new IntObjectMap<>();
+      vs.copy(cc, innerVars);
+
+      final HashMap<Var, Expr> bindings = new HashMap<>();
+      outer.forEach((key, value) -> bindings.put(innerVars.get(key.id), value));
+
+      final Var[] prms = params.clone();
+      final int pl = prms.length;
+      for(int p = 0; p < pl; p++) prms[p] = innerVars.get(prms[p].id);
+
+      final Expr ex = expr.copy(cc, innerVars);
+      ex.markTailCalls(null);
+      return copyType(new Closure(info, ex, prms, anns, cc.vs(), bindings, declType, name, focus));
+    } finally {
+      cc.removeScope();
+    }
+  }
+
+  @Override
+  public Expr inline(final Expr[] exprs, final CompileContext cc) throws QueryException {
+    if(!cc.inlineable(anns, expr) || expr.has(Flag.CTX)) return null;
+
+    cc.info(OPTINLINE_X, this);
+    return cc.inline(params, exprs, global, expr, declType, info);
+  }
+
+  @Override
+  public FuncItem value(final QueryContext qc) throws QueryException {
+    final Expr body;
+    if(global.isEmpty()) {
+      body = expr;
+    } else {
+      // collect closure
+      final LinkedList<Clause> clauses = new LinkedList<>();
+      for(final Entry<Var, Expr> entry : global.entrySet()) {
+        clauses.add(new Let(entry.getKey(), entry.getValue().value(qc)));
+      }
+      body = new GFLWOR(info, clauses, expr);
+    }
+
+    // the let clauses of a closure do not change the type of the function body
+    final SeqType argType = expr.seqType();
+    final Expr checked;
+    if(declType == null || argType.instanceOf(declType, true)) {
+      // return type is already correct
+      checked = body;
+    } else if(body instanceof final Value value) {
+      // we can type check immediately
+      checked = declType.coerce(value, qc, info, name, null);
+    } else {
+      // check at each call: reject impossible arities
+      if(argType.type.instanceOf(declType.type) && argType.occ.intersect(declType.occ) == null &&
+          !body.has(Flag.NDT)) {
+        throw typeError(body, declType, name, info);
+      }
+      checked = new TypeCheck(info, body, declType);
+    }
+
+    // captured focus: fn:current refers to the current value at creation time
+    final Expr ex = focus && qc.current != null ? CurrentValue.get(qc.current, checked, info) :
+      checked;
+    return new FuncItem(info, ex, params, anns, funcType(), vs.stackSize(), name,
+        focus ? qc.focus.copy() : null);
+  }
+
+  @Override
+  public boolean has(final Flag... flags) {
+    // closure does not perform any updates
+    final Flag[] flgs = Flag.remove(flags, Flag.UPD);
+    if(flgs.length == 0) return false;
+
+    // handle recursive calls: check which flags are already or currently assigned
+    final ArrayList<Flag> list = new ArrayList<>();
+    for(final Flag flag : flgs) {
+      if(!map.containsKey(flag)) {
+        map.put(flag, Boolean.FALSE);
+        list.add(flag);
+      }
+    }
+    // request missing properties
+    for(final Flag flag : list) {
+      boolean f = false;
+      for(final Expr ex : global.values()) f = f || ex.has(flag);
+      map.put(flag, f || expr.has(flag));
+    }
+
+    // evaluate result
+    for(final Flag flag : flgs) {
+      if(map.get(flag)) return true;
+    }
+    return false;
+  }
+
+  @Override
+  public boolean inlineable(final InlineContext ic) {
+    if(focus && ic.var == null) return expr.inlineable(ic);
+    for(final Expr ex : global.values()) {
+      if(!ex.inlineable(ic)) return false;
+    }
+    return true;
+  }
+
+  @Override
+  public boolean visit(final ASTVisitor visitor) {
+    for(final Entry<Var, Expr> entry : global.entrySet()) {
+      if(!(entry.getValue().accept(visitor) && visitor.declared(entry.getKey()))) return false;
+    }
+    return visitor.declared(params) && expr.accept(visitor);
+  }
+
+  @Override
+  public void checkUp() throws QueryException {
+    checkUpdating();
+    if(updating) {
+      expr.checkUp();
+      if(declType != null && !declType.zero()) throw UUPFUNCTYPE.get(info);
+    }
+  }
+
+  @Override
+  public boolean vacuous() {
+    return declType != null && declType.zero() && !has(Flag.UPD);
+  }
+
+  @Override
+  public boolean vacuousBody() {
+    return vacuous();
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return !dontEnter && (boolean) enter(() -> {
+      for(final Expr ex : global.values()) {
+        if(!ex.accept(visitor)) return false;
+      }
+      return visitor.subScope(this);
+    });
+  }
+
+  @Override
+  public int exprSize() {
+    return dontEnter ? 1 : (int) enter(() -> {
+      int size = 1;
+      for(final Expr ex : global.values()) size += ex.exprSize();
+      return size + expr.exprSize();
+    });
+  }
+
+  @Override
+  public boolean compiled() {
+    return compiled;
+  }
+
+  /**
+   * Returns an iterator over the non-local bindings of this closure.
+   * @return iterator
+   */
+  public Iterator<Entry<Var, Expr>> globalBindings() {
+    return global.entrySet().iterator();
+  }
+
+  /**
+   * Assigns the updating flag.
+   * @throws QueryException query exception
+   */
+  private void checkUpdating() throws QueryException {
+    // derive updating flag from function body
+    updating = expr.has(Flag.UPD);
+    final boolean upd = anns.contains(Annotation.UPDATING);
+    if(updating != upd) {
+      if(!upd) anns = anns.attach(new Ann(info, Annotation.UPDATING, Empty.VALUE));
+      else if(!expr.vacuous()) throw UPEXPECTF.get(info);
+    }
+  }
+
+  /**
+   * Runs code and avoids recursive executions of the same code.
+   * @param code code to be executed
+   * @return result
+   */
+  private Object enter(final Supplier<Object> code) {
+    dontEnter = true;
+    try {
+      return code.get();
+    } finally {
+      dontEnter = false;
+    }
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    if(this == obj) return true;
+    if(!(obj instanceof final Closure cls) || !Var.equalTypes(params, cls.params) ||
+        !Objects.equals(declType, cls.declType) || focus != cls.focus ||
+        global.size() != cls.global.size()) return false;
+
+    // non-local variables must be bound to equal expressions
+    if(!global.isEmpty()) {
+      final IntObjectMap<Expr> bindings = new IntObjectMap<>();
+      cls.global.forEach((var, ex) -> bindings.put(var.slot(), ex));
+      for(final Entry<Var, Expr> entry : global.entrySet()) {
+        if(!entry.getValue().equals(bindings.get(entry.getKey().slot()))) return false;
+      }
+    }
+    return super.equals(obj);
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    if(dontEnter) return;
+
+    enter(() -> {
+      final ArrayList<Object> list = new ArrayList<>();
+      list.add(params);
+      global.forEach((key, value) -> {
+        list.add(key);
+        list.add(value);
+      });
+      list.add(expr);
+      plan.add(plan.create(this, NAME, name == null ? null : name.prefixId()), list.toArray());
+      return null;
+    });
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    if(dontEnter) {
+      qs.token(DOTS);
+    } else {
+      enter(() -> {
+        final boolean inlined = !global.isEmpty();
+        if(inlined) {
+          qs.token("((: closure :) ");
+          global.forEach((k, v) -> qs.token(LET).token(k).token(":=").token(v));
+          qs.token(RETURN);
+        }
+        // a named reference captures the query focus: it is not equivalent to an inline function
+        if(name != null) qs.concat("(: ", funcLabel(), " :)");
+        qs.token(FN).params(params).token(AS).token(funcType().refinedType).brace(expr);
+        if(inlined) qs.token(')');
+        return null;
+      });
+    }
+  }
+}

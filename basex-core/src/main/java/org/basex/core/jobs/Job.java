@@ -1,0 +1,388 @@
+package org.basex.core.jobs;
+
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+import org.basex.core.*;
+import org.basex.core.users.*;
+import org.basex.util.*;
+
+/**
+ * Job class. This abstract class is implemented by all command and query instances.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class Job {
+  /** Child jobs. */
+  private final List<Job> children = new CopyOnWriteArrayList<>();
+  /** Job context. */
+  private JobContext jc = new JobContext(this);
+  // state and control flags must be volatile so that all threads see the actual non-cached values
+  /** Handle for canceling the timeout task (can be {@code null}). */
+  private volatile ScheduledFuture<?> timeoutFuture;
+
+  /** This flag indicates that a job is updating. */
+  public volatile boolean updating;
+  /** State of job. */
+  public volatile JobState state = JobState.SCHEDULED;
+  /** Stopped flag. */
+  private volatile boolean stopped;
+
+  /** Job registered on the current thread (used to interrupt blocking operations). */
+  private static final ThreadLocal<Job> CURRENT = new ThreadLocal<>();
+  /** Stoppable threads. */
+  private final Set<Thread> threads = ConcurrentHashMap.newKeySet();
+  /** Resources that are closed if the job is stopped. */
+  private final Set<Closeable> closeables = ConcurrentHashMap.newKeySet();
+  /** Job that was registered on the current thread before this one (can be {@code null}). */
+  private Job previous;
+  /** Indicates that the job holds a run slot and must give it up again. */
+  private boolean registered;
+
+  /**
+   * Returns the job context.
+   * @return info
+   */
+  public final JobContext jc() {
+    return jc;
+  }
+
+  /**
+   * Registers the job (puts it on a queue).
+   * @param ctx context
+   */
+  public final void register(final Context ctx) {
+    // clear a stale interrupt status: threads are reused, and a pending interrupt would make
+    // the first blocking wait of a lock acquisition fail
+    Thread.interrupted();
+
+    previous = CURRENT.get();
+    CURRENT.set(this);
+    jc.context = ctx;
+    ctx.jobs.register(this);
+    registered = true;
+    try {
+      state(JobState.QUEUED);
+      // a nested job runs with the locks of its parent: a thread can only hold a single set
+      if(previous == null) ctx.locking.acquire(this, ctx);
+      state(JobState.RUNNING);
+      jc.performance = new Performance();
+      // non-admin users: stop process after timeout
+      if(!ctx.user().has(Perm.ADMIN)) {
+        startTimeout(ctx, ctx.soptions.get(StaticOptions.TIMEOUT) * 1000L);
+      }
+    } catch(final Throwable th) {
+      // a job that fails to start is never unregistered: it must give up what it holds
+      unregister(ctx);
+      throw th;
+    }
+  }
+
+  /**
+   * Unregisters the job.
+   * @param ctx context
+   */
+  public final void unregister(final Context ctx) {
+    // a job that was never registered has nothing to give up
+    if(!registered) return;
+    try {
+      stopTimeout();
+      // locks are only given back if the acquisition succeeded
+      if(previous == null && ctx.locking.held() != null) ctx.locking.release();
+    } finally {
+      // the job must free its run slot, even if it failed to give up its locks
+      freeSlot(ctx);
+    }
+  }
+
+  /**
+   * Frees the run slot of the job and restores the job that was registered before.
+   * @param ctx context
+   */
+  private void freeSlot(final Context ctx) {
+    registered = false;
+    ctx.jobs.unregister(this);
+    CURRENT.set(previous);
+    previous = null;
+  }
+
+  /**
+   * Returns the currently active job.
+   * @return job
+   */
+  public final Job active() {
+    return children.isEmpty() ? this : children.getFirst().active();
+  }
+
+  /**
+   * Adds a new child job.
+   * @param <J> job type
+   * @param job child job
+   * @return passed on job reference
+   */
+  public final <J extends Job> J pushJob(final J job) {
+    children.add(job);
+    job.jobContext(jc);
+    if(stopped) job.state(state);
+    return job;
+  }
+
+  /**
+   * Pops the last child job (LIFO).
+   */
+  public final synchronized void popJob() {
+    children.removeLast();
+  }
+
+  /**
+   * Removes the specified child job. Used when children are closed concurrently in arbitrary order.
+   * @param job child job to remove
+   */
+  public final void popJob(final Job job) {
+    children.remove(job);
+  }
+
+  /**
+   * Stops a job or sub job.
+   */
+  public final void stop() {
+    state(JobState.STOPPED);
+  }
+
+  /**
+   * Stops a job because of a timeout.
+   */
+  public final void timeout() {
+    state(JobState.TIMEOUT);
+  }
+
+  /**
+   * Stops a job because a memory limit was exceeded.
+   */
+  public final void outOfMemory() {
+    state(JobState.MEMORY);
+  }
+
+  /**
+   * Checks if the job was stopped; if yes, throws a runtime exception.
+   */
+  public final void checkStop() {
+    if(stopped) throw new JobException(Text.INTERRUPTED);
+  }
+
+  /**
+   * Runs a stoppable operation. If no job is registered for the current thread,
+   * the operation is run directly.
+   * @param <T> result type
+   * @param op operation to run
+   * @return result
+   * @throws IOException I/O exception
+   * @throws InterruptedException interrupted exception
+   */
+  public static <T> T run(final Stoppable<T> op) throws IOException, InterruptedException {
+    final Job job = CURRENT.get();
+    return job != null ? job.runStoppable(op) : op.run();
+  }
+
+  /**
+   * Registers a resource that is closed if the job on the current thread is stopped.
+   * @param closeable resource to register
+   * @return handle that unregisters the resource again
+   */
+  public static Binding closeOnStop(final Closeable closeable) {
+    final Job job = CURRENT.get();
+    if(job == null) return () -> { };
+    job.closeables.add(closeable);
+    return () -> job.closeables.remove(closeable);
+  }
+
+  /**
+   * Binds this job to the current thread until the returned handle is closed. Blocking operations
+   * started on the thread (see {@link #run(Stoppable)}) can then be interrupted when the job is
+   * stopped. Intended for jobs that run on a thread outside {@link #register(Context)} (such as
+   * parallelized query branches).
+   * @return handle that restores the previously bound job
+   */
+  public final Binding bind() {
+    final Job job = CURRENT.get();
+    CURRENT.set(this);
+    return () -> CURRENT.set(job);
+  }
+
+  /**
+   * Indicates if the job was stopped.
+   * @return result of check
+   */
+  public final boolean stopped() {
+    return stopped;
+  }
+
+  /**
+   * Sends a new job state.
+   * @param js new state
+   */
+  public final void state(final JobState js) {
+    state = js;
+    final boolean stop = js == JobState.STOPPED || js == JobState.TIMEOUT || js == JobState.MEMORY;
+    if(stop) {
+      stopped = true;
+      for(final Thread thread : threads) thread.interrupt();
+      // blocking socket operations do not react to interrupts: close the resource instead
+      for(final Closeable closeable : closeables) {
+        try {
+          closeable.close();
+        } catch(final Exception ex) {
+          Util.debug(ex);
+        }
+      }
+    }
+    for(final Job job : children) job.state(js);
+    if(stop) stopTimeout();
+  }
+
+  /**
+   * Indicates if the job inherits the run slot of a caller that is blocked until it has finished.
+   * @return result of check
+   */
+  public boolean inheritsSlot() {
+    return false;
+  }
+
+  /**
+   * Collects lock strings (databases, special identifiers) when registering a query.
+   */
+  public void addLocks() {
+    // default (worst case): lock all databases
+    jc.locks.writes.addGlobal();
+  }
+
+  /**
+   * Returns short progress information.
+   * Can be overwritten to give more specific feedback.
+   * @return header information
+   */
+  public String shortInfo() {
+    return Text.PLEASE_WAIT_D;
+  }
+
+  /**
+   * Returns detailed progress information.
+   * Can be overwritten to give more specific feedback.
+   * @return header information
+   */
+  public String detailedInfo() {
+    return Text.PLEASE_WAIT_D;
+  }
+
+  /**
+   * Returns a progress value (0 - 1).
+   * Can be overwritten to give more specific feedback.
+   * @return header information
+   */
+  public double progressInfo() {
+    return 0;
+  }
+
+  /**
+   * Returns true if this job returns a progress value.
+   * This method is only required by the GUI.
+   * @return result of check
+   */
+  public boolean supportsProg() {
+    return false;
+  }
+
+  /**
+   * Returns true if this job can be stopped.
+   * This method is only required by the GUI.
+   * @return result of check
+   */
+  public boolean stoppable() {
+    return false;
+  }
+
+  /**
+   * Recursively assigns the specified job context.
+   * @param ctx job context
+   */
+  final void jobContext(final JobContext ctx) {
+    for(final Job job : children) job.jobContext(ctx);
+    jc = ctx;
+  }
+
+  /**
+   * Runs a blocking operation that is aborted if the job is stopped. The executing thread is
+   * registered while the operation is in progress; {@link #state(JobState)} interrupts it if the
+   * job is stopped, and a resulting failure is replaced with the regular interruption exception.
+   * @param <T> result type
+   * @param op operation to run
+   * @return result
+   * @throws IOException I/O exception
+   * @throws InterruptedException interrupted exception
+   */
+  final <T> T runStoppable(final Stoppable<T> op) throws IOException, InterruptedException {
+    final Thread thread = Thread.currentThread();
+    threads.add(thread);
+    try {
+      checkStop();
+      return op.run();
+    } catch(final IOException | InterruptedException ex) {
+      try {
+        checkStop();
+      } catch(final JobException ex2) {
+        throw (JobException) ex2.initCause(ex);
+      }
+      throw ex;
+    } finally {
+      threads.remove(thread);
+      Thread.interrupted();
+    }
+  }
+
+  /**
+   * A blocking operation that can be interrupted when the surrounding job is stopped.
+   * @param <T> result type
+   */
+  @FunctionalInterface
+  public interface Stoppable<T> {
+    /**
+     * Runs the operation.
+     * @return result
+     * @throws IOException I/O exception
+     * @throws InterruptedException interrupted exception
+     */
+    T run() throws IOException, InterruptedException;
+  }
+
+  /** Handle that unbinds a job from the current thread; see {@link #bind()}. */
+  @FunctionalInterface
+  public interface Binding extends AutoCloseable {
+    @Override
+    void close();
+  }
+
+  // PRIVATE FUNCTIONS ============================================================================
+
+  /**
+   * Schedules the timeout on the shared job scheduler. A previously scheduled timeout is replaced.
+   * @param ctx context
+   * @param ms milliseconds to wait; deactivated if set to 0
+   */
+  void startTimeout(final Context ctx, final long ms) {
+    stopTimeout();
+    if(ms > 0) timeoutFuture = ctx.jobs.schedule(this::timeout, ms);
+  }
+
+  /**
+   * Cancels a scheduled timeout.
+   */
+  private void stopTimeout() {
+    final ScheduledFuture<?> future = timeoutFuture;
+    if(future != null) {
+      future.cancel(false);
+      timeoutFuture = null;
+    }
+  }
+}

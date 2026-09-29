@@ -1,0 +1,405 @@
+package org.basex.query.func;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.func.Function.*;
+
+import org.basex.*;
+import org.basex.core.*;
+import org.basex.core.cmd.*;
+import org.basex.core.parse.Commands.*;
+import org.basex.index.*;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * This class tests the functions of the Fulltext Module.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FtModuleTest extends SandboxTest {
+  /** Test file. */
+  private static final String FILE = "src/test/resources/input.xml";
+
+  /**
+   * Initializes a test.
+   */
+  @BeforeEach public void initTest() {
+    execute(new CreateDB(NAME, FILE));
+    execute(new CreateIndex(CmdIndex.FULLTEXT));
+  }
+
+  /** Test method. */
+  @Test public void contains() {
+    final Function func = _FT_CONTAINS;
+
+    // check index results
+    query(func.args("Assignments", "assignments"), true);
+    query(func.args("Exercise 1", "('exercise', '1')"), true);
+    query(func.args("Exercise 1", wrap(1)), true);
+    query(func.args("Exercise 1", "1"), true);
+    query(func.args("Exercise 1", "X"), false);
+    query(func.args(" ('A', 'B')", " ('C', 'B')"), true);
+
+    // check match options
+    query(func.args("Assignments", "Azzignments", " { 'fuzzy': true() }"), true);
+    query(func.args("Assignments", "Azzignments", " { 'fuzzy': false() }"), false);
+    query(func.args("Assignments", "assignment", " { 'stemming': true() }"), true);
+    query(func.args("Assignment", "assignments", " { 'stemming': true() }"), true);
+    query(func.args("A", "a", " { 'case': 'upper' }"), true);
+    query(func.args("a", "A", " { 'case': 'lower' }"), true);
+    query(func.args("A", "a", " { 'case': 'insensitive' }"), true);
+    query(func.args("A", "a", " { 'case': 'sensitive' }"), false);
+    // check search modes
+    query(func.args("Exercise 1", "1 Exercise", " { 'mode': 'phrase' }"), false);
+    query(func.args("Exercise 1", "1 Exercise", " { 'mode': 'all' }"), false);
+    query(func.args("Exercise 1", "1 Exercise", " { 'mode': 'any' }"), false);
+    query(func.args("Exercise 1", "1 Exercise", " { 'mode': 'any word' }"), true);
+    query(func.args("Exercise 1", "1 Exercise", " { 'mode': 'all words' }"), true);
+
+    query(func.args("databases and xml", "databases xml",
+        " { 'mode': 'all words', 'distance': { 'min': 0, 'max': 1 } }"), true);
+    query(func.args("databases and xml", "databases xml",
+        " { 'mode': 'all words', 'distance': { 'max': 0 } }"), false);
+    query(func.args("databases and xml", "databases xml",
+        " { 'mode': 'all words', 'window': { 'size': 3 } }"), true);
+
+    // GH-2296
+    query(func.args("serch", "serch", " { 'fuzzy': true() }"), true);
+    query(func.args("surch", "serch", " { 'fuzzy': true() }"), true);
+    query(func.args("serch", "surch", " { 'fuzzy': true() }"), true);
+    query(func.args("行イ音便", "行イ音便", " { 'fuzzy': true() }"), true);
+    query(func.args("行イ音音", "行イ音便", " { 'fuzzy': true() }"), true);
+    query(func.args("行イ音便", "行イ音音", " { 'fuzzy': true() }"), true);
+    query(func.args("イイ音便", "行イ音便", " { 'fuzzy': true() }"), true);
+    query(func.args("行イ音便", "イイ音便", " { 'fuzzy': true() }"), true);
+
+    query(func.args("行イ音便", "serch", " { 'fuzzy': true() }"), false);
+    query(func.args("serch", "行イ音便", " { 'fuzzy': true() }"), false);
+
+    // the length of fuzzy tokens is not limited
+    final String long1 = " string-join(replicate('ab', 100))";
+    final String long2 = long1 + " => substring(1, 199) || 'x'";
+    query(func.args(long1, long2, " { 'fuzzy': true(), 'errors': 2 }"), true);
+    query(func.args(long1, long2, " { 'fuzzy': true(), 'errors': 0 }"), true);
+
+    // check occurrences
+    query(func.args("a b a", "a", " { 'occurs': { 'min': 2 } }"), true);
+    query(func.args("a b a", "a", " { 'occurs': { 'min': 3 } }"), false);
+    query(func.args("a b a", "a", " { 'occurs': { 'max': 1 } }"), false);
+    query(func.args("a b a", "a", " { 'occurs': { 'min': 1, 'max': 2 } }"), true);
+
+    // check stop words
+    query(func.args("cat", "the cat", " { 'mode': 'all words' }"), false);
+    query(func.args("cat", "the cat", " { 'mode': 'all words', 'stop-words': 'the' }"), true);
+
+    // options of the query prolog are inherited
+    query("declare ft-option using fuzzy; " + func.args("Assignments", "Azzignments"), true);
+    query("declare ft-option using wildcards; " + func.args("Assignments", "Assign.*"), true);
+    query("declare ft-option using stop words ('the'); " +
+        func.args("cat", "the cat", " { 'mode': 'all words' }"), true);
+    // options of the function call take precedence
+    query("declare ft-option using fuzzy; " +
+        func.args("Assignments", "Azzignments", " { 'fuzzy': false() }"), false);
+
+    // check buggy options
+    error(func.args("x", "x", " { 'x': 'y' }"), INVALIDOPTION_X);
+    error(func.args("x", "x", " { 'mode': '' }"), INVALIDOPTIONVALUE_X);
+    error(func.args("x", "x", " 1"), INVTYPE_X);
+    error("declare ft-option using fuzzy; " +
+        func.args("x", "x", " { 'wildcards': true() }"), FT_OPTIONS);
+  }
+
+  /** Test method. */
+  @Test public void count() {
+    final Function func = _FT_COUNT;
+    query(func.args(" ()"), 0);
+    query(func.args(" //*[text() contains text '1']"), 1);
+    query(func.args(" //li[text() contains text 'exercise']"), 2);
+    query("for $i in //li[text() contains text 'exercise'] return " +
+        func.args(" $i[text() contains text 'exercise']"), "1\n1");
+
+    // constructed nodes
+    query(func.args(" text { 'a b a' }[. contains text 'a']"), 2);
+    query(func.args(" <p>a b a</p>//text()[. contains text 'a']"), 2);
+    query(func.args(" <p>a</p>//text()[. contains text 'b']"), 0);
+  }
+
+  /** Test method. */
+  @Test public void extract() {
+    final Function func = _FT_EXTRACT;
+    query(func.args(" //*[text() contains text '1']"),
+      "<li>Exercise <mark>1</mark></li>");
+    query(func.args(" //*[text() contains text '2'], 'b', 20"),
+      "<li>Exercise <b>2</b></li>");
+    query(func.args(" //*[text() contains text '2'], '_o_', 1"),
+      "<li>...<_o_>2</_o_></li>");
+    contains(func.args(" //*[text() contains text 'Exercise'], 'b', 1"),
+      "<li>...</li>");
+
+    // constructed nodes
+    query(func.args(" <p>Exercise 1</p>[text() contains text '1']"),
+      "<p>Exercise <mark>1</mark></p>");
+    query(func.args(" <p>Exercise 1</p>[text() contains text '1'], 'b', 1"),
+      "<p>...<b>1</b></p>");
+
+    // positions assigned to an ancestor with an identical string value
+    query(func.args(" //li[. contains text '1'], 'b', 20"), "<li>Exercise <b>1</b></li>");
+    query(func.args(" <p>Exercise 1</p>[. contains text '1'], 'b', 20"),
+      "<p>Exercise <b>1</b></p>");
+
+    // only nodes are accepted
+    error(func.args("string"), INVTYPE_X);
+    error(func.args(" //*[text() contains text '1'], 'p:m'"), INVALUE_X_X);
+  }
+
+  /** Test method. */
+  @Test public void mark() {
+    final Function func = _FT_MARK;
+    query(func.args(" //*[text() contains text '1']"),
+      "<li>Exercise <mark>1</mark></li>");
+    query(func.args(" //*[text() contains text '2'], 'b'"),
+      "<li>Exercise <b>2</b></li>");
+    contains(func.args(" //*[text() contains text 'Exercise']"),
+      "<li><mark>Exercise</mark> 1</li>");
+    query("copy $a := text { 'a b' } modify () return " +
+        func.args(" $a[. contains text 'a']", "b"), "<b>a</b>\n b");
+    query("copy $a := text { 'ab' } modify () return " +
+        func.args(" $a[. contains text 'ab'], 'b'"), "<b>ab</b>");
+    query("copy $a := text { 'a b' } modify () return " +
+        func.args(" $a[. contains text 'a b'], 'b'"), "<b>a</b>\n \n<b>b</b>");
+
+    query(COUNT.args(func.args(" //*[text() contains text '1']/../../../../..")), 1);
+
+    // marked nodes are constructed anew for each evaluation
+    query("count(distinct-values(for $i in 1 to 2 return " +
+        GENERATE_ID.args(" " + func.args(" //*[text() contains text '1']")) + "))", 2);
+
+    // positions assigned to an ancestor with an identical string value
+    query(func.args(" //li[. contains text '1']", "b"), "<li>Exercise <b>1</b></li>");
+
+    execute(new CreateDB(NAME, "<a:a xmlns:a='A'>C</a:a>"));
+    query(func.args(" /descendant::*[text() contains text 'C']", "b"),
+        "<a:a xmlns:a=\"A\"><b>C</b></a:a>");
+    execute(new DropDB(NAME));
+    query("copy $c := <A xmlns='A'>A</A> modify () return <X>{ " +
+        func.args(" $c[text() contains text 'A']") + " }</X>/*");
+
+    // constructed nodes
+    query(func.args(" text { 'a b' }[. contains text 'a']", "b"), "<b>a</b>\n b");
+    query(func.args(" text { 'a b' }[. contains text 'a b']", "b"), "<b>a</b>\n \n<b>b</b>");
+    query(func.args(" <p>Exercise 1</p>[text() contains text '1']"),
+      "<p>Exercise <mark>1</mark></p>");
+    query("<X>{ " + func.args(" <A xmlns='A'>A</A>[text() contains text 'A']") + " }</X>/*",
+      "<A xmlns=\"A\"><mark>A</mark></A>");
+
+    query(func.args(" <p>Exercise 1</p>[. contains text '1']", "b"), "<p>Exercise <b>1</b></p>");
+    query(func.args(" <p><i>Exercise 1</i></p>[. contains text '1']", "b"),
+      "<p><i>Exercise <b>1</b></i></p>");
+    // mixed content: positions are assigned to the parent of the marked text nodes
+    query(func.args(" <p>Exercise <i>1</i></p>[. contains text '1']", "b"),
+      "<p>Exercise <i><b>1</b></i></p>");
+    query(func.args(" <p>Exe<i>rcise</i> 1</p>[. contains text 'exercise']", "b"),
+      "<p><b>Exe</b><i><b>rcise</b></i> 1</p>");
+    query(func.args(" <p>a <i>b <j>c</j></i> d</p>[. contains text 'b c']", "b"),
+      "<p>a <i><b>b</b> <j><b>c</b></j></i> d</p>");
+    query(func.args(" <p>a<!--c--><?p i?> b</p>[. contains text 'b']", "b"),
+      "<p>a<!--c--><?p i?> <b>b</b></p>");
+    query(func.args(" <p>bb<i>bb</i> b bb<i>bb</i></p>[. contains text 'bbbb']", "m"),
+      "<p><m>bb</m><i><m>bb</m></i> b <m>bb</m><i><m>bb</m></i></p>");
+    query("let $p := <p>b <i>b</i> b</p> return " +
+      func.args(" ($p, $p/i)[. contains text 'b']", "m"),
+      "<p><m>b</m> <i><m>b</m></i> <m>b</m></p>\n<i><m>b</m></i>");
+
+    // marker names must be NCNames
+    error(func.args(" //*[text() contains text '1'], 'p:m'"), INVALUE_X_X);
+    error(func.args(" //*[text() contains text '1'], '1'"), INVALUE_X_X);
+  }
+
+  /** Test method. */
+  @Test public void normalize() {
+    final Function func = _FT_NORMALIZE;
+
+    query(func.args(" ()"), "");
+    query(func.args(" []"), "");
+
+    query(func.args("A bc"), "a bc");
+    query(func.args("A bc", " { 'case': 'sensitive' }"), "A bc");
+    query(func.args("Æsir ÆSIR Ĳssel ＢａｓｅＸ", " { 'case': 'sensitive' }"),
+        "Aesir AESIR IJssel BaseX");
+    query(func.args("\u00e4", " { 'diacritics': 'sensitive' }"), "\u00e4");
+    query(func.args("gifts", " { 'stemming': true() }"), "gift");
+
+    query("declare ft-option using stemming; " + func.args("Gifts"), "gift");
+    query(func.args(""), "");
+    query(func.args("a!b:c"), "a!b:c");
+
+    query(_FT_NORMALIZE.args("&#778;", " { 'stemming': true(), 'language': 'de' }"), "");
+    query("'/' ! " + func.args(" ."), "/");
+
+    query(_FT_NORMALIZE.args("a*", " { 'stemming': true(), 'language': 'de' }"), "a*");
+
+    // characters that denote multiple letters are expanded
+    query(func.args("straße"), "strasse");
+    query(func.args("STRAẞE"), "strasse");
+    query(func.args("Ærø"), "aero");
+    query(func.args("ǣ"), "ae");
+    query(func.args("Œuvre"), "oeuvre");
+    query(func.args("Þor"), "thor");
+    query(func.args("ĳssel"), "ijssel");
+    query(func.args("ﬁnance"), "finance");
+    query(func.args("ﬄue"), "fflue");
+
+    // modified letters are reduced to their base letter, not transliterated
+    query(func.args("Malmö Åre Guðmundur Łódź"), "malmo are gudmundur lodz");
+
+    // codepoints of the 1E00 block that are not mapped explicitly
+    query(func.args("Ḁ"), "a");
+    query(func.args("ẟ"), "ẟ");
+  }
+
+  /** Test method. */
+  @Test public void score() {
+    final Function func = _FT_SCORE;
+    query(func.args(_FT_SEARCH.args(NAME, "2")), 1);
+    query(func.args(_FT_SEARCH.args(NAME, "XML")), "1\n0.5");
+  }
+
+  /** Test method. */
+  @Test public void search() {
+    final Function func = _FT_SEARCH;
+
+    // check index results
+    query(func.args(NAME, "assignments"), "Assignments");
+    query(func.args(NAME, " ('exercise', '1')"), "Exercise 1\nExercise 2");
+    query(func.args(NAME, wrap(1)), "Exercise 1");
+    query(func.args(NAME, "1"), "Exercise 1");
+    query(func.args(NAME, "XXX"), "");
+
+    // apply index options to query term
+    set(MainOptions.STEMMING, true);
+    execute(new CreateIndex("fulltext"));
+    contains(func.args(NAME, "Exercises") + "/..", "<li>Exercise 1</li>");
+    set(MainOptions.STEMMING, false);
+    execute(new CreateIndex(CmdIndex.FULLTEXT));
+
+    // check match options
+    query(func.args(NAME, "Assignments", " {}"), "Assignments");
+    query(func.args(NAME, "Azzignments", " { 'fuzzy': true() }"), "Assignments");
+    query(func.args(NAME, "Azzignments", " { 'fuzzy': false() }"), "");
+    // check search modes
+    query(func.args(NAME, "1 Exercise", " { 'mode': 'phrase' }"), "");
+    query(func.args(NAME, "1 Exercise", " { 'mode': 'all' }"), "");
+    query(func.args(NAME, "1 Exercise", " { 'mode': 'any' }"), "");
+    query(func.args(NAME, "1 Exercise", " { 'mode': 'any word' }"), "Exercise 1\nExercise 2");
+    query(func.args(NAME, "1 Exercise", " { 'mode': 'all words' }"), "Exercise 1");
+
+    query(func.args(NAME, "databases xml",
+        " { 'mode': 'all words', 'distance': { 'min': 0, 'max': 1 } }"),
+        "Databases and XML");
+    query(func.args(NAME, "databases xml",
+        " { 'mode': 'all words', 'distance': { 'max': 0 } }"),
+        "");
+    query(func.args(NAME, "databases xml",
+        " { 'mode': 'all words', 'window': { 'size': 3 } }"),
+        "Databases and XML");
+
+    // check stop words
+    query(func.args(NAME, "the assignments", " { 'mode': 'all words' }"), "");
+    query(func.args(NAME, "the assignments",
+        " { 'mode': 'all words', 'stop-words': 'the' }"), "Assignments");
+
+    // options of the query prolog are inherited
+    query("declare ft-option using fuzzy; " + func.args(NAME, "Azzignments"), "Assignments");
+
+    // tokenization options are dictated by the index
+    error(func.args(NAME, "x", " { 'stemming': true() }"), INVALIDOPTION_X);
+
+    // check buggy options
+    error(func.args(NAME, "x", " { 'x': 'y' }"), INVALIDOPTION_X);
+    error(func.args(NAME, "x", " { 'mode': '' }"), INVALIDOPTIONVALUE_X);
+    error(func.args(NAME, "x", " 1"), INVTYPE_X);
+  }
+
+  /** Test method. */
+  @Test public void thesaurus() {
+    final Function func = _FT_THESAURUS;
+    final String doc = " doc('src/test/resources/thesaurus.xml')";
+
+    query(func.args(doc, "happy"), "lucky\nhappy");
+    query(func.args(doc, "happy", " { 'levels': 0 }"), "");
+    query(func.args(doc, "happy", " { 'levels': 5 }"), "lucky\nhappy");
+    query(func.args(doc, "happy", " { 'relationship': 'RT' }"), "lucky\nhappy");
+    query(func.args(doc, "happy", " { 'relationship': 'XYZ' }"), "");
+
+    // index options are rejected
+    error(func.args(doc, "happy", " { 'fuzzy': true() }"), INVALIDOPTION_X);
+    error(func.args(doc, "happy", " { 'mode': 'all' }"), INVALIDOPTION_X);
+  }
+
+  /** Test method. */
+  @Test public void tokenize() {
+    final Function func = _FT_TOKENIZE;
+
+    query(func.args(" ()"), "");
+    query(func.args(" []"), "");
+
+    query(func.args("A bc"), "a\nbc");
+    query(func.args("A bc", " { 'case': 'sensitive' }"), "A\nbc");
+    query(func.args("\u00e4", " { 'diacritics': 'sensitive' }"), "\u00e4");
+    query(func.args("gifts", " { 'stemming': true() }"), "gift");
+
+    query("declare ft-option using stemming; " + func.args("Gifts"), "gift");
+    query("count(" + func.args("") + ')', 0);
+    query("count(" + func.args("a!b:c") + ')', 3);
+  }
+
+  /** Test method. */
+  @Test public void tokens() {
+    final Function func = _FT_TOKENS;
+    execute(new CreateIndex(IndexType.FULLTEXT));
+
+    String entries = func.args(NAME);
+    query("count(" + entries + ')', 7);
+    query("exists(" + entries + "/self::entry)", true);
+    query(entries + "/@count = 1", true);
+    query(entries + "/@count = 2", true);
+    query(entries + "/@count = 3", false);
+
+    entries = func.args(NAME, "a");
+    query("count(" + entries + ')', 2);
+
+    // an empty search term returns all entries
+    query("count(" + func.args(NAME, " ()") + ')', 7);
+  }
+
+  /** Test method. */
+  @Test public void tokensFuzzy() {
+    final Function func = _FT_TOKENS;
+    final String fuzzy = " { 'fuzzy': true(), 'errors': 1 }";
+
+    // entries within the maximum number of errors are returned
+    query(func.args(NAME, "exercse", fuzzy) + "/text()", "exercise");
+    query(func.args(NAME, "xnl", fuzzy) + "/text()", "xml");
+    query("count(" + func.args(NAME, "zzzzzz", fuzzy) + ')', 0);
+
+    // the term is matched as a whole, not as a prefix
+    query("count(" + func.args(NAME, "exerc", fuzzy) + ')', 0);
+    query("count(" + func.args(NAME, "exerc") + ')', 1);
+    query(func.args(NAME, "exerc", " { 'fuzzy': true(), 'errors': 3 }") + "/text()", "exercise");
+
+    // the counts of the index are preserved
+    query(func.args(NAME, "exercse", fuzzy) + "/@count/string()", 2);
+
+    // dynamic number of errors; negative values are treated like 0
+    query(func.args(NAME, "exercse", " { 'fuzzy': true() }") + "/text()", "exercise");
+    query("count(" + func.args(NAME, "xnl", " { 'fuzzy': true() }") + ')', 0);
+    query(func.args(NAME, "exercse", " { 'fuzzy': true(), 'errors': 0 }") + "/text()", "exercise");
+    query(func.args(NAME, "exercse", " { 'fuzzy': true(), 'errors': -1 }") + "/text()", "exercise");
+
+    // without a search term, the option has no effect
+    query("count(" + func.args(NAME, " ()", " { 'fuzzy': true() }") + ')', 7);
+
+    error(func.args(NAME, "a", " { 'unknown': 1 }"), INVALIDOPTION_X);
+  }
+}

@@ -1,0 +1,172 @@
+package org.basex.util;
+
+import java.util.*;
+
+import org.basex.query.*;
+import org.basex.query.value.type.*;
+
+/**
+ * This class contains information on the original query, which will be evaluated for
+ * error feedback and debugging purposes.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class InputInfo {
+  /**
+   * Indicates if a raised error will only be handled internally.
+   * If this flag is activated, only light-weight errors will be created.
+   */
+  private boolean internal;
+  /** Input path. */
+  private final String path;
+  /** Enclosing declaration (can be {@code null}). */
+  private final String decl;
+  /** Static context (can be {@code null}). */
+  private StaticContext sc;
+  /** Input string as codepoints (can be {@code null}). */
+  private int[] input;
+  /** Line number ({@code 0} if not initialized). */
+  private int line;
+  /** Column number or (if not initialized) string position. */
+  private int column;
+
+  /**
+   * Constructor.
+   * @param parser input parser, containing information on the current parsing state
+   */
+  public InputInfo(final InputParser parser) {
+    this(parser, null, null);
+  }
+
+  /**
+   * Constructor.
+   * @param parser input parser, containing information on the current parsing state
+   * @param sc static context (can be {@code null})
+   * @param decl enclosing declaration (can be {@code null})
+   */
+  public InputInfo(final InputParser parser, final StaticContext sc, final String decl) {
+    input = parser.input;
+    path = parser.path;
+    column = parser.pos;
+    this.sc = sc;
+    this.decl = decl;
+  }
+
+  /**
+   * Constructor.
+   * @param path input path
+   * @param line line
+   * @param col column
+   */
+  public InputInfo(final String path, final int line, final int col) {
+    this(path, line, col, null);
+  }
+
+  /**
+   * Constructor.
+   * @param path input path
+   * @param line line
+   * @param col column
+   * @param decl enclosing declaration (can be {@code null})
+   */
+  public InputInfo(final String path, final int line, final int col, final String decl) {
+    this.path = path;
+    this.line = line;
+    column = col;
+    this.decl = decl;
+  }
+
+  /**
+   * Returns the input reference.
+   * @return input reference
+   */
+  public String path() {
+    return path;
+  }
+
+  /**
+   * Returns the line position.
+   * @return line position
+   */
+  public int line() {
+    init();
+    return line;
+  }
+
+  /**
+   * Returns the column position.
+   * @return column position
+   */
+  public int column() {
+    init();
+    return column;
+  }
+
+  /**
+   * Returns the static context.
+   * @return static context (can be {@code null})
+   */
+  public StaticContext sc() {
+    return sc;
+  }
+
+  /**
+   * Returns the declaration that encloses this position.
+   * @return declaration (can be {@code null})
+   */
+  public String decl() {
+    return decl;
+  }
+
+  /**
+   * Calculates the column and line number in a string.
+   */
+  public void init() {
+    // positions have already been calculated
+    if(line != 0) return;
+
+    final int cl = Math.min(column, input.length);
+    int l = 1, c = 1;
+    for(int i = 0; i < cl; i++) {
+      final int cp = input[i];
+      if(cp == '\n') { l++; c = 1; } else { c++; }
+    }
+    line = l;
+    column = c;
+  }
+
+  /**
+   * Returns the check flag (invoked by {@link QueryError#get(InputInfo, Object...)}).
+   * @return check flag
+   */
+  public boolean internal() {
+    return internal;
+  }
+
+  /**
+   * Activates light-weight error handling (invoked e.g. by {@link SeqType#cast(
+   * org.basex.query.value.Value, boolean, QueryContext, InputInfo)}).
+   * @param value value to set
+   */
+  public void internal(final boolean value) {
+    internal = value;
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final InputInfo ii &&
+        (path != null ? path.equals(ii.path) : Arrays.equals(input, ii.input)) &&
+        column() == ii.column() && line() == ii.line();
+  }
+
+  @Override
+  public int hashCode() {
+    return (path != null ? path.hashCode() : Arrays.hashCode(input)) + (column() ^ line());
+  }
+
+  @Override
+  public String toString() {
+    return Strings.concat(path == null ? "." : path, ", ", line(), '/', column());
+  }
+}

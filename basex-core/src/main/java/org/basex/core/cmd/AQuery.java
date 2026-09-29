@@ -1,0 +1,250 @@
+package org.basex.core.cmd;
+
+import static org.basex.core.Text.*;
+import static org.basex.query.QueryError.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.Map.*;
+
+import org.basex.core.*;
+import org.basex.core.jobs.*;
+import org.basex.core.parse.*;
+import org.basex.core.users.*;
+import org.basex.io.out.*;
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+
+/**
+ * Abstract class for database queries.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class AQuery extends Command {
+  /** External variable bindings. */
+  protected final HashMap<String, Entry<Object, String>> bindings = new HashMap<>();
+
+  /** Query string. */
+  private final String query;
+  /** Query processor (can be {@code null}). */
+  private QueryProcessor qp;
+  /** Query info (can be {@code null}). */
+  private QueryInfo info;
+  /** Sections of the query information (can be {@code null}). */
+  private QueryInfo.Sections sections;
+  /** Error message (can be {@code null}). */
+  private String message;
+  /** Query plan was serialized. */
+  private boolean plan;
+  /** Maximum number of results (ignored if negative). */
+  private int maxResults = -1;
+  /** Indicates if the query has performed updates. */
+  private boolean updated;
+
+  /**
+   * Protected constructor.
+   * @param openDB requires opened database
+   * @param arg argument
+   * @param query query string (can be identical to argument)
+   */
+  AQuery(final boolean openDB, final String arg, final String query) {
+    super(Perm.NONE, openDB, arg);
+    this.query = query;
+  }
+
+  @Override
+  protected boolean run() {
+    final boolean queryinfo = options.get(MainOptions.QUERYINFO);
+    String error = null;
+    long hits = 0;
+    if(exception != null) {
+      error = Util.message(exception);
+    } else {
+      try {
+        final boolean runquery = options.get(MainOptions.RUNQUERY);
+        final boolean serialize = options.get(MainOptions.SERIALIZE);
+        final boolean optplan = options.get(MainOptions.OPTPLAN);
+        final int runs = Math.max(1, options.get(MainOptions.RUNS));
+        for(int r = 0; r < runs; r++) {
+          // reuse existing processor instance
+          if(r != 0) {
+            qp = null;
+            popJob();
+          }
+          init(context);
+
+          queryPlan(!optplan);
+          qp.optimize();
+          queryPlan(optplan);
+          if(!runquery) continue;
+
+          final PrintOutput po = r == 0 && serialize ? out : new NullOutput();
+          try(Serializer ser = qp.serializer(po)) {
+            if(maxResults >= 0) {
+              qp.cache(this, maxResults);
+              hits = result.size();
+              result.serialize(ser);
+              if(exception instanceof final QueryException ex) throw ex;
+              if(exception instanceof final JobException ex) throw ex;
+            } else {
+              hits = 0;
+              final Iter iter = qp.iter();
+              for(Item item; (item = iter.next()) != null;) {
+                ser.serialize(item);
+                ++hits;
+                checkStop();
+              }
+            }
+          }
+          qp.close();
+        }
+      } catch(final QueryException | JobException | IOException ex) {
+        exception = ex;
+        error = Util.message(ex);
+      } catch(final StackOverflowError ex) {
+        Util.debug(ex);
+        error = BASEX_OVERFLOW.message();
+      } catch(final RuntimeException ex) {
+        exception = ex;
+      } finally {
+        // close processor after exceptions
+        if(qp != null) qp.close();
+      }
+    }
+    // add query plan, if not done yet, and info string
+    queryPlan(true);
+    info(info.toString(qp, out.size(), hits, jc().locks, error == null));
+    // the info view is given the same information as data
+    sections = info.toSections(qp, out.size(), hits, jc().locks);
+    message = error != null ? error : exception != null ? Util.message(exception) : null;
+
+    // release the processor: the commands of a script stay referenced until the script has finished
+    if(qp != null) {
+      updated = qp.updates() != 0;
+      popJob(qp);
+      qp = null;
+    }
+
+    // error
+    if(error != null) return error(queryinfo ?
+        info() + Strings.titleCase(QueryInfo.ERROR) + COL + NL + error : error);
+    // critical error
+    if(exception instanceof final RuntimeException ex) throw ex;
+    // success
+    return true;
+  }
+
+  /**
+   * Enforces a maximum number of query results. This method is only required by the GUI.
+   * @param max maximum number of results (ignored if negative)
+   */
+  public final void maxResults(final int max) {
+    maxResults = max;
+  }
+
+  /**
+   * Returns the serialization parameters.
+   * @param ctx context
+   * @return serialization parameters
+   */
+  public final String parameters(final Context ctx) {
+    try {
+      init(ctx);
+      return qp.qc.parameters().toString();
+    } catch(final QueryException ex) {
+      error(ex);
+    }
+    return SerializerMode.DEFAULT.get().toString();
+  }
+
+  @Override
+  public final boolean updating(final Context ctx) {
+    try {
+      init(ctx);
+      return qp.updating;
+    } catch(final QueryException | JobException ex) {
+      qp.close();
+      exception = ex;
+      return false;
+    } catch(final RuntimeException ex) {
+      qp.close();
+      exception = ex;
+      throw ex;
+    }
+  }
+
+  @Override
+  public final boolean updated(final Context ctx) {
+    return updated;
+  }
+
+  @Override
+  public final void addLocks() {
+    qp.addLocks();
+  }
+
+  @Override
+  public final void build(final CmdBuilder cb) {
+    cb.init().add(0);
+  }
+
+  @Override
+  public final boolean stoppable() {
+    return true;
+  }
+
+  /**
+   * Returns the sections of the query information.
+   * @return sections (can be {@code null})
+   */
+  public final QueryInfo.Sections sections() {
+    return sections;
+  }
+
+  /**
+   * Returns the error message of a failed query.
+   * @return message (can be {@code null})
+   */
+  public final String message() {
+    return message;
+  }
+
+  /**
+   * Initializes the query processor.
+   * @param ctx database context
+   * @throws QueryException query exception
+   */
+  private void init(final Context ctx) throws QueryException {
+    if(qp != null) return;
+
+    if(info == null) info = new QueryInfo(ctx);
+    else info.reset();
+
+    qp = pushJob(new QueryProcessor(query, uri, ctx, info));
+
+    for(final Entry<String, Entry<Object, String>> entry : bindings.entrySet()) {
+      final Entry<Object, String> value = entry.getValue();
+      qp.variable(entry.getKey(), value.getKey(), value.getValue());
+    }
+    qp.parse();
+    qp.compile();
+  }
+
+  /**
+   * Generates a query plan.
+   * @param create create plan
+   */
+  private void queryPlan(final boolean create) {
+    if(create && !plan && options.get(MainOptions.XMLPLAN)) {
+      final String xml = info.planInfo(qp);
+      if(!xml.isEmpty()) {
+        info(xml);
+        plan = true;
+      }
+    }
+  }
+}

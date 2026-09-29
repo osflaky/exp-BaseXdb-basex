@@ -1,0 +1,93 @@
+package org.basex.query.func.db;
+
+import org.basex.data.*;
+import org.basex.index.resource.*;
+import org.basex.query.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class DbList extends DbAccessFn {
+  @Override
+  public final Iter iter(final QueryContext qc) throws QueryException {
+    final String name = toZeroString(arg(0), qc);
+    return name.isEmpty() ? list(qc) : resources(name, qc);
+  }
+
+  /**
+   * Returns a list of all databases.
+   * @param qc query context
+   * @return databases
+   */
+  Iter list(final QueryContext qc) {
+    final StringList dbs = qc.context.databases.list(qc.user, null);
+    final TokenList list = new TokenList(dbs.size());
+    for(final String name : dbs) list.add(name);
+    return StrSeq.get(list).iter();
+  }
+
+  /**
+   * Returns an iterator over all resources in a databases.
+   * @param name name of database
+   * @param qc query context
+   * @return resource iterator
+   * @throws QueryException query exception
+   */
+  Iter resources(final String name, final QueryContext qc) throws QueryException {
+    final Data data = toData(name, qc);
+    final String path = toZeroString(arg(1), qc);
+
+    final Resources resources = data.resources;
+    final IntList docs = resources.docs(path);
+    final StringList binaries = resources.paths(path, ResourceType.BINARY);
+    final StringList values = resources.paths(path, ResourceType.VALUE);
+    final int ds = docs.size(), bs = ds + binaries.size(), size = bs + values.size();
+
+    return new BasicIter<Str>(size) {
+      @Override
+      public Str get(final long i) {
+        return Str.get(i < ds ? data.text(docs.get((int) i), true) :
+          Token.token(i < bs ? binaries.get((int) i - ds) : values.get((int) i - bs)));
+      }
+    };
+  }
+
+  /**
+   * Creates a directory element.
+   * @param path path
+   * @param mdate modified date
+   * @return resource node
+   */
+  static FNode dir(final String path, final long mdate) {
+    final String date = DateTime.format(mdate);
+    return FElem.build(Q_DIR).text(path).attr(Q_MODIFIED_DATE, date).finish();
+  }
+
+  /**
+   * Creates a resource element.
+   * @param path path to resource
+   * @param mdate modified date
+   * @param size size
+   * @param type resource type
+   * @return resource node
+   */
+  static FNode resource(final String path, final long mdate, final long size,
+      final ResourceType type) {
+
+    final FBuilder elem = FElem.build(Q_RESOURCE).text(path);
+    elem.attr(Q_TYPE, type);
+    elem.attr(Q_CONTENT_TYPE, type.contentType(path));
+    elem.attr(Q_MODIFIED_DATE, DateTime.format(mdate));
+    elem.attr(Q_SIZE, size);
+    return elem.finish();
+  }
+}

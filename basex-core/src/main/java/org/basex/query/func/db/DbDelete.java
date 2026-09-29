@@ -1,0 +1,37 @@
+package org.basex.query.func.db;
+
+import org.basex.data.*;
+import org.basex.index.resource.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.up.*;
+import org.basex.query.up.primitives.db.*;
+import org.basex.query.up.primitives.node.*;
+import org.basex.query.value.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class DbDelete extends DbAccessFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Data data = toData(qc);
+    final String path = toDbPath(arg(1), qc);
+
+    // delete XML resources
+    final Updates updates = qc.updates();
+    for(final int pre : data.resources.docs(path).toArray()) {
+      updates.add(new DeleteNode(pre, data, info), qc);
+    }
+    // delete file resources
+    for(final ResourceType type : Resources.BINARIES) {
+      final IOFile bin = data.meta.file(path, type);
+      if(bin != null) updates.add(new DBDelete(data, bin, type, info), qc);
+    }
+    return Empty.VALUE;
+  }
+}

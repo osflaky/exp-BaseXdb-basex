@@ -1,0 +1,245 @@
+package org.basex.http.web;
+
+import static java.math.BigInteger.*;
+import static org.basex.http.web.WebText.*;
+
+import java.math.*;
+import java.util.*;
+import java.util.regex.*;
+
+import org.basex.query.*;
+import org.basex.query.util.hash.*;
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+
+/**
+ * Web path template, shared by RESTXQ and WebSocket endpoints.
+ *
+ * @author BaseX Team, BSD License
+ * @author Dimitar Popov
+ * @param pattern compiled regular expression which matches paths defined by the path annotation
+ * @param varNames variable names defined in the path template
+ * @param segments number of path segments
+ * @param varsPos bit array with variable positions within the path template
+ */
+record WebPathMatcher(Pattern pattern, List<QNm> varNames, int segments, BigInteger varsPos)
+    implements Comparable<WebPathMatcher> {
+  /** Default matcher for empty path templates. */
+  private static final WebPathMatcher EMPTY =
+      new WebPathMatcher(Pattern.compile("/"), Collections.emptyList(), 0, ZERO);
+
+  /**
+   * Checks if the given path matches.
+   * @param path path to match
+   * @return result of check
+   */
+  boolean matches(final String path) {
+    return matcher(path).matches();
+  }
+
+  /**
+   * Gets variable values for the given path.
+   * @param path from which to read the values
+   * @return map with variable values
+   */
+  QNmMap<String> values(final String path) {
+    final QNmMap<String> result = new QNmMap<>();
+    final Matcher m = matcher(path);
+    if(m.matches()) {
+      final int groupCount = m.groupCount();
+      if(varNames.size() <= groupCount) {
+        int group = 1;
+        for(final QNm var : varNames) {
+          result.put(var, m.group(group));
+          // skip nested groups
+          final int end = m.end(group);
+          while(++group <= groupCount && m.start(group) < end);
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Creates a pattern matcher for the given string.
+   * @param input input string
+   * @return pattern matcher
+   */
+  private Matcher matcher(final String input) {
+    return pattern.matcher(input);
+  }
+
+  @Override
+  public int compareTo(final WebPathMatcher wpm) {
+    // compare number of path segments: path with fewer segments is less specific
+    final int d = wpm.segments - segments;
+    if(d != 0) return d;
+
+    // look for templates: segment with template is less specific
+    for(int s = 0; s < segments; s++) {
+      final boolean t1 = varsPos.testBit(s), t2 = wpm.varsPos.testBit(s);
+      if(t1 != t2) return t1 ? 1 : -1;
+    }
+
+    // identical specificity
+    return 0;
+  }
+
+  /**
+   * Parses a path template.
+   * @param path path template string to be parsed
+   * @param info input info (can be {@code null})
+   * @param err error code to raise on a malformed template (RESTXQ or WebSocket)
+   * @return parsed path template
+   * @throws QueryException query exception
+   */
+  static WebPathMatcher parse(final String path, final InputInfo info, final QueryError err)
+      throws QueryException {
+    if(path.isEmpty()) return EMPTY;
+
+    final ArrayList<QNm> varNames = new ArrayList<>();
+    final StringBuilder result = new StringBuilder();
+    final StringBuilder literals = new StringBuilder();
+    final TokenBuilder variable = new TokenBuilder();
+    final StringBuilder regex = new StringBuilder();
+    final BitSet varsPos = new BitSet();
+    int segment = 0;
+
+    final CharIterator i = new CharIterator(path);
+    if(path.charAt(0) == '/') i.next();
+    literals.append('/');
+
+    while(i.hasNext()) {
+      char ch = i.next();
+      if(ch == '{') {
+        decodeAndEscape(literals, result, info, err);
+
+        // variable
+        if(!i.hasNext() || i.nextNonWS() != '$')
+          throw err.get(info, Util.info(INV_TEMPLATE_X, path));
+
+        // default variable regular expression
+        regex.append("[^/]+?");
+
+        int braces = 1;
+        while(i.hasNext()) {
+          ch = i.nextNonWS();
+
+          if(ch == '=') {
+            regex.setLength(0);
+            addRegex(i, regex);
+            if(regex.isEmpty()) throw err.get(info, Util.info(INV_TEMPLATE_X, path));
+            break;
+          } else if(ch == '{') {
+            ++braces;
+          } else if(ch == '}' && --braces == 0) {
+            break;
+          }
+          variable.add(ch);
+        }
+
+        final byte[] var = variable.toArray();
+        if(!XMLToken.isQName(var)) throw err.get(info, Util.info(INV_VARNAME_X, variable));
+        varNames.add(new QNm(var));
+        variable.reset();
+        varsPos.set(segment);
+
+        result.append('(').append(regex).append(')');
+        regex.setLength(0);
+      } else {
+        if(ch == '/') ++segment;
+        literals.append(ch);
+      }
+    }
+    decodeAndEscape(literals, result, info, err);
+
+    final BigInteger vp = varsPos.cardinality() == 0 ? ZERO : new BigInteger(varsPos.toByteArray());
+    return new WebPathMatcher(Pattern.compile(result.toString()), varNames, segment + 1, vp);
+  }
+
+  /**
+   * Parses a regular expression defined for a template variable.
+   * @param i character iterator positioned before the first character of the regex
+   * @param result string builder where the parsed regular expression will be appended to
+   */
+  private static void addRegex(final CharIterator i, final StringBuilder result) {
+    int braces = 1;
+    while(i.hasNext()) {
+      final char ch = i.nextNonWS();
+      if(ch == '{') ++braces;
+      else if(ch == '}' && --braces == 0) break;
+      result.append(ch);
+    }
+  }
+
+  /**
+   * Decodes the URL and escapes regex characters in path template literals.
+   * @param literals literals to escape
+   * @param result string builder where the escaped literals will be appended to
+   * @param info input info (can be {@code null})
+   * @param err error code to raise on invalid encodings
+   * @throws QueryException query exception
+   */
+  private static void decodeAndEscape(final StringBuilder literals, final StringBuilder result,
+      final InputInfo info, final QueryError err) throws QueryException {
+
+    if(!literals.isEmpty()) {
+      final String path = XMLToken.decodeUri(literals.toString());
+      if(path.contains("\uFFFD")) throw err.get(info, Util.info(INV_ENCODING_X, literals));
+      final TokenBuilder tb = new TokenBuilder(path.length());
+      path.codePoints().forEach(cp -> {
+        if(".^&!?-:<>()[]{}$=,*+|".indexOf(cp) >= 0) tb.addByte((byte) '\\');
+        tb.add(cp);
+      });
+      result.append(tb);
+      literals.setLength(0);
+    }
+  }
+
+  /** Character iterator. */
+  private static final class CharIterator {
+    /** Input text to iterate over. */
+    private final String input;
+    /** Input text length. */
+    private final int len;
+    /** Current iterator position. */
+    private int pos;
+
+    /**
+     * Construct a new character iterator for the given input text.
+     * @param input input text to iterator over
+     */
+    CharIterator(final String input) {
+      this.input = input;
+      len = input.length();
+    }
+
+    /**
+     * Check if there are more characters to iterate over.
+     * @return {@code false} if text end is reached
+     */
+    boolean hasNext() {
+      return pos < len;
+    }
+
+    /**
+     * Get next character.
+     * @return next character
+     */
+    char next() {
+      return input.charAt(pos++);
+    }
+
+    /**
+     * Get next non-white-space character.
+     * @return non-white-space character
+     */
+    char nextNonWS() {
+      char ch;
+      do {
+        ch = next();
+      } while(Character.isWhitespace(ch) && hasNext());
+      return ch;
+    }
+  }
+}

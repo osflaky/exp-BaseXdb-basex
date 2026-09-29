@@ -1,0 +1,101 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+
+import org.basex.build.Parser;
+import org.basex.build.xml.*;
+import org.basex.build.xml.SAXHandler.*;
+import org.basex.core.*;
+import org.basex.core.CommonOptions.*;
+import org.basex.core.users.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+import org.basex.util.options.*;
+import org.xml.sax.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class FnParseXmlFragment extends Docs {
+  /** Function options. */
+  public static class ParseXmlFragmentOptions extends Options {
+    /** Document node's base URI. */
+    public static final StringOption BASE_URI =
+        new StringOption(CommonOptions.BASE_URI, null, Types.ANY_URI_O);
+    /** Remove whitespace-only text nodes. */
+    public static final EnumOption<StripSpace> STRIP_SPACE =
+        new EnumOption<>(CommonOptions.STRIP_SPACE, StripSpace.NONE);
+    /** Retain the source location of parsed nodes (see {@link FnLocation}). */
+    public static final BooleanOption RETAIN_LOCATION =
+        new BooleanOption(CommonOptions.RETAIN_LOCATION, false);
+    /** Custom option (see {@link MainOptions#STRIPNS}). */
+    public static final BooleanOption STRIPNS = new BooleanOption(CommonOptions.STRIPNS, false);
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return parse(qc, true, toOptions(arg(1), new ParseXmlFragmentOptions(), qc));
+  }
+
+  @Override
+  protected final Expr opt(final CompileContext cc) {
+    return optFirst();
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return visitAll(visitor, exprs);
+  }
+
+  /**
+   * Returns a document node for the parsed XML input.
+   * @param qc query context
+   * @param fragment parse fragment
+   * @param options options
+   * @return result or {@link Empty#VALUE}
+   * @throws QueryException query exception
+   */
+  final Item parse(final QueryContext qc, final boolean fragment, final Options options)
+      throws QueryException {
+    final Item value = arg(0).atomItem(qc, info);
+    if(value.isEmpty()) return Empty.VALUE;
+
+    check(options, fragment, qc);
+
+    final String baseURI = options.get(CommonOptions.BASE_URI) instanceof final String uri ? uri :
+      string(sc().baseURI().string());
+    final String encoding = value instanceof Bin ? null : Strings.UTF8;
+    final IO io = new IOContent(toBytes(value), baseURI, encoding);
+
+    final MainOptions mopts = new MainOptions(options, qc.context.options);
+    // untrusted calls may only access catalog-mapped resources with create permissions
+    if(!mopts.isTrusted() && !qc.user.has(Perm.CREATE)) mopts.put(MainOptions.CATALOG, "");
+    try {
+      final boolean ip = fragment || mopts.get(MainOptions.INTPARSE);
+      return new DBNode(ip ? new XMLParser(io, mopts, fragment) : Parser.xmlParser(io, mopts));
+    } catch(final IOException ex) {
+      final Throwable th = ex.getCause();
+      if(th instanceof TrustedViolationException)
+        throw EXTERNALRESOURCE_X.get(info, th.getMessage()).cause(ex);
+      final QueryException qe = !(th instanceof ValidationException) ? SAXERR_X.get(info, ex) :
+        mopts.get(MainOptions.DTDVALIDATION) ? DTDVALIDATIONERR_X.get(info, ex) :
+          XSDVALIDATIONERR_X.get(info, ex);
+      if(th instanceof SAXException) qe.value(Str.get(th.toString()));
+      throw qe;
+    }
+  }
+}

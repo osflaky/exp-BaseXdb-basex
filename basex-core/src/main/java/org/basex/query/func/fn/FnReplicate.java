@@ -1,0 +1,201 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.func.Function.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnReplicate extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Expr input = arg(0);
+    final long count = toLong(arg(1).atomItem(qc, info), 0);
+
+    if(count == 0) return Empty.VALUE;
+    if(count == 1) return input.value(qc);
+
+    // check if expression must be evaluated only once
+    final boolean once = input instanceof Value || !defined(2) || !toBooleanOrFalse(arg(2), qc);
+    if(once) return singleton(input.value(qc), count);
+
+    // repeated evaluations
+    final ValueBuilder vb = new ValueBuilder(qc, size());
+    for(long c = 0; c < count; c++) vb.add(input.value(qc));
+    return vb.value(this);
+  }
+
+  @Override
+  public boolean eager() {
+    return arg(0).eager() && singleEval(true);
+  }
+
+  /**
+   * Returns a singleton sequence, or raises an error if its size exceeds the integer range.
+   * @param value value to replicate
+   * @param count number of replications
+   * @return singleton sequence
+   * @throws QueryException query exception
+   */
+  private Value singleton(final Value value, final long count) throws QueryException {
+    if(!Util.inBounds(value.size(), count)) throw RANGE_X.get(info, value.size() + " * " + count);
+    return SingletonSeq.get(value, count);
+  }
+
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    final Expr input = arg(0);
+    final long count = toLong(arg(1), qc);
+    if(count <= 0) return Empty.ITER;
+    if(count == 1) return input.iter(qc);
+
+    // check if expression must be evaluated only once
+    final boolean repeat = toBooleanOrFalse(arg(2), qc);
+    if(!repeat) return singleton(input.value(qc), count).iter();
+
+    // repeated evaluations
+    if(input.seqType().one()) {
+      // replication of single item
+      return new Iter() {
+        long c = count;
+
+        @Override
+        public Item next() throws QueryException {
+          return --c >= 0 ? input.item(qc, info) : null;
+        }
+        @Override
+        public Item get(final long i) throws QueryException {
+          return input.item(qc, info);
+        }
+        @Override
+        public long size() {
+          return count;
+        }
+      };
+    }
+
+    // standard evaluation
+    return new Iter() {
+      long c = count;
+      Iter iter;
+
+      @Override
+      public Item next() throws QueryException {
+        while(true) {
+          if(iter == null) {
+            if(--c < 0) return null;
+            iter = input.iter(qc);
+          }
+          final Item item = iter.next();
+          if(item != null) return item;
+          iter = null;
+        }
+      }
+    };
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = arg(0), count = arg(1);
+
+    // single evaluation suffices for deterministic input: drop a redundant repeated-evaluation
+    // flag (it may have been added conservatively for a call of a not-yet-known function)
+    if(defined(2) && arg(2) == Bln.TRUE && !input.has(Flag.NDT, Flag.CNS)) {
+      return cc.function(REPLICATE, info, input, count);
+    }
+
+    final boolean single = singleEval(true);
+
+    // merge replicate functions
+    if(REPLICATE.is(input) && single == ((FnReplicate) input).singleEval(true)) {
+      final ExprList args = new ExprList(2).add(input.arg(0));
+      args.add(new Arith(info, count, input.arg(1), Calc.MULTIPLY).optimize(cc));
+      if(!single) args.add(Bln.TRUE);
+      return cc.function(REPLICATE, info, args.finish());
+    }
+
+    // pre-evaluate static multipliers
+    long sz = -1, c = -1;
+    if(count instanceof Value) {
+      c = toLong(count, cc.qc);
+      // replicate(<a/>, 0) → ()
+      if(c == 0) return Empty.VALUE;
+      // replicate(<a/>, 1) → <a/>
+      if(c == 1) return input;
+      sz = input.size();
+      if(sz != -1) sz = c > 1 && Util.inBounds(sz, c) ? sz * c : -1;
+    }
+    // replicate(void(<a/>), 2) → void(<a/>)
+    if(input == Empty.VALUE || sz == 0 && single) return input;
+
+    // adopt sequence type
+    final Occ occ = c > 0 ? Occ.ONE_OR_MORE : Occ.ZERO_OR_MORE;
+    exprType.assign(input.seqType().union(occ), sz).data(input);
+    return this;
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    // data(replicate(<a>1</a>, 2)) → data(replicate(xs:untypedAtomic('1'), 2))
+    // distinct-values(replicate(('a', 'a'), 2)) → distinct-values('a', 2)
+    final Expr input = !mode.conditional() ? arg(0).simplifyFor(mode, cc) : arg(0);
+
+    final long count = arg(1) instanceof final Itr itr ? itr.itr() : -1;
+    if(count > 0 && (singleEval(true) || !input.has(Flag.NDT))) {
+      // distinct-values(replicate(NODES, 2)) → distinct-values(NODES)
+      // VALUE[replicate(NODES, 2)] → VALUE[NODES]
+      if(mode.oneOf(Simplify.DISTINCT, Simplify.SET, Simplify.EXISTENCE) ||
+          mode == Simplify.PREDICATE && input.seqType().instanceOf(Types.XNODE_ZM)) {
+        return cc.simplify(this, input, mode);
+      }
+    }
+
+    // create function with new input argument
+    if(input != arg(0)) {
+      final Expr[] args = exprs.clone();
+      args[0] = input;
+      return cc.function(REPLICATE, info, args);
+    }
+    return this;
+  }
+
+  @Override
+  protected boolean values(final boolean limit, final CompileContext cc) {
+    return super.values(false, cc) && arg(1) instanceof final Itr itr &&
+        Util.inBounds(arg(0).size(), itr.itr());
+  }
+
+  /**
+   * Indicates if the input argument will be evaluated once or (if requested) zero times.
+   * @param zero allow zero evaluations
+   * @return result of check
+   */
+  public boolean singleEval(final boolean zero) {
+    /* accepted:
+     * - replicate(<a/>, 2)
+     * - replicate(1 to 10, <_>5</_>)
+     * - replicate(reverse(1 to 10), 5, false())
+     * - replicate(1, 2, true())
+     * rejected:
+     * - replicate(random:uuid(), 2, true()) */
+    return arg(0) instanceof Value ||
+      // if second argument is a static integer, it is >= 1
+      (!defined(2) || arg(2) == Bln.FALSE) && (zero || arg(1) instanceof Itr);
+  }
+}

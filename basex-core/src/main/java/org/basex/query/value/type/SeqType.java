@@ -1,0 +1,855 @@
+package org.basex.query.value.type;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.value.type.BasicType.*;
+import static org.basex.query.value.type.Occ.*;
+
+import java.util.*;
+import java.util.concurrent.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.value.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+
+/**
+ * Stores a sequence type definition.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class SeqType {
+  /** Number of cached sequence types (all occurrence indicators but {@link Occ#ZERO}). */
+  private static final int OCCS = Occ.values().length - 1;
+  /** Number of cached checks. */
+  private static final int CHECKS = Check.values().length;
+
+  /** Cached checks. */
+  private enum Check {
+    /** May yield numbers. */ NUMBER,
+    /** May yield function items. */ FUNCTION,
+    /** May be wrapped in a data structure. */ WRAPPED,
+    /** May yield JNodes. */ JNODE
+  }
+
+  /** Item type. */
+  public final Type type;
+  /** Occurrence indicator. */
+  public final Occ occ;
+  /** Array type (can be {@code null}; lazy instantiation). */
+  private ArrayType arrayType;
+  /** Map types (can be {@code null}; lazy instantiation). */
+  private Map<Type, MapType> mapTypes;
+  /** Cached checks: lower bits flag evaluated checks, upper bits their results. */
+  private int checks;
+
+  /**
+   * Constructor.
+   * @param type type
+   * @param occ occurrence
+   */
+  SeqType(final Type type, final Occ occ) {
+    this.type = type;
+    this.occ = occ;
+  }
+
+  /**
+   * Returns a sequence type.
+   * @param type type
+   * @param occ occurrence indicator
+   * @return sequence type
+   */
+  public static SeqType get(final Type type, final Occ occ) {
+    return occ == ZERO ? Types.EMPTY_SEQUENCE_Z : type.seqType(occ);
+  }
+
+  /**
+   * Creates a sequence type cache for the specified type.
+   * @param type item type
+   * @return cache
+   */
+  static SeqType[] cache(final Type type) {
+    final SeqType[] cache = new SeqType[OCCS];
+    cache[EXACTLY_ONE.ordinal() - 1] = new SeqType(type, EXACTLY_ONE);
+    return cache;
+  }
+
+  /**
+   * Returns a cached sequence type.
+   * @param cache sequence type cache
+   * @param type item type
+   * @param occ occurrence indicator (no {@link Occ#ZERO})
+   * @return sequence type
+   */
+  static SeqType get(final SeqType[] cache, final Type type, final Occ occ) {
+    assert occ != ZERO;
+    final int o = occ.ordinal() - 1;
+    SeqType st = cache[o];
+    if(st == null) {
+      st = new SeqType(type, occ);
+      cache[o] = st;
+    }
+    return st;
+  }
+
+  /**
+   * Returns an array type for this sequence type.
+   * @return array type
+   */
+  public ArrayType arrayType() {
+    if(arrayType == null) arrayType = new ArrayType(this);
+    return arrayType;
+  }
+
+  /**
+   * Returns a map type for this sequence type and the specified key type.
+   * @param keyType key type
+   * @return map type
+   */
+  public MapType mapType(final Type keyType) {
+    if(mapTypes == null) mapTypes = new ConcurrentHashMap<>();
+    return mapTypes.computeIfAbsent(keyType, k -> new MapType(k, this));
+  }
+
+  /**
+   * Returns a sequence type with the specified occurrence indicator.
+   * @param oc occurrence indicator
+   * @return sequence type
+   */
+  public SeqType with(final Occ oc) {
+    return oc == occ ? this : get(type, oc);
+  }
+
+  /**
+   * Returns a sequence type with a new occurrence indicator.
+   * @param oc occurrence indicator
+   * @return sequence type
+   */
+  public SeqType union(final Occ oc) {
+    return oc == occ ? this : get(type, occ.union(oc));
+  }
+
+  /**
+   * Checks if the specified value is an instance of this type.
+   * @param value value to check
+   * @return result of check
+   */
+  public boolean instance(final Value value) {
+    return instance(value, false);
+  }
+
+  /**
+   * Checks if the specified value is an instance of this type.
+   * @param value value to check
+   * @param coerce item coercion
+   * @return result of check
+   */
+  public boolean instance(final Value value, final boolean coerce) {
+    final Type dt = TypeRef.deref(this.type);
+    // check cardinality
+    final long size = value.size();
+    if(!occ.check(size)) return false;
+    if(size == 0) return true;
+
+    // try shortcut (type of value may be specific enough)
+    if(coerce && dt instanceof FType || dt instanceof ChoiceItemType) {
+      if(eq(value.seqType())) return true;
+    } else if(value.type.instanceOf(dt)) {
+      return true;
+    }
+    // check single item
+    if(size == 1) return instance((Item) value, coerce);
+    // check each item
+    for(final Item item : value) {
+      if(!instance(item, coerce)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Checks if the specified item is an instance of this sequence type.
+   * @param item item to check
+   * @param coerce item coercion
+   * @return result of check
+   */
+  public boolean instance(final Item item, final boolean coerce) {
+    final Type dt = TypeRef.deref(this.type);
+    if(dt instanceof final ChoiceItemType cit) {
+      for(final Type tp : cit.types) {
+        if(tp.seqType().instance(item, coerce)) return true;
+      }
+      return false;
+    }
+    if(dt instanceof final EnumType et) {
+      return et.instance(item);
+    }
+    return item.instanceOf(dt, coerce);
+  }
+
+  /**
+   * Casts a sequence to this type.
+   * @param value value to cast
+   * @param error raise error (return {@code null} otherwise)
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return cast value
+   * @throws QueryException query exception
+   */
+  public Value cast(final Value value, final boolean error, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+
+    final Type dt = TypeRef.deref(type);
+
+    // item(): identity, only check the cardinality of the input
+    if(dt == ITEM) return occ.check(value.size()) ? value : castError(value, error, info);
+
+    // arrays, maps, records: structural cast without atomization
+    if(dt instanceof ArrayType || dt instanceof MapType) {
+      final long size = value.size();
+      if(!occ.check(size)) return castError(value, error, info);
+      final ValueBuilder vb = new ValueBuilder(qc, size);
+      for(final Item item : value) {
+        qc.checkStop();
+        // a JNode never matches the target type: continue with its jvalue
+        final Value val = item.unwrappedValue(qc);
+        if(val.size() != 1) return castError(value, error, info);
+        final Item it = val.itemAt(0);
+        Value cast = null;
+        if(dt instanceof final ArrayType at) {
+          if(it instanceof final XQArray array) cast = array.castTo(at, error, qc, info);
+        } else if(dt instanceof final RecordType rt) {
+          if(it instanceof final XQMap map) cast = map.castTo(rt, error, qc, info);
+        } else if(dt instanceof final MapType mt) {
+          if(it instanceof final XQMap map) cast = map.castTo(mt, error, qc, info);
+        }
+        if(cast == null) return castError(value, error, info);
+        vb.add(cast);
+      }
+      return vb.value(dt);
+    }
+
+    // generalized atomic type, list type, union type, enumeration type: atomize, then cast
+    final Value atom;
+    try {
+      atom = value.atomValue(qc, info);
+    } catch(final QueryException ex) {
+      if(error) throw ex;
+      Util.debug(ex);
+      return null;
+    }
+    final long size = atom.size();
+    if(!occ.check(size)) return castError(value, error, info);
+    if(size == 0) return Empty.VALUE;
+    if(size == 1) return castItem((Item) atom, error, qc, info);
+
+    final ValueBuilder vb = new ValueBuilder(qc, size);
+    for(final Item item : atom) {
+      qc.checkStop();
+      final Value cast = castItem(item, error, qc, info);
+      if(cast == null) return null;
+      vb.add(cast);
+    }
+    return vb.value(dt instanceof final ListType lt ? lt.atomic() : dt);
+  }
+
+  /**
+   * Casts a component value of an array, map, or record type to this sequence type.
+   * @param value value to convert
+   * @param error raise error (return {@code null} otherwise)
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return converted value, or {@code null} if conversion failed and no error was raised
+   * @throws QueryException query exception
+   */
+  public Value convert(final Value value, final boolean error, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+    if(instance(value)) return value;
+
+    // items that match the item type are preserved, all others are cast one by one
+    final SeqType st = with(EXACTLY_ONE);
+    final ValueBuilder vb = new ValueBuilder(qc, value.size());
+    for(final Item item : value) {
+      qc.checkStop();
+      if(instance(item, false)) {
+        vb.add(item);
+      } else if(castTarget(type)) {
+        final Value cast = st.cast(item, error, qc, info);
+        if(cast == null) return null;
+        vb.add(cast);
+      } else if(error) {
+        throw INVCONVERT_X_X.get(info, value, this);
+      } else {
+        return null;
+      }
+    }
+    final Value result = vb.value(TypeRef.deref(type));
+    return occ.check(result.size()) ? result : castError(value, error, info);
+  }
+
+  /**
+   * Checks if the specified type is eligible as the target of a cast expression.
+   * @param type type to check
+   * @return result of check
+   */
+  public static boolean castTarget(final Type type) {
+    final Type tp = TypeRef.deref(type);
+    // item(); array, map, record types (their component types are checked while casting)
+    if(tp == ITEM || tp instanceof ArrayType || tp instanceof MapType) return true;
+    // choice item type: all alternatives must be eligible
+    if(tp instanceof final ChoiceItemType cit) {
+      for(final Type alt : cit.types) {
+        if(!castTarget(alt)) return false;
+      }
+      return true;
+    }
+    // enumeration type, schema list type
+    if(tp instanceof EnumType || tp instanceof ListType) return true;
+    // generalized atomic type
+    return tp instanceof final BasicType bt && bt.atomic() != null &&
+        !bt.oneOf(NOTATION, ANY_ATOMIC_TYPE, ANY_SIMPLE_TYPE);
+  }
+
+  /**
+   * Raises or reports a cast error.
+   * @param value value that could not be cast
+   * @param error raise error (return {@code null} otherwise)
+   * @param info input info (can be {@code null})
+   * @return {@code null}
+   * @throws QueryException query exception
+   */
+  private Value castError(final Value value, final boolean error, final InputInfo info)
+      throws QueryException {
+    if(error) throw typeError(value, this, info);
+    return null;
+  }
+
+  /**
+   * Casts an atomized item to this type.
+   * @param item item to cast
+   * @param error raise error (return {@code null} otherwise)
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return cast value
+   * @throws QueryException query exception
+   */
+  private Value castItem(final Item item, final boolean error, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+
+    final Type dt = TypeRef.deref(this.type);
+    if(item.type.eq(dt)) return item;
+
+    // enable light-weight error handling
+    if(!error && info != null) info.internal(true);
+    try {
+      return dt.cast(item, qc, info);
+    } catch(final QueryException ex) {
+      if(error) throw ex;
+      return null;
+    } finally {
+      if(!error && info != null) info.internal(false);
+    }
+  }
+
+  /**
+   * Converts the specified value to this type.
+   * @param value value to promote
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return converted value
+   * @throws QueryException query exception
+   */
+  public Value coerce(final Value value, final QueryContext qc, final InputInfo info)
+      throws QueryException {
+    return coerce(value, qc, info, null, null);
+  }
+
+  /**
+   * Converts the specified value to this type.
+   * @param value value to promote
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @param name variable name (used for error message, can be {@code null})
+   * @param cc compilation context ({@code null} during runtime)
+   * @return converted value
+   * @throws QueryException query exception
+   */
+  public Value coerce(final Value value, final QueryContext qc, final InputInfo info,
+      final QNm name, final CompileContext cc) throws QueryException {
+
+    final Type dt = TypeRef.deref(this.type);
+    // instance check
+    final SeqType[] at = dt instanceof final FuncType ft ? ft.argTypes : null;
+    if((at == null || Checks.all(at, st -> st.eq(Types.ITEM_ZM))) &&
+        instance(value, true)) return value;
+
+    // coerce items if required
+    final ValueBuilder vb = new ValueBuilder(qc, value.size());
+    for(final Item item : value) {
+      qc.checkStop();
+      final Value val = coerce(item, name, qc, cc, info);
+      if(val == null) throw typeError(value, this, name, info);
+      vb.add(val);
+    }
+    final Value val = vb.value(dt);
+    if(!occ.check(val.size())) throw typeError(value, this, name, info);
+    return val;
+  }
+
+  /**
+   * Converts the specified item to this type.
+   * @param item item to promote
+   * @param name variable name (used for error message, can be {@code null})
+   * @param qc query context
+   * @param cc compilation context ({@code null} during runtime)
+   * @param info input info (can be {@code null})
+   * @return converted value, or {@code null} if conversion failed
+   * @throws QueryException query exception
+   */
+  private Value coerce(final Item item, final QNm name, final QueryContext qc,
+      final CompileContext cc, final InputInfo info) throws QueryException {
+
+    final Type dt = TypeRef.deref(this.type);
+    if(dt instanceof final ChoiceItemType cit) {
+      for(final Type tp : cit.types) {
+        try {
+          final Value value = tp.seqType().coerce(item, name, qc, cc, info);
+          if(value != null) return value;
+        } catch(final QueryException ignore) {
+          // try next type
+        }
+      }
+      return null;
+    }
+    if(dt instanceof BasicType || dt instanceof EnumType) {
+      final Value value = item.atomValue(qc, info);
+      final long size = value.size();
+      if(size == 1) return coerceAtomic((Item) value, qc, info);
+
+      final ValueBuilder vb = new ValueBuilder(qc, size);
+      for(final Item it : value) {
+        final Item cast = coerceAtomic(it, qc, info);
+        if(cast == null) return null;
+        vb.add(cast);
+      }
+      return vb.value();
+    }
+    if(item instanceof final FItem fitem) {
+      if(fitem instanceof final XQArray array) {
+        if(dt instanceof final ArrayType at) return array.coerceTo(at, qc, info, cc);
+      } else if(fitem instanceof final XQMap map) {
+        if(dt instanceof final RecordType rt) return map.coerceTo(rt, qc, info, cc);
+        if(dt instanceof final MapType mt) return map.coerceTo(mt, qc, info, cc);
+      }
+      if(dt instanceof final FuncType ft) {
+        return fitem.coerceTo(dt == Types.FUNCTION ? fitem.funcType() : ft, qc, cc, info);
+      }
+    } else if(item instanceof final JNode jnode) {
+      return coerce(jnode.value.unwrappedItem(qc, info), name, qc, cc, info);
+    }
+    return instance(item, false) ? item : null;
+  }
+
+  /**
+   * Converts the specified atomized item to this type.
+   * @param item item to promote
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return converted value, or {@code null} if conversion failed
+   * @throws QueryException query exception
+   */
+  private Item coerceAtomic(final Item item, final QueryContext qc, final InputInfo info)
+      throws QueryException {
+    final Type at = item.type;
+    if(at.instanceOf(type)) return item;
+    // xs:error has an empty value space: function conversion never casts to it, so coercion
+    // always fails and the caller reports a type error (XPTY0004)
+    if(type == ERROR) return null;
+
+    Item relabel = null;
+    if(at == UNTYPED_ATOMIC) {
+      if(type.nsSensitive()) throw NSSENS_X_X.get(info, at, type);
+      // item will be cast
+    } else if(
+      type == DECIMAL && (at == DOUBLE || at == FLOAT) ||
+      type == DOUBLE && (at == FLOAT || at.instanceOf(DECIMAL)) ||
+      type == FLOAT && (at == DOUBLE || at.instanceOf(DECIMAL)) ||
+      type == STRING && at == ANY_URI ||
+      type == ANY_URI && at.instanceOf(STRING) ||
+      type == HEX_BINARY && at == BASE64_BINARY ||
+      type == BASE64_BINARY && at == HEX_BINARY ||
+      type instanceof EnumType && at == ANY_URI
+    ) {
+      // item will be cast
+    } else if(!type.union(at).oneOf(ANY_ATOMIC_TYPE, NUMERIC)) {
+      // item will be relabeled: remember old type for future comparison
+      relabel = item;
+    } else {
+      return null;
+    }
+    // relabeling is no cast: if the value is outside the value space, a type error is raised
+    final boolean lenient = type instanceof EnumType || relabel != null;
+    final Item cast = (Item) cast(item, !lenient, qc, info);
+    return cast != null && (relabel == null || cast.compare(relabel, null, false, qc, info) == 0) ?
+        cast : null;
+  }
+
+  /**
+   * Checks if this type could be converted to the given one by function conversion.
+   * @param st type to convert to
+   * @return result of check
+   */
+  public boolean promotable(final SeqType st) {
+    if(intersect(st) != null) return true;
+    if(occ.intersect(st.occ) == null) return false;
+    final Type tp = st.type;
+    if(tp instanceof BasicType || tp instanceof ChoiceItemType) {
+      if(type.isUntyped()) return !tp.nsSensitive();
+      return tp == DOUBLE && (type.intersect(FLOAT) != null || type.intersect(DECIMAL) != null) ||
+             tp == FLOAT && type.intersect(DECIMAL) != null ||
+             tp == STRING && type.intersect(ANY_URI) != null;
+    }
+    return st.type instanceof FType && type instanceof FType;
+  }
+
+  /**
+   * Computes the union of two sequence types, i.e. the lowest common ancestor of both types.
+   * @param st second type
+   * @return resulting type
+   */
+  public SeqType union(final SeqType st) {
+    if(this == st) return this;
+    // ignore general type of empty sequence
+    final Type tp = st.zero() ? type : zero() ? st.type :
+      TypeRef.deref(type).union(TypeRef.deref(st.type));
+    final Occ oc = occ.union(st.occ);
+    return get(tp, oc);
+  }
+
+  /**
+   * Computes the union of the sequence type of all expressions.
+   * @param exprs expressions
+   * @param zero include expressions that return empty sequence
+   * @return sequence type, or {@code null} if unknown
+   */
+  public static SeqType union(final Expr[] exprs, final boolean zero) {
+    SeqType st = null;
+    for(final Expr expr : exprs) {
+      final SeqType st2 = expr.seqType();
+      if(zero || !st2.zero()) st = st == null ? st2 : st.union(st2);
+    }
+    return st;
+  }
+
+  /**
+   * Computes the intersection of two sequence types, i.e. the most general type that is
+   * subtype of both types. If no such type exists, {@code null} is returned.
+   * @param st second type
+   * @return resulting type or {@code null}
+   */
+  public SeqType intersect(final SeqType st) {
+    if(this == st) return this;
+    // a void type (xs:error, xs:error+) is the bottom of the sequence-type lattice, so it is the
+    // intersection (greatest lower bound) with any type, irrespective of the occurrence indicator.
+    // if both are void, the occurrences are intersected, so the result is order-independent
+    if(voidType()) return st.voidType() ? get(type, occ.intersect(st.occ)) : this;
+    if(st.voidType()) return st;
+    final Type tp = TypeRef.deref(type).intersect(TypeRef.deref(st.type));
+    if(tp == null) return null;
+    final Occ oc = occ.intersect(st.occ);
+    if(oc == null) return null;
+    return get(tp, oc);
+  }
+
+  /**
+   * Tests if expressions of this type yield at most one item.
+   * @return result of check
+   */
+  public boolean zeroOrOne() {
+    return occ.max <= 1;
+  }
+
+  /**
+   * Tests if expressions of this type yield zero items.
+   * @return result of check
+   */
+  public boolean zero() {
+    return occ == ZERO;
+  }
+
+  /**
+   * Tests if expressions of this type yield one item.
+   * @return result of check
+   */
+  public boolean one() {
+    return occ == EXACTLY_ONE;
+  }
+
+  /**
+   * Tests if expressions of this type yield one or more items.
+   * @return result of check
+   */
+  public boolean oneOrMore() {
+    return occ.min >= 1;
+  }
+
+  /**
+   * Tests if this is a sequence type of the <i>void</i> category ({@code xs:error} or
+   * {@code xs:error+}): it has no instances, so an expression of this type never returns a value
+   * (see the subtype rules in the specification, "Subtypes of Sequence Types").
+   * @return result of check
+   */
+  public boolean voidType() {
+    return type == BasicType.ERROR && oneOrMore();
+  }
+
+  /**
+   * Tests if this is a sequence type of the <i>empty</i> category ({@code empty-sequence()},
+   * {@code xs:error?} or {@code xs:error*}): the empty sequence is its only instance.
+   * @return result of check
+   */
+  public boolean emptyType() {
+    return zero() || type == BasicType.ERROR && !oneOrMore();
+  }
+
+  /**
+   * Tests if expressions of this type may yield numbers.
+   * @return result of check
+   */
+  public boolean mayBeNumber() {
+    return mayBe(Check.NUMBER);
+  }
+
+  /**
+   * Tests if expressions of this type may yield function items.
+   * @return result of check
+   */
+  public boolean mayBeFunction() {
+    return mayBe(Check.FUNCTION);
+  }
+
+  /**
+   * Tests if contents may be wrapped in a data structure. This includes JNodes,
+   * maps, arrays and function items.
+   * @return result of check
+   */
+  public boolean mayBeWrapped() {
+    return mayBe(Check.WRAPPED);
+  }
+
+  /**
+   * Tests if contents may be JNodes.
+   * @return result of check
+   */
+  public boolean mayBeJNode() {
+    return mayBe(Check.JNODE);
+  }
+
+  /**
+   * Returns the cached result of the specified check.
+   * @param check check
+   * @return result of check
+   */
+  private boolean mayBe(final Check check) {
+    final int eval = 1 << check.ordinal(), value = eval << CHECKS;
+    if((checks & eval) != 0) return (checks & value) != 0;
+
+    final boolean result = compute(check);
+    if(!(type instanceof TypeRef || type instanceof ChoiceItemType)) {
+      checks |= eval | (result ? value : 0);
+    }
+    return result;
+  }
+
+  /**
+   * Evaluates the specified check.
+   * @param check check
+   * @return result of check
+   */
+  private boolean compute(final Check check) {
+    if(zero()) return false;
+    return switch(check) {
+      case NUMBER -> type instanceof BasicType ?
+        type.isNumber() || type.oneOf(BasicType.ITEM, BasicType.ANY_ATOMIC_TYPE) :
+        type.intersect(BasicType.NUMERIC) != null;
+      case FUNCTION -> type == BasicType.ITEM || type instanceof FType;
+      case WRAPPED -> mayBe(Check.JNODE) || mayBe(Types.FUNCTION);
+      case JNODE -> mayBe(NodeType.JNODE);
+    };
+  }
+
+  /**
+   * Tests if contents may be instances of the specified type.
+   * @param tp type to check
+   * @return result of check
+   */
+  private boolean mayBe(final Type tp) {
+    return type instanceof BasicType ? type == BasicType.ITEM : type.intersect(tp) != null;
+  }
+
+  /**
+   * Returns the type of values that match this type without being coerced.
+   * @return sequence type
+   */
+  public SeqType matched() {
+    final Type tp = matched(type);
+    return tp == type ? this : get(tp, occ);
+  }
+
+  /**
+   * Returns the type of items that match the specified type without being coerced.
+   * @param type type
+   * @return type
+   */
+  private static Type matched(final Type type) {
+    final Type tp = TypeRef.deref(type);
+    // records may have another field order: no shape can be assigned
+    if(tp instanceof final ShapeType sh) return sh.declared() ? Types.RECORD : type;
+    if(tp instanceof final ArrayType at) {
+      final SeqType vt = at.valueType(), mvt = vt.matched();
+      return mvt == vt ? type : ArrayType.get(mvt);
+    }
+    if(tp instanceof final MapType mt) {
+      final SeqType vt = mt.valueType(), mvt = vt.matched();
+      return mvt == vt ? type : MapType.get(mt.keyType(), mvt);
+    }
+    if(tp instanceof final FuncType ft && ft.argTypes != null) {
+      final SeqType dt = ft.declType, mdt = dt.matched();
+      return mdt == dt ? type : FuncType.get(ft.anns, mdt, ft.argTypes);
+    }
+    if(tp instanceof final ChoiceItemType cit) {
+      final int tl = cit.types.size();
+      final Type[] types = new Type[tl];
+      boolean changed = false;
+      for(int t = 0; t < tl; t++) {
+        types[t] = matched(cit.types.get(t));
+        changed |= types[t] != cit.types.get(t);
+      }
+      return changed ? ChoiceItemType.get(types) : type;
+    }
+    return type;
+  }
+
+  /**
+   * Checks if this sequence type is an instance of the specified sequence type.
+   * @param st sequence type to check
+   * @return result of check
+   */
+  public boolean instanceOf(final SeqType st) {
+    if(this == st) return true;
+    // void category (xs:error, xs:error+): no instances, a subtype of every sequence type
+    if(voidType()) return true;
+    // empty category (empty-sequence(), xs:error?, xs:error*): the empty sequence is the only
+    // instance, a subtype of every sequence type that permits the empty sequence
+    if(emptyType()) return !st.oneOrMore();
+    if(!occ.instanceOf(st.occ)) return false;
+    final Type t1 = TypeRef.deref(type), t2 = TypeRef.deref(st.type);
+    return t2 instanceof final ChoiceItemType cit ? cit.hasInstance(t1) : t1.instanceOf(t2);
+  }
+
+  /**
+   * Checks if values of this type can be supplied without coercion to the specified type.
+   * @param st sequence type to check
+   * @param coerce coercion (records are only kept if they have exactly the required type)
+   * @return result of check
+   */
+  public boolean instanceOf(final SeqType st, final boolean coerce) {
+    return instanceOf(st) && !(coerce && ShapeType.rebuilds(type, st.type));
+  }
+
+  /**
+   * Checks if values of this type match the specified type, irrespective of the field order.
+   * @param st sequence type to check
+   * @return result of check
+   */
+  public boolean matches(final SeqType st) {
+    if(instanceOf(st)) return true;
+    if(emptyType() || !occ.instanceOf(st.occ)) return false;
+    return matches(TypeRef.deref(type), TypeRef.deref(st.type));
+  }
+
+  /**
+   * Checks if items of a type match another type, irrespective of the field order.
+   * @param type type
+   * @param target type to check
+   * @return result of check
+   */
+  private static boolean matches(final Type type, final Type target) {
+    if(type instanceof final ChoiceItemType cit) {
+      for(final Type tp : cit.types) {
+        if(!matches(TypeRef.deref(tp), target)) return false;
+      }
+      return true;
+    }
+    if(target instanceof final ChoiceItemType cit) {
+      for(final Type tp : cit.types) {
+        if(matches(type, TypeRef.deref(tp))) return true;
+      }
+      return false;
+    }
+    if(type instanceof final ShapeType sh) return sh.matches(target);
+    if(type instanceof final FuncType ft) return ft.matches(target);
+    if(type instanceof final ArrayType at && target instanceof final ArrayType tat) {
+      return at.valueType().matches(tat.valueType());
+    }
+    if(type instanceof final MapType mt && target instanceof final MapType tmt &&
+        !(target instanceof ShapeType)) {
+      return mt.keyType().instanceOf(tmt.keyType()) && mt.valueType().matches(tmt.valueType());
+    }
+    return type.instanceOf(target);
+  }
+
+  /**
+   * Checks the types for equality.
+   * @param st type
+   * @return result of check
+   */
+  public boolean eq(final SeqType st) {
+    if(this == st) return true;
+    if(occ != st.occ) return false;
+    // an unresolved forward reference is a distinct placeholder, not its temporary item() deref
+    if(TypeRef.unresolved(type) || TypeRef.unresolved(st.type)) return type == st.type;
+    return TypeRef.deref(type).eq(TypeRef.deref(st.type));
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final SeqType st && eq(st);
+  }
+
+  /**
+   * This implementation of this method is used on the alternatives of a
+   * {@link ChoiceItemType}, while {@link #mapTypes} is being maintained as a {@link HashMap}.
+   * Since {@link MapType#keyType} is guaranteed to be an atomic type, we expect it to be called
+   * only on {@link #SeqType} instances based on some {@link BasicType}, where suitable hash codes
+   * are available for {@link #type}, and {@link #occ}.
+   */
+  @Override
+  public int hashCode() {
+    return (type == null ? 0 : type.hashCode()) + (occ == null ? 0 : occ.hashCode());
+  }
+
+  /**
+   * Returns a string representation of the type.
+   * @return string
+   */
+  public String typeString() {
+    return zero() ? QueryText.EMPTY_SEQUENCE + "()" : type.toString();
+  }
+
+  @Override
+  public String toString() {
+    final TokenBuilder tb = new TokenBuilder();
+    if(!one() && type instanceof FType && !(type instanceof MapType || type instanceof ArrayType)) {
+      tb.add('(').add(typeString()).add(')');
+    } else {
+      tb.add(typeString());
+    }
+    if(!(type instanceof ListType)) tb.add(occ);
+    return tb.toString();
+  }
+}

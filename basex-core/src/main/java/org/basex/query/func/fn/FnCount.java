@@ -1,0 +1,81 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.func.Function.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnCount extends StandardFunc {
+  /** Nondeterministic input. */
+  private boolean ndt;
+
+  @Override
+  public Itr value(final QueryContext qc) throws QueryException {
+    // value-based input: return result size
+    final Expr input = arg(0);
+    final Value value = input.eagerValue(qc);
+    if(value != null) return Itr.get(value.size());
+
+    // if the iterator size is unknown or nondeterministic, iterate through all results
+    final Iter iter = input.iter(qc);
+    long size = ndt ? -1 : iter.size();
+    if(size == -1) {
+      do ++size; while(qc.next(iter) != null);
+    }
+    return Itr.get(size);
+  }
+
+  @Override
+  protected void simplifyArgs(final CompileContext cc) throws QueryException {
+    arg(0, arg -> arg.has(Flag.NDT) ? arg : arg.simplifyFor(Simplify.COUNT, cc));
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = arg(0);
+    ndt = input.has(Flag.NDT);
+
+    // return static result size
+    final long size = input.size();
+    if(size >= 0 && !ndt) return Itr.get(size);
+
+    // count(map:keys(E)) → map:size(E)
+    if(_MAP_KEYS.is(input))
+      return cc.function(_MAP_SIZE, info, input.args());
+    // count(util:array-members(E)) → array:size(E)
+    if(_ARRAY_MEMBERS.is(input))
+      return cc.function(_ARRAY_SIZE, info, input.args());
+    // count(string-to-codepoints(E)) → string-length(E)
+    // count(characters(E)) → string-length(E)
+    if(STRING_TO_CODEPOINTS.is(input) || CHARACTERS.is(input))
+      return cc.function(STRING_LENGTH, info, input.args());
+
+    return embed(cc, true);
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    final Expr input = arg(0);
+    Expr expr = this;
+    // rewrite to an existence check (skipped for nondeterministic input, which must be evaluated)
+    if(mode == Simplify.EBV && !input.has(Flag.NDT)) {
+      // if(count($nodes)) → if($nodes)
+      // if(count($items)) → if(exists($items))
+      expr = input.seqType().type instanceof NodeType ? input : cc.function(EXISTS, info, exprs);
+    }
+    return cc.simplify(this, expr, mode);
+  }
+}

@@ -1,0 +1,69 @@
+package org.basex.query.func.fn;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.gflwor.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class FnEvery extends StandardFunc {
+  @Override
+  public final Bln value(final QueryContext qc) throws QueryException {
+    // implementation for dynamic function lookup
+    return Bln.get(ebv(qc));
+  }
+
+  @Override
+  protected final boolean ebv(final QueryContext qc) throws QueryException {
+    // implementation for dynamic function lookup
+    final Iter input = arg(0).iter(qc);
+    final FItem predicate = toFunctionOrNull(arg(1), 2, qc);
+
+    final HofArgs args = predicate != null ? new HofArgs(2, predicate) : null;
+    final boolean some = some();
+    for(Item item; (item = qc.next(input)) != null;) {
+      final boolean test = predicate == null ? item.ebv(qc, info) :
+        invoke(predicate, args.set(0, item).inc(), qc).ebv(qc, info);
+      if(test == some) return some;
+    }
+    return !some;
+  }
+
+  @Override
+  protected final Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = arg(0), predicate = arg(1);
+    final SeqType st = input.seqType();
+    final boolean some = some();
+    if(st.zero()) return cc.voidAndReturn(input, Bln.get(!some), info);
+    final boolean pred = defined(1);
+    final int arity = pred ? arity(predicate) : 1;
+    if(arity == -1) return this;
+
+    // FLWOR: for $item at $pos in INPUT return boolean(PREDICATE($item, $pos))
+    final FLWORBuilder flwor = new FLWORBuilder(arity, cc, info);
+    final Expr[] args = pred ? new Expr[] { flwor.function(this, 1, false) } : flwor.refs();
+    final Expr rtrn = cc.function(Function.BOOLEAN, info, args);
+    final Expr expr = flwor.finish(input, null, rtrn);
+
+    // some : FLWOR = true()
+    // every: not(FLWOR = false())
+    final Expr cmp = new CmpG(info, expr, Bln.get(some), CmpOp.EQ).optimize(cc);
+    return some ? cmp : cc.function(Function.NOT, info, cmp);
+  }
+
+  /**
+   * Compare some/all results.
+   * @return flag
+   */
+  boolean some() {
+    return false;
+  }
+}

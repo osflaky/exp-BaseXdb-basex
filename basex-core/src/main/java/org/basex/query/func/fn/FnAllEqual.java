@@ -1,0 +1,62 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.func.Function.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.collation.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnAllEqual extends StandardFunc {
+  @Override
+  public Bln value(final QueryContext qc) throws QueryException {
+    return Bln.get(ebv(qc));
+  }
+
+  @Override
+  protected boolean ebv(final QueryContext qc) throws QueryException {
+    final Iter values = arg(0).atomIter(qc, info);
+    final Collation collation = toCollation(arg(1), qc);
+
+    final DeepEqual deep = new DeepEqual(info, collation, qc);
+    final Item first = values.next();
+    if(first != null) {
+      for(Item item; (item = qc.next(values)) != null;) {
+        if(!deep.equal(item, first)) return false;
+      }
+    }
+    return true;
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr values = arg(0);
+    if(!defined(1)) {
+      final SeqType st = values.seqType();
+      final BasicType type = st.type.atomic();
+      if(st.zero() || st.zeroOrOne() && type != null && !st.mayBeWrapped())
+        return cc.voidAndReturn(values, Bln.TRUE, info);
+
+      // all-equal(1 to 10) → false
+      if(values instanceof RangeSeq) return Bln.FALSE;
+      // all-equal(reverse($data)) → all-equal($data)
+      final Expr reordered = reordered(values);
+      if(reordered != null) return cc.function(ALL_EQUAL, info, reordered);
+      // all-equal(replicate($data, 2)) → all-equal($data)
+      if(REPLICATE.is(values) && values.arg(1) instanceof Itr)
+        return cc.function(ALL_EQUAL, info, values.arg(0));
+    }
+    return this;
+  }
+}

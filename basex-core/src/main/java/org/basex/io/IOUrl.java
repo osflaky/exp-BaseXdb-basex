@@ -1,0 +1,456 @@
+package org.basex.io;
+
+import java.io.*;
+import java.net.*;
+import java.net.http.*;
+import java.net.http.HttpClient.*;
+import java.net.http.HttpResponse.*;
+import java.security.*;
+import java.security.cert.*;
+import java.time.*;
+import java.util.*;
+
+import javax.net.ssl.*;
+import javax.xml.transform.stream.*;
+
+import org.basex.core.jobs.*;
+import org.basex.io.in.*;
+import org.basex.util.*;
+import org.basex.util.http.*;
+import org.basex.util.list.*;
+import org.xml.sax.*;
+
+/**
+ * {@link IO} reference, representing a URL.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class IOUrl extends IO {
+  /** User agent sent with HTTP requests. */
+  public static final String AGENT = Prop.NAME + '/' + Prop.VERSION.replace(' ', '-') +
+      " (Java " + Prop.JAVA_VERSION + "; " + Prop.OS + ' ' + Prop.OS_ARCH + ')';
+  /** Timeout for connecting, for the response headers and for single reads of the body. */
+  private static final Duration TIMEOUT = Duration.ofMinutes(1);
+  /** Reason phrases. */
+  private static final HashMap<Integer, String> REASONS = new HashMap<>();
+  /** Accept all server certificates. */
+  private static boolean ignoreCertificates;
+  /** Context that accepts all server certificates (can be {@code null}). */
+  private static SSLContext insecure;
+  /** Trust manager that accepts all server certificates. */
+  private static final X509TrustManager TRUST_ALL = new X509TrustManager() {
+    @Override
+    public X509Certificate[] getAcceptedIssuers() { return null; }
+    @Override
+    public void checkClientTrusted(final X509Certificate[] x509, final String type) { }
+    @Override
+    public void checkServerTrusted(final X509Certificate[] x509, final String type) { }
+  };
+  /** Cached HTTP client instances. */
+  private static final HttpClients CLIENTS = new HttpClients(null);
+
+  static {
+    REASONS.put(100, "Continue");
+    REASONS.put(101, "Switching Protocols");
+    REASONS.put(102, "Processing");
+    REASONS.put(200, "OK");
+    REASONS.put(201, "Created");
+    REASONS.put(202, "Accepted");
+    REASONS.put(203, "Non-Authoritative Information");
+    REASONS.put(204, "No Content");
+    REASONS.put(205, "Reset Content");
+    REASONS.put(206, "Partial Content");
+    REASONS.put(207, "Multi-Status");
+    REASONS.put(208, "Already Reported");
+    REASONS.put(300, "Multiple Choices");
+    REASONS.put(301, "Moved Permanently");
+    REASONS.put(302, "Found");
+    REASONS.put(303, "See Other");
+    REASONS.put(304, "Not Modified");
+    REASONS.put(305, "Use Proxy");
+    REASONS.put(307, "Temporary Redirect");
+    REASONS.put(308, "Permanent Redirect");
+    REASONS.put(400, "Bad Request");
+    REASONS.put(401, "Unauthorized");
+    REASONS.put(402, "Payment Required");
+    REASONS.put(403, "Forbidden");
+    REASONS.put(404, "Not Found");
+    REASONS.put(405, "Method Not Allowed");
+    REASONS.put(406, "Not Acceptable");
+    REASONS.put(407, "Proxy Authentication Required");
+    REASONS.put(408, "Request Timeout");
+    REASONS.put(409, "Conflict");
+    REASONS.put(410, "Gone");
+    REASONS.put(411, "Length Required");
+    REASONS.put(412, "Precondition Failed");
+    REASONS.put(413, "Payload Too Large");
+    REASONS.put(414, "Request-URI Too Long");
+    REASONS.put(415, "Unsupported Media Type");
+    REASONS.put(416, "Requested Range Not Satisfiable");
+    REASONS.put(417, "Expectation Failed");
+    REASONS.put(418, "I'm a teapot");
+    REASONS.put(420, "Enhance Your Calm");
+    REASONS.put(421, "Misdirected Request");
+    REASONS.put(422, "Unprocessable Entity");
+    REASONS.put(423, "Locked");
+    REASONS.put(424, "Failed Dependency");
+    REASONS.put(426, "Upgrade Required");
+    REASONS.put(428, "Precondition Required");
+    REASONS.put(429, "Too Many Requests");
+    REASONS.put(431, "Request Header Fields Too Large");
+    REASONS.put(444, "Connection Closed Without Response");
+    REASONS.put(451, "Unavailable For Legal Reasons");
+    REASONS.put(499, "Client Closed Request");
+    REASONS.put(500, "Internal Server Error");
+    REASONS.put(501, "Not Implemented");
+    REASONS.put(502, "Bad Gateway");
+    REASONS.put(503, "Service Unavailable");
+    REASONS.put(504, "Gateway Timeout");
+    REASONS.put(505, "HTTP Version Not Supported");
+    REASONS.put(506, "Variant Also Negotiates");
+    REASONS.put(507, "Insufficient Storage");
+    REASONS.put(508, "Loop Detected");
+    REASONS.put(510, "Not Extended");
+    REASONS.put(511, "Network Authentication Required");
+    REASONS.put(599, "Network Connect Timeout Error");
+  }
+
+  /**
+   * Constructor.
+   * @param url url
+   */
+  public IOUrl(final String url) {
+    super(normalize(url), true);
+  }
+
+  @Override
+  public byte[] read() throws IOException {
+    return BufferInput.get(this).content();
+  }
+
+  @Override
+  public InputSource inputSource() {
+    return new InputSource(pth);
+  }
+
+  @Override
+  public boolean isExternal() {
+    return true;
+  }
+
+  @Override
+  public StreamSource streamSource() {
+    return new StreamSource(pth);
+  }
+
+  @Override
+  public InputStream inputStream() throws IOException {
+    return isJarURL(pth) ? url(pth).openStream() : response().body();
+  }
+
+  /**
+   * Returns an HTTP response.
+   * @return response
+   * @throws IOException I/O exception
+   */
+  public HttpResponse<InputStream> response() throws IOException {
+    final HttpClient client = client(true);
+
+    final HttpResponse<InputStream> response;
+    try {
+      final URI uri = new URI(pth);
+      final HttpRequest.Builder rb = HttpRequest.newBuilder(uri).timeout(TIMEOUT);
+      rb.header(HTTPText.ACCEPT, MediaType.ALL_ALL.toString());
+      rb.header(HTTPText.USER_AGENT, AGENT);
+      new UserInfo(uri).basic(rb);
+      response = Job.run(() -> client.send(rb.build(), handler(TIMEOUT)));
+    } catch(final JobException | IOException ex) {
+      throw ex;
+    } catch(final Exception ex) {
+      /* possible exceptions, among others:
+       * - construct URI: invalid argument
+       * - build request: invalid URI scheme
+       * - send request: interrupted requests */
+      throw new IOException(ex.getMessage(), ex);
+    }
+
+    // create exception if response was not successful
+    final int status = response.statusCode();
+    if(status >= 400) {
+      final StringBuilder sb = new StringBuilder().append(status);
+      final String reason = reason(status);
+      if(!reason.isEmpty()) sb.append(": ").append(reason);
+      throw new IOException(sb.toString());
+    }
+    return response;
+  }
+
+  /**
+   * Returns a handler for response bodies whose reads are aborted if the job is stopped or a
+   * timeout passes.
+   * @param timeout timeout for a single blocking read (can be {@code null})
+   * @return body handler
+   */
+  public static BodyHandler<InputStream> handler(final Duration timeout) {
+    return info -> BodySubscribers.mapping(BodySubscribers.ofInputStream(),
+        body -> new StoppableInputStream(body, timeout));
+  }
+
+  /**
+   * Returns a singleton HTTP client instance.
+   * @param redirect follow redirects
+   * @return client builder
+   */
+  public static HttpClient client(final boolean redirect) {
+    return CLIENTS.get(redirect);
+  }
+
+  /**
+   * Returns a new HTTP client instance.
+   * @param redirect follow redirects
+   * @param cookies cookie handler (can be {@code null})
+   * @return client
+   */
+  public static HttpClient client(final boolean redirect, final CookieHandler cookies) {
+    return client(redirect, cookies, null, null);
+  }
+
+  /**
+   * Returns trust managers that accept all server certificates.
+   * @return trust managers
+   */
+  public static TrustManager[] trustAll() {
+    return new TrustManager[] { TRUST_ALL };
+  }
+
+  /**
+   * Returns a new HTTP client instance.
+   * @param redirect follow redirects
+   * @param cookies cookie handler (can be {@code null})
+   * @param proxy proxy URI, empty string for a direct connection (can be {@code null})
+   * @param context SSL context (can be {@code null})
+   * @return client
+   */
+  public static HttpClient client(final boolean redirect, final CookieHandler cookies,
+      final String proxy, final SSLContext context) {
+
+    final HttpClient.Builder cb = HttpClient.newBuilder().connectTimeout(TIMEOUT);
+    if(cookies != null) cb.cookieHandler(cookies);
+    final SSLContext ssl = context != null ? context : ignoreCertificates ? insecure() : null;
+    if(ssl != null) cb.sslContext(ssl);
+    if(proxy != null) {
+      final InetSocketAddress address = proxy.isEmpty() ? null : proxy(proxy);
+      cb.proxy(address != null ? ProxySelector.of(address) : HttpClient.Builder.NO_PROXY);
+    }
+    return cb.followRedirects(redirect ? Redirect.ALWAYS : Redirect.NEVER).build();
+  }
+
+  /**
+   * Returns the address of a proxy URI.
+   * @param proxy proxy URI
+   * @return address, or {@code null} if the URI is invalid
+   */
+  public static InetSocketAddress proxy(final String proxy) {
+    try {
+      final URI uri = new URI(proxy);
+      final String host = uri.getHost();
+      final int port = uri.getPort();
+      return host == null || port == -1 ? null : new InetSocketAddress(host, port);
+    } catch(final URISyntaxException ex) {
+      Util.debug(ex);
+      return null;
+    }
+  }
+
+  /**
+   * Returns a context that accepts all server certificates.
+   * @return context, or {@code null} if none could be created
+   */
+  public static synchronized SSLContext insecure() {
+    if(insecure == null) {
+      try {
+        insecure = SSLContext.getInstance("TLS");
+        insecure.init(null, trustAll(), new SecureRandom());
+      } catch(final NoSuchAlgorithmException | KeyManagementException ex) {
+        Util.stack(ex);
+      }
+    }
+    return insecure;
+  }
+
+  /**
+   * Returns the reason phrase for a status code.
+   * @param status HTTP status code
+   * @return reason or empty string
+   */
+  public static String reason(final int status) {
+    final String reason = REASONS.get(status);
+    return reason != null ? reason : "";
+  }
+
+  /**
+   * Checks if the specified string is a valid URL.
+   * @param url url string
+   * @return file path
+   */
+  static boolean isValid(final String url) {
+    final int ul = url.length();
+    int u = url.indexOf(':');
+    if(u < 2 || u + 1 == ul || !isJarURL(url) && url.charAt(u + 1) != '/') return false;
+    while(--u >= 0) {
+      final char ch = url.charAt(u);
+      if(!(ch >= 'a' && ch <= 'z' || Strings.contains("+-._", ch))) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Checks if the specified string is a valid file URL.
+   * @param url url to be tested
+   * @return result of check
+   */
+  static boolean isFileURL(final String url) {
+    return url.startsWith(FILEPREF);
+  }
+
+  /**
+   * Checks if the specified string is a jar URL.
+   * @param url url to be tested
+   * @return result of check
+   */
+  static boolean isJarURL(final String url) {
+    return url.startsWith(JARPREF);
+  }
+
+  /**
+   * Converts a URL string to a URL.
+   * @param url URL string
+   * @return URL
+   * @throws MalformedURLException malformed URL exception
+   */
+  public static URL url(final String url) throws MalformedURLException {
+    try {
+      return new URI(url).toURL();
+    } catch(final URISyntaxException | IllegalArgumentException ex) {
+      final MalformedURLException mue = new MalformedURLException(ex.getMessage());
+      mue.initCause(ex);
+      throw mue;
+    }
+  }
+
+  /**
+   * Ignore SSL certificates.
+   */
+  public static void ignoreCertificates() {
+    System.getProperties().setProperty("jdk.internal.httpclient.disableHostnameVerification",
+        Boolean.TRUE.toString());
+    ignoreCertificates = true;
+  }
+
+  // PRIVATE METHODS ==============================================================================
+
+  /**
+   * Returns a normalized URL.
+   * @param string input URL
+   * @return path
+   */
+  private static String normalize(final String string) {
+    final String input = toAscii(string);
+    int i = input.indexOf("://") + 3;
+    if(i == 2) return input;
+
+    final String scheme = input.substring(0, i);
+    String path = input.substring(i), query = "", anchor = "";
+    i = path.indexOf('#');
+    if(i != -1) {
+      anchor = path.substring(i);
+      path = path.substring(0, i);
+    }
+    i = path.indexOf('?');
+    if(i != -1) {
+      query = path.substring(i);
+      path = path.substring(0, i);
+    }
+
+    final StringList segments = new StringList(Strings.split(path, '/'));
+    for(int s = 1; s < segments.size(); s++) {
+      final String segment = segments.get(s);
+      if(segment.equals(".")) {
+        segments.remove(s--);
+      } else if(segment.equals("..") && s > 1) {
+        segments.remove(s--);
+        segments.remove(s--);
+      }
+    }
+    return scheme + String.join("/", segments.finish()) + query + anchor;
+  }
+
+  /**
+   * Converts the host of a URL to ASCII (Punycode) if it contains non-ASCII
+   * characters (Internationalized Domain Names). Other components are left untouched.
+   * @param url URL string
+   * @return URL with ASCII-encoded host
+   */
+  public static String toAscii(final String url) {
+    final int i = url.indexOf("://") + 3;
+    if(i == 2) return url;
+    final int j = authorityEnd(url, i);
+    final String authority = url.substring(i, j);
+    for(int c = 0; c < authority.length(); c++) {
+      if(authority.charAt(c) > 127) {
+        return url.substring(0, i) + asciiAuthority(authority) + url.substring(j);
+      }
+    }
+    return url;
+  }
+
+  /**
+   * Removes the user information (credentials) from a URL.
+   * @param url URL string
+   * @return URL without user information
+   */
+  public static String stripUserInfo(final String url) {
+    final int i = url.indexOf("://") + 3;
+    if(i == 2) return url;
+    final int at = url.lastIndexOf('@', authorityEnd(url, i) - 1);
+    return at < i ? url : url.substring(0, i) + url.substring(at + 1);
+  }
+
+  /**
+   * Returns the end offset of the authority of a URL (first '/', '?' or '#' after the scheme).
+   * @param url URL string
+   * @param start start offset of the authority
+   * @return end offset
+   */
+  private static int authorityEnd(final String url, final int start) {
+    final int ul = url.length();
+    for(int u = start; u < ul; u++) {
+      final char ch = url.charAt(u);
+      if(ch == '/' || ch == '?' || ch == '#') return u;
+    }
+    return ul;
+  }
+
+  /**
+   * Returns the authority with the host part converted to ASCII (Punycode).
+   * @param authority authority string ({@code [userinfo@]host[:port]})
+   * @return ASCII-encoded authority, or the original string if encoding fails
+   */
+  private static String asciiAuthority(final String authority) {
+    final int at = authority.lastIndexOf('@');
+    final String userInfo = at < 0 ? "" : authority.substring(0, at + 1);
+    final String hostPort = at < 0 ? authority : authority.substring(at + 1);
+    // skip IPv6 brackets when searching for the port colon
+    final int bracket = hostPort.lastIndexOf(']');
+    final int colon = hostPort.indexOf(':', Math.max(0, bracket));
+    final String host = colon < 0 ? hostPort : hostPort.substring(0, colon);
+    final String port = colon < 0 ? "" : hostPort.substring(colon);
+    try {
+      return userInfo + IDN.toASCII(host) + port;
+    } catch(final IllegalArgumentException ex) {
+      Util.debug(ex);
+      return authority;
+    }
+  }
+}

@@ -1,0 +1,230 @@
+package org.basex.core.users;
+
+import static org.basex.core.users.UserText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.Map.*;
+import java.util.regex.*;
+
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+import org.basex.util.log.*;
+
+/**
+ * This class organizes all users.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Users {
+  /** User array. */
+  private final LinkedHashMap<String, User> users = new LinkedHashMap<>();
+  /** Filename. */
+  private final IOFile file;
+  /** Info node (can be {@code null}). */
+  private XNode info;
+
+  /**
+   * Constructor for global users.
+   * @param sopts static options
+   */
+  public Users(final StaticOptions sopts) {
+    file = sopts.dbPath(string(Q_USERS.string()) + IO.XMLSUFFIX);
+    read();
+    // ensure that default admin user exists
+    if(get(ADMIN) == null) add(new User(ADMIN).permission(Perm.ADMIN));
+  }
+
+  /**
+   * Reads user permissions.
+   */
+  private synchronized void read() {
+    final XNode root = XMLAccess.root(file, Q_USERS);
+    if(root == null) return;
+    for(final GNode gchild : XMLAccess.children(root)) {
+      final XNode child = (XNode) gchild;
+      final QNm qname = child.qname();
+      if(qname.eq(Q_USER)) {
+        try {
+          final User user = new User(child, file);
+          final String name = user.name();
+          if(users.get(name) != null) {
+            Util.errln("%: User '%' supplied more than once.", file, name);
+          } else {
+            users.put(name, user);
+          }
+        } catch(final BaseXException ex) {
+          // reject users with faulty data
+          Util.errln("%: %", file, ex.getLocalizedMessage());
+        }
+      } else if(qname.eq(Q_INFO)) {
+        if(info != null) Util.errln("%: <%/> occurs more than once.", file, qname);
+        else info = child;
+      } else {
+        Util.errln("%: invalid element <%/>.", file, qname);
+      }
+    }
+  }
+
+  /**
+   * Writes permissions to disk.
+   */
+  public synchronized void write() {
+    try {
+      final FBuilder root = FElem.build(Q_USERS);
+      for(final User user : users.values()) {
+        root.node(user.toXml(null, null));
+      }
+      if(info != null) {
+        root.node(info);
+        info.parent(null);
+      }
+      XMLAccess.write(file, root.finish());
+    } catch(final IOException | QueryException ex) {
+      Util.errln(ex);
+    }
+  }
+
+  /**
+   * Creates an initial admin password and writes it to the logs.
+   * @param ctx database context
+   */
+  public synchronized void init(final Context ctx) {
+    if(file.exists()) return;
+
+    final String pw = UUID.randomUUID().toString();
+    get(ADMIN).password(pw, ctx.soptions.authAlgorithms());
+    write();
+    ctx.log.writeServer(LogType.INFO,
+        "Initial " + ADMIN + " password (change after first login): " + pw);
+  }
+
+  /**
+   * Adds a user.
+   * @param user user to be added
+   */
+  public synchronized void add(final User user) {
+    users.put(user.name(), user);
+  }
+
+  /**
+   * Recomputes and persists outdated passwords.
+   * @param user user
+   * @param password password (plain text)
+   * @param algorithms currently configured algorithms
+   */
+  public synchronized void rehash(final User user, final String password,
+      final Algorithm[] algorithms) {
+    if(user.outdated(algorithms)) {
+      user.recode(password, algorithms);
+      write();
+    }
+  }
+
+  /**
+   * Renames a user.
+   * @param user user reference
+   * @param name new name
+   */
+  public synchronized void alter(final User user, final String name) {
+    users.remove(user.name());
+    user.name(name);
+    users.put(name, user);
+  }
+
+  /**
+   * Drops a user from the list.
+   * @param user user reference
+   */
+  public synchronized void drop(final User user) {
+    users.remove(user.name());
+  }
+
+  /**
+   * Returns a user with the specified name.
+   * @param name username
+   * @return username or {@code null}
+   */
+  public synchronized User get(final String name) {
+    return users.get(name);
+  }
+
+  /**
+   * Returns the names of all users that match the specified pattern.
+   * @param pattern glob pattern
+   * @return user list
+   */
+  public synchronized String[] find(final Pattern pattern) {
+    final StringList sl = new StringList();
+    for(final String name : users.keySet()) {
+      if(pattern.matcher(name).matches()) sl.add(name);
+    }
+    return sl.finish();
+  }
+
+  /**
+   * Returns a table with all users, or users from a specific database.
+   * The list will only contain the current user if no admin permissions are available.
+   * @param db database (can be {@code null})
+   * @param ctx database context
+   * @return user information
+   */
+  public synchronized Table info(final String db, final Context ctx) {
+    final Table table = new Table();
+    table.description = Text.USERS_X;
+
+    for(final String user : S_USERINFO) table.header.add(user);
+    for(final User user : users(db, ctx)) {
+      table.contents.add(new TokenList().add(user.name()).add(user.permission(db).toString()));
+    }
+    return table.toTop(token(ADMIN));
+  }
+
+  /**
+   * Returns all users, or users that have permissions for a specific database, sorted by name.
+   * The list will only contain the current user if no admin permissions are available.
+   * @param db database (can be {@code null})
+   * @param ctx database context
+   * @return user information
+   */
+  public synchronized ArrayList<User> users(final String db, final Context ctx) {
+    final User curr = ctx.user();
+    final boolean admin = curr.has(Perm.ADMIN);
+    final ArrayList<User> list = new ArrayList<>();
+    for(final User user : users.values()) {
+      if(admin || curr == user) {
+        if(db == null) {
+          list.add(user);
+        } else {
+          final Entry<String, Perm> entry = user.find(db);
+          if(entry != null) list.add(user);
+        }
+      }
+    }
+    list.sort(Comparator.comparing(User::name, String.CASE_INSENSITIVE_ORDER));
+    return list;
+  }
+
+  /**
+   * Returns the info element.
+   * @return info element (can be {@code null})
+   */
+  public synchronized XNode info() {
+    return info;
+  }
+
+  /**
+   * Sets the info element.
+   * @param elem info element
+   */
+  public synchronized void info(final XNode elem) {
+    info = elem.hasChildren() || elem.hasAttributes() ? elem : null;
+  }
+}

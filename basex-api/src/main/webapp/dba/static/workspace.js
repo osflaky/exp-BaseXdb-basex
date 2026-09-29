@@ -1,0 +1,719 @@
+/** Workspace: file handling, queries and their results. */
+
+/** Path of the endpoint that runs the queries of this view and serves its file panel. */
+const WORKSPACE_WS = "/workspace";
+
+/** Id of the job of the query that is currently evaluated in the editor panel. */
+let _job;
+
+/** File names that are treated as XQuery. The suffixes are the server's, which knows them
+    from IO.XQSUFFIXES; a list of its own here would go stale the day one is added. */
+const XQUERY_SUFFIXES =
+  new RegExp(document.documentElement.dataset.xquery ?? "^$", "i");
+
+/** localStorage key prefix for unsaved editor drafts; see draftKey. */
+const DRAFT = "dba-draft:";
+
+/** localStorage key for the directory of the file panel. */
+const DIR_KEY = "dba-dir";
+
+/** localStorage keys for the open documents and the one that is shown. */
+const TABS_KEY = "dba-tabs";
+const TAB_KEY = "dba-tab";
+
+/** localStorage key for the 'Query Info' preference. */
+const QUERY_INFO_KEY = "dba-query-info";
+
+/** Documents that are open in the editor, in tab order. A tab is { dir, name, id, saved,
+    edited, state }: its identity, the number that tells unnamed documents apart, its on-disk
+    content, whether the user typed in it, and the editor state that restores it (undefined
+    until the file has been read; a plain string if CodeMirror is unavailable). */
+let _tabs = [];
+
+/** Number of the next document. */
+let _nextId = 1;
+
+/** Index of the active tab. */
+let _tab = 0;
+
+/** What the tab strip currently shows, so that typing does not rebuild it. */
+let _strip;
+
+/** Whether the editor is currently written to by the code, not by the user. */
+let _writing = false;
+
+/** Document whose content is awaited; a response for another one is outdated. */
+let _opening;
+
+/**
+ * Returns the active document.
+ * @returns {object} tab
+ */
+function tab() {
+  return _tabs[_tab];
+}
+
+/**
+ * Creates a document.
+ * @param {string} dir directory
+ * @param {string} name file name; empty for an unnamed document
+ * @returns {object} tab
+ */
+function newTab(dir, name) {
+  return { dir: dir, name: name, id: _nextId++, saved: "", edited: false, state: undefined };
+}
+
+/**
+ * Opens an empty document.
+ */
+function newFile() {
+  captureTab();
+  _tabs.push(newTab(filesDir(), ""));
+  _tab = _tabs.length - 1;
+  applyTab();
+  storeTabs();
+  setText("", "");
+}
+
+/**
+ * Returns the text of a document: the editor holds the active one, the others their state.
+ * @param {object} t tab
+ * @returns {string} text
+ */
+function tabText(t) {
+  if(t === tab()) return editorValue();
+  return typeof t.state === "string" ? t.state : t.state ? t.state.doc.toString() : "";
+}
+
+/**
+ * Indicates whether a document holds unsaved work.
+ * @param {object} t tab
+ * @returns {boolean} modified state
+ */
+function tabModified(t) {
+  return t.edited && tabText(t) !== t.saved;
+}
+
+/**
+ * Persists the open documents. Only their identity is stored: the contents are read again,
+ * and unsaved work is already kept as a draft.
+ */
+function storeTabs() {
+  store(TABS_KEY, JSON.stringify(_tabs.map(t => ({ dir: t.dir, name: t.name, id: t.id }))));
+  store(TAB_KEY, _tab);
+}
+
+/**
+ * Returns the label of a document: its file name, or a name that one could be saved under.
+ * The first unnamed document is 'file', the ones after it are numbered.
+ * @param {object} t tab
+ * @returns {string} label
+ */
+function tabLabel(t) {
+  if(t.name) return t.name;
+  const n = _tabs.filter(u => !u.name).indexOf(t);
+  return n > 0 ? `file${n + 1}` : "file";
+}
+
+/**
+ * Draws the tab strip.
+ */
+function renderTabs() {
+  const strip = document.getElementById("tabs");
+  if(!strip) return;
+  // this runs on every keystroke: rebuild only when something it shows has changed
+  const signature = JSON.stringify(_tabs.map((t, i) =>
+    [ t.dir, t.name, i === _tab, tabModified(t) ]));
+  if(signature === _strip) return;
+  _strip = signature;
+
+  strip.replaceChildren(..._tabs.map((t, i) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tab";
+    const edited = tabModified(t);
+    button.classList.toggle("active", i === _tab);
+    button.title = t.name ? t.dir + t.name : "New file";
+    // file names are user input: they are text, never markup
+    const label = document.createElement("span");
+    label.textContent = tabLabel(t);
+    const close = document.createElement("span");
+    close.className = "close";
+    close.textContent = "\u00d7";
+    close.addEventListener("click", event => {
+      event.stopPropagation();
+      closeTab(i);
+    });
+    button.append(label);
+    // unsaved work is marked after the name, in a span of its own: a name that is too long
+    // is clipped, and would take the marker with it
+    if(edited) {
+      const mark = document.createElement("span");
+      mark.textContent = "*";
+      button.append(mark);
+    }
+    button.append(close);
+    button.addEventListener("click", () => selectTab(i));
+    // a middle click closes the tab, as it does in the browser itself
+    button.addEventListener("auxclick", event => {
+      if(event.button === 1) closeTab(i);
+    });
+    return button;
+  }));
+}
+
+/**
+ * Keeps what the editor shows in the active document, so that switching back restores it,
+ * with its undo history.
+ */
+function captureTab() {
+  const t = tab();
+  if(t) t.state = _editor.view ? _editor.view.state : editorValue();
+}
+
+/**
+ * Shows the state of the active document in the editor.
+ */
+function applyTab() {
+  const t = tab();
+  // an unnamed document that was never shown holds its unsaved draft, if it kept one; a file
+  // that was never shown is read from disk, and its draft is applied there
+  const draft = t.state === undefined && !t.name ? stored(draftKey(t)) : null;
+  writing(() => {
+    if(_editor.view && t.state && typeof t.state !== "string") {
+      _editor.view.setState(t.state);
+    } else {
+      _editor.setValue(typeof t.state === "string" ? t.state : draft ?? "");
+      _editor.clearHistory();
+    }
+  });
+  if(draft) t.edited = true;
+  showTab();
+}
+
+/**
+ * Refreshes what the strip shows of the active document, and returns the focus to the editor.
+ */
+function showTab() {
+  renderTabs();
+  checkButtons();
+  if(_editor.setLanguage) _editor.setLanguage(fileLanguage(tab()?.name, editorValue()));
+  _editor.focus();
+}
+
+/**
+ * Shows another document, reading its content if this is the first time it is shown.
+ * @param {number} index tab index
+ */
+function selectTab(index) {
+  if(index === _tab || !_tabs[index]) return;
+  captureTab();
+  _tab = index;
+  const t = tab();
+  // show the document before its content arrives: while the editor still held the previous one,
+  // an edit would be saved as a draft of this one
+  applyTab();
+  if(t.state === undefined && t.name) loadTab(t);
+  storeTabs();
+}
+
+/**
+ * Closes a document, asking what to do with unsaved work: whether to keep it, throw it away,
+ * or leave the document open after all.
+ * @param {number} index tab index
+ * @returns {Promise} promise
+ */
+async function closeTab(index) {
+  const t = _tabs[index];
+  if(!t) return;
+  if(tabModified(t)) {
+    // ask about the document the user is looking at
+    if(index !== _tab) selectTab(index);
+    const answer = await askQuestion(`Save changes to ${tabLabel(t)}?`,
+      [ [ "yes", "Yes" ], [ "no", "No" ], [ "", "Cancel" ] ]);
+    // the question was about closing as much as about saving: cancelling closes nothing
+    if(!answer) return;
+    if(answer === "yes") {
+      // a failed save must not take the document with it
+      if(!await saveFile()) return;
+    } else {
+      store(draftKey(t), null);
+    }
+    index = _tabs.indexOf(t);
+  }
+  const active = index === _tab;
+  if(active) captureTab();
+  _tabs.splice(index, 1);
+  // there is always a document: the last one that closes leaves an unnamed one
+  if(!_tabs.length) _tabs.push(newTab(filesDir(), ""));
+  if(index < _tab) _tab--;
+  if(_tab >= _tabs.length) _tab = _tabs.length - 1;
+  if(active) applyTab();
+  else renderTabs();
+  storeTabs();
+  setText("", "");
+}
+
+/**
+ * Opens the job view of the running query in a browser tab of its own. Repeated clicks reuse
+ * that tab; a click with Ctrl or Cmd opens another one.
+ * @param {Event} event click event
+ */
+function openJob(event) {
+  const target = event?.ctrlKey || event?.metaKey ? "_blank" : "activity";
+  if(_job) window.open(`activity?job=${encodeURIComponent(_job)}`, target);
+}
+
+/**
+ * Remembers the job of the running query; the Job button jumps to its details.
+ * @param {string} id job id; if omitted, no query is running
+ */
+function setJob(id) {
+  _job = id;
+  setDisabled("job", !id);
+}
+
+/**
+ * Returns the directory of the file panel. It is remembered by the browser and outlives the
+ * session; the server resolves what is sent and answers with the directory it resolved.
+ * @returns {string} directory, empty before the first panel was rendered
+ */
+function filesDir() {
+  return stored(DIR_KEY, "");
+}
+
+/**
+ * Shows another directory in the file panel.
+ * @param {string} dir directory
+ */
+function changeDir(dir) {
+  refreshFiles(undefined, dir);
+}
+
+/**
+ * Enters a directory next to the shown one; the server resolves the step.
+ * @param {string} name name of a subdirectory, or '..' for the parent
+ */
+function enterDir(name) {
+  changeDir(`${filesDir()}/${name}`);
+}
+
+/**
+ * Requests the file panel, keeping the sort order it shows. The answer is pushed back over the
+ * connection that the view already opened for its queries; showMessage fills the panel.
+ * @param {string} sort sort key; if omitted, the shown order is kept
+ * @param {string} dir directory; if omitted, the shown directory is kept
+ */
+function refreshFiles(sort, dir) {
+  if(!document.getElementById("files-panel")) return;
+  requestPanel(WORKSPACE_WS, "files-panel", { type: "files", dir: dir ?? filesDir() }, sort);
+}
+
+/**
+ * Evaluates a query in the editor panel. The query is sent to the server, which pushes back the
+ * result or the error; see showMessage.
+ */
+async function runQuery() {
+  if(document.getElementById("run").disabled) return;
+  if(_editor) _editor.focus();
+
+  setDisabled("stop", true);
+  setText("", "");
+  setRunInfo("");
+
+  const run = startRequest();
+  if(!await sendMessage(WORKSPACE_WS, {
+    type: "run",
+    run: run,
+    query: editorValue(),
+    indent: indentOn(),
+    // relative paths in the query resolve against the opened file, or against the directory
+    dir: tabDir(),
+    file: tab()?.name ?? ""
+  })) return;
+  awaitResult(run);
+}
+
+/**
+ * Shows the result of a query.
+ * @param {object} json message with the result, its number of items, and its evaluation time
+ */
+function showResult(json) {
+  setText("Query was successful.", "info");
+  if(_output.setLanguage) _output.setLanguage(contentLanguage(json.result, "text"));
+  _output.setValue(json.result);
+  document.getElementById("output-hint").hidden = true;
+  const items = json.items;
+  document.getElementById("result-label").textContent =
+    items === undefined ? "Result" : `Result (${plural(items, "item")})`;
+  setRunInfo(json.time ? `Runtime: ${json.time}` : "");
+  showInfo(json.info);
+}
+
+/**
+ * Reports a failed query at the end of the toolbar, with the position that showError found.
+ * @param {string} info rendered query information (empty if none was collected)
+ */
+function showRunError(info) {
+  const { line, column } = document.getElementById("info").dataset;
+  setRunInfo(line ? `Error in line ${line}, column ${column}` : "Error", true,
+    line ? { line: Number(line), column: Number(column) } : undefined);
+  showInfo(info);
+}
+
+/**
+ * Shows the outcome of the last run at the end of the toolbar.
+ * @param {string} text outcome (empty to clear it)
+ * @param {boolean} failed whether the run failed
+ * @param {object} position error position ({ line, column }), if a click should jump to it
+ */
+function setRunInfo(text, failed, position) {
+  const info = document.getElementById("run-info");
+  info.textContent = text;
+  info.classList.toggle("failed", Boolean(failed));
+  const locatable = Boolean(position && _locate);
+  info.classList.toggle("locatable", locatable);
+  info.onclick = locatable ? () => _locate(position.line, position.column) : null;
+}
+
+/**
+ * Adopts the information of the last query.
+ * @param {string} info rendered query information (empty if none was collected)
+ */
+function showInfo(info) {
+  document.getElementById("info-panel").innerHTML = info ?? "";
+}
+
+/**
+ * Opens or closes the query information.
+ */
+function showInfoPanel() {
+  const on = document.getElementById("query-info").checked;
+  // a panel is folded away by its class: the layout gives every panel a 'display'
+  document.getElementById("info-view").classList.toggle("hidden", !on);
+  document.getElementById("info-resizer").hidden = !on;
+  document.querySelector(".content").classList.toggle("info-closed", !on);
+}
+
+/**
+ * Indicates whether the query information is shown.
+ * @returns {boolean} state of the switch
+ */
+function queryInfoOn() {
+  return stored(QUERY_INFO_KEY) === "yes";
+}
+
+/**
+ * Persists the 'Query Info' preference and opens or closes the information panel.
+ */
+function queryInfoChanged() {
+  store(QUERY_INFO_KEY, document.getElementById("query-info").checked ? "yes" : "no");
+  showInfoPanel();
+}
+
+/**
+ * Indicates whether the editor content can be run: an unnamed document, or a file that is
+ * named like an XQuery file.
+ * @returns {boolean} runnable state
+ */
+function runnable() {
+  const t = tab();
+  return !t || !t.name || XQUERY_SUFFIXES.test(t.name);
+}
+
+/**
+ * Chooses the editor language from the file name: XQuery (see runnable), else by suffix or
+ * compound template suffix, else by content for unnamed documents, else plain text.
+ * @param {string} name file name (may be empty)
+ * @param {string} text editor content
+ * @returns {string} language for _editor.setLanguage
+ */
+function fileLanguage(name, text) {
+  if(name) {
+    const lower = name.toLowerCase();
+    if(XQUERY_SUFFIXES.test(lower)) return "xquery";
+    if(suffixed(lower, [ "xml", "xsd", "xsl", "xslt", "svg", "rng", "rdf", "wsdl", "xhtml" ])) return "xml";
+    if(suffixed(lower, [ "html", "htm" ])) return "html";
+    if(suffixed(lower, [ "json" ])) return "json";
+  } else {
+    return contentLanguage(text, "xquery");
+  }
+  return "text";
+}
+
+/**
+ * Indicates whether a file name ends in or wraps a known suffix, as in index.html.template.
+ * @param {string} name lower-case file name
+ * @param {Array<string>} suffixes suffixes
+ * @returns {boolean} result
+ */
+function suffixed(name, suffixes) {
+  return suffixes.some(suffix => name.endsWith(`.${suffix}`) || name.includes(`.${suffix}.`));
+}
+
+/**
+ * Guesses the language of a text from its first character: what is neither markup nor JSON is
+ * an editor document, which is XQuery, or a serialized result, which is plain text.
+ * @param {string} text text
+ * @param {string} fallback language of a text that gives nothing away
+ * @returns {string} language for setLanguage
+ */
+function contentLanguage(text, fallback) {
+  const s = (text || "").replace(/^\s+/, "");
+  if(s[0] === "{" || s[0] === "[") return "json";
+  if(s[0] === "<") {
+    // an HTML document announces itself; any other markup is XML
+    return /^<!doctype\s+html\b/i.test(s) || /^<html(?:\s|>|$)/i.test(s) ? "html" : "xml";
+  }
+  return fallback;
+}
+
+/**
+ * Opens a file in a tab of its own; a file that is already open is shown again.
+ * @param {string} file file name
+ * @param {string} dir directory of the file; if omitted, the one the file panel shows
+ */
+function openFile(file, dir) {
+  const from = dir ?? filesDir();
+  const open = _tabs.findIndex(t => t.name === file && t.dir === from);
+  if(open > -1) {
+    selectTab(open);
+    return;
+  }
+  captureTab();
+  const opened = newTab(from, file);
+  // an unnamed document that was never used is replaced, rather than left behind
+  if(tab() && !tab().name && !tab().edited && !editorValue()) {
+    Object.assign(tab(), opened);
+  } else {
+    _tabs.push(opened);
+    _tab = _tabs.length - 1;
+  }
+  // as in selectTab: the editor must not hold another document while this one is read
+  applyTab();
+  loadTab(tab());
+}
+
+/**
+ * Reads the content of a document and shows it.
+ * @param {object} t tab
+ * @returns {Promise} promise
+ */
+async function loadTab(t) {
+  const key = _opening = t.dir + t.name;
+  try {
+    const disk = await request(`editor-open?${new URLSearchParams({ name: t.name, dir: t.dir })}`);
+    // drop the answer of a request that was superseded by a newer one
+    if(_opening !== key || t !== tab()) return;
+    // set the baseline before setValue, whose synchronous change event runs saveDraft
+    t.saved = disk;
+    writing(() => _editor.setValue(disk));
+    _editor.clearHistory();
+    // the editor normalizes line endings: take the baseline back from it, or every file that
+    // is stored with CRLF would count as modified the moment it is opened
+    t.saved = editorValue();
+    t.edited = false;
+    showTab();
+    setText("", "");
+    // apply a newer unsaved draft on top of the saved file (undo reverts to disk)
+    const draft = stored(draftKey(t));
+    if(draft !== null && draft !== t.saved) {
+      writing(() => _editor.setValue(draft));
+      // the document differs from the file: mark it
+      t.edited = true;
+      showTab();
+    }
+    storeTabs();
+  } catch(response) {
+    // the file is gone or unreadable: drop its tab, so it is not requested again. The tab is
+    // unedited, so closing it asks nothing; its message is awaited, then replaced by the error
+    await closeTab(_tabs.indexOf(t));
+    showError(response, t.name);
+  }
+}
+
+/**
+ * Fills the editor from the code, which is no edit of the user: what is written here brings no
+ * draft with it, and leaves the document as modified as it was.
+ * @param {Function} fill function that writes to the editor
+ */
+function writing(fill) {
+  _writing = true;
+  try {
+    fill();
+  } finally {
+    _writing = false;
+  }
+}
+
+/**
+ * Saves the active document. An unnamed one is named first; it is stored in the directory
+ * the file panel shows, as it has none of its own.
+ * @param {boolean} saveAs ask for a name, whether or not the document has one
+ * @returns {Promise} promise, resolved with true if the document was saved
+ */
+async function saveFile(saveAs) {
+  const t = tab();
+  if(!t) return false;
+  let name = t.name;
+  if(!name || saveAs) {
+    // the label of an unnamed document is a name it can be saved under
+    name = await promptDialog("Name of the file:", tabLabel(t));
+    if(!name) return false;
+    // append file suffix
+    if(!name.includes(".")) name += ".xq";
+  }
+  const dir = tabDir();
+  const text = editorValue();
+  // the document is renamed below: its draft is dropped under both keys
+  const key = draftKey(t);
+  try {
+    await request(`editor-save?${new URLSearchParams({ name: name, dir: dir })}`, text);
+    Object.assign(t, { dir: dir, name: name, saved: text, edited: false });
+    store(key, null);
+    store(draftKey(t), null);
+    showTab();
+    setText("File was saved.", "info");
+    storeTabs();
+    refreshFiles();
+    return true;
+  } catch(response) {
+    showError(response, name);
+    return false;
+  }
+}
+
+/**
+ * Returns the directory of the active document: its own, or the one the file panel shows if
+ * the document has no name yet. Not to be confused with filesDir, which is the panel's.
+ * @returns {string} directory
+ */
+function tabDir() {
+  return tab()?.dir || filesDir();
+}
+
+/**
+ * Returns the key under which the unsaved draft of a document is kept. A named document is
+ * known by its path, so that reopening the file restores its draft, and files of the same name
+ * in two directories keep two drafts; unnamed documents are told apart by their number.
+ * @param {object} t tab
+ * @returns {string} key
+ */
+function draftKey(t) {
+  return DRAFT + (t.name ? t.dir + t.name : "#" + t.id);
+}
+
+/**
+ * Persists the editor buffer as a local draft, or drops it once it matches the saved file.
+ */
+function saveDraft() {
+  const t = tab();
+  // drafts belong to the Workspace view; skip on the other CodeMirror pages
+  if(!t) return;
+  const content = editorValue();
+  store(draftKey(t), content === t.saved ? null : content);
+}
+
+/**
+ * Asks for a name and creates a directory.
+ * @returns {Promise} promise
+ */
+function createDir() {
+  return promptSubmit("dir-name", "Name of the new directory:", "");
+}
+
+/**
+ * Refreshes the editor buttons.
+ */
+function checkButtons() {
+  setDisabled("run", !runnable());
+  // an unchanged document has nothing to save; a copy of it can be saved at any time
+  setDisabled("save", !(tab() && tabModified(tab())));
+  setDisabled("saveas", !editorValue());
+}
+
+/** The queries of the view run on the endpoint that also serves its file panel; the job of a
+    query that is given up is gone with it. */
+_query_path = WORKSPACE_WS;
+_query_stopped = () => {
+  _editor?.focus();
+  setJob();
+};
+
+/** The editor of the Workspace view runs queries, tracks edits and keeps drafts. */
+_editor_run = runQuery;
+_editor_changed = () => {
+  // content the code wrote is not an edit, and must not be saved as a draft
+  if(_writing) return;
+  if(tab()) tab().edited = true;
+  if(_editor.setLanguage) _editor.setLanguage(fileLanguage(tab()?.name, editorValue()));
+  renderTabs();
+  checkButtons();
+  saveDraft();
+};
+
+/** The sort links of the file panel are followed in place; the panel lists a directory as a
+    whole, so it has no pages. */
+followPanelLinks({ "files-panel": sort => refreshFiles(sort) });
+
+/** The chooser of a file panel that has just arrived shows the directory the server resolved:
+    that is the one that is remembered. */
+_panel_filled["files-panel"] = () => {
+  store(DIR_KEY, document.getElementById("dir").value);
+};
+
+/** The file panel is filled by showMessage; what is left is the job of a query and its
+    outcome. */
+_handlers[WORKSPACE_WS] = json => {
+  if(json.type === "job") {
+    setJob(json.id);
+  } else if(json.type !== "panel") {
+    // the query has ended: the job is gone, and there is nothing left to jump to
+    setJob();
+    if(json.type === "stopped") setText("Query was stopped.", "warning");
+    else if(json.type === "result") showResult(json);
+    // the error is reported by showMessage, which found its position; its information belongs
+    // to the pane
+    else if(json.type === "error") showRunError(json.info);
+  }
+};
+
+/**
+ * Prepares the view: the editors, the draggable splits, the file panel, and the documents that
+ * were left open. A deep link names the directory and the file it refers to; both are adopted,
+ * so that following it and reloading the page show the same.
+ */
+function initWorkspace() {
+  loadCodeMirror("xquery", true, "fill");
+
+  // opened before the resizers are set up: they measure the rows of the grid
+  document.getElementById("query-info").checked = queryInfoOn();
+  showInfoPanel();
+  initResizers();
+
+  const params = new URLSearchParams(window.location.search);
+  const dir = params.get("dir"), name = params.get("name");
+  if(dir) store(DIR_KEY, dir);
+  hideParams("dir", "name");
+
+  refreshFiles();
+
+  // the strip is restored as a whole; only the active document is read, the others when they
+  // are selected. The file panel and the editor stay independent: a document is read from its
+  // own directory, whichever one the panel is asked to show
+  try {
+    _tabs = JSON.parse(stored(TABS_KEY, "[]")).map(t =>
+      Object.assign(newTab(t.dir, t.name), { id: t.id ?? 0 }));
+  } catch {
+    _tabs = [];
+  }
+  // numbers are handed out after the restored ones, so no draft of theirs is overwritten
+  _nextId = Math.max(0, ..._tabs.map(t => t.id)) + 1;
+  if(!_tabs.length) _tabs.push(newTab(filesDir(), ""));
+  _tab = Math.min(Math.max(0, Number(stored(TAB_KEY)) || 0), _tabs.length - 1);
+  renderTabs();
+
+  if(name) openFile(name, dir ?? filesDir());
+  else if(tab().name) loadTab(tab());
+  else applyTab();
+}

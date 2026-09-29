@@ -1,0 +1,93 @@
+package org.basex.query.expr.gflwor;
+
+import static org.basex.query.QueryText.*;
+
+import java.util.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.util.*;
+import org.basex.query.util.collation.*;
+import org.basex.query.value.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Grouping spec.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public final class GroupSpec extends Single {
+  /** Grouping variable. */
+  public final Var var;
+  /** Occlusion flag, {@code true} if another grouping variable shadows this one. */
+  public boolean occluded;
+  /** Collation (can be {@code null}). */
+  final Collation coll;
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param var grouping variable
+   * @param expr grouping expression
+   * @param coll collation (can be {@code null})
+   */
+  public GroupSpec(final InputInfo info, final Var var, final Expr expr, final Collation coll) {
+    super(info, expr, Types.ITEM_ZM);
+    this.var = var;
+    this.coll = coll;
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return expr.value(qc);
+  }
+
+  @Override
+  public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    final GroupSpec spec = new GroupSpec(info, cc.copy(var, vm), expr.copy(cc, vm), coll);
+    spec.occluded = occluded;
+    return copyType(spec);
+  }
+
+  @Override
+  public GroupSpec optimize(final CompileContext cc) throws QueryException {
+    expr = expr.simplifyFor(Simplify.DATA, cc);
+
+    exprType.assign(expr);
+    final BasicType type = expr.seqType().type.atomic();
+    if(type != null) var.refineType(SeqType.get(type, seqType().occ), cc);
+    return this;
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return expr.accept(visitor) && visitor.declared(var);
+  }
+
+  @Override
+  public int exprSize() {
+    return expr.exprSize();
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final GroupSpec gs && var.equals(gs.var) &&
+        occluded == gs.occluded && Objects.equals(coll, gs.coll) && super.equals(obj);
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    plan.add(plan.attachVariable(plan.create(this), var, false), expr);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.token(var).token(":=").token(expr);
+    if(coll != null) qs.token(COLLATION).token("\"").token(coll.uri()).token('"');
+  }
+}

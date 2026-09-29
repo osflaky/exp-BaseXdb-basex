@@ -1,0 +1,84 @@
+package org.basex.local.single;
+
+import org.basex.*;
+import org.basex.core.cmd.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Performs bulk updates with standalone version.
+ *
+ * @author BaseX Team, BSD License
+ * @author Lukas Kircher
+ */
+public final class XQUFStressTest extends SandboxTest {
+  /** Number of node updates. */
+  private static final int NRNODES = 100;
+
+  /** Tests the insert statement. */
+  @Test public void insert10() {
+    insert(10);
+  }
+
+  /** Tests the insert statement. */
+  @Test public void insert100() {
+    insert(100);
+  }
+
+  /** Tests the insert statement. */
+  @Test public void insert1000() {
+    insert(1000);
+  }
+
+  /**
+   * Tests the insert statement.
+   * @param runs number of runs
+   */
+  private void insert(final int runs) {
+    for(int r = 0; r < runs; r++) {
+      execute(new CreateDB(NAME, "<doc/>"));
+      // insert query
+      query(
+        "for $i in 1 to " + NRNODES + " return insert node " +
+        "<section><page/></section> into /doc");
+      query("count(//page)", NRNODES);
+      // actual query: move every page in front of its section
+      query(
+        "for $page in //page " +
+        "let $par := $page/.. " +
+        "return (delete node $page, insert node $page before $par)");
+      query("count(/doc/page)", NRNODES);
+      query("count(/doc/section/page)", 0);
+      execute(new DropDB(NAME));
+    }
+  }
+
+  /** Tests the delete statement. */
+  @Test public void delete10() {
+    delete(10);
+  }
+
+  /** Tests the delete statement. */
+  @Test public void delete100() {
+    delete(100);
+  }
+
+  /** Tests the delete statement. */
+  @Test public void delete1000() {
+    delete(1000);
+  }
+
+  /**
+   * Tests the delete statement.
+   * @param runs number of runs
+   */
+  private void delete(final int runs) {
+    execute(new CreateDB(NAME, "<doc/>"));
+    for(int r = 0; r < runs; r++) {
+      query("for $i in 1 to " + NRNODES + " return insert node <node/> into /doc");
+      query("count(//node)", NRNODES);
+      query("delete nodes //node");
+      query("count(//node)", 0);
+    }
+    execute(new DropDB(NAME));
+  }
+}

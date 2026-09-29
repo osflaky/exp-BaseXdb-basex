@@ -1,0 +1,41 @@
+package org.basex.query.func.fn;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnDateTime extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Item date = arg(0).atomItem(qc, info);
+    final Item time = arg(1).atomItem(qc, info);
+    if(date.isEmpty() || time.isEmpty()) return Empty.VALUE;
+
+    final Dat dat = date.type.isUntyped() ? new Dat(date.string(info), info) :
+      (Dat) checkType(date, BasicType.DATE);
+    final Tim tim = time.type.isUntyped() ? new Tim(time.string(info), info) :
+      (Tim) checkType(time, BasicType.TIME);
+    return new Dtm(dat, tim, info);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr date = arg(0), time = defined(1) ? arg(1) : Str.EMPTY;
+    final SeqType stDate = date.seqType(), stTime = time.seqType();
+    if(stDate.zero()) return cc.voidAndReturn(time, date, info);
+    if(stTime.zero()) return cc.voidAndReturn(date, time, info);
+    if(stDate.oneOrMore() && !stDate.mayBeWrapped() && stTime.oneOrMore() &&
+        !stTime.mayBeWrapped()) exprType.assign(Occ.EXACTLY_ONE);
+    return this;
+  }
+}

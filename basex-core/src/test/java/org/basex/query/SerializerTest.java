@@ -1,0 +1,610 @@
+package org.basex.query;
+
+import static org.basex.query.QueryError.*;
+
+import java.util.*;
+
+import static org.basex.io.serial.SerializerOptions.*;
+
+import org.basex.*;
+import org.junit.jupiter.api.*;
+
+/**
+ * This class tests the serializers.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class SerializerTest extends SandboxTest {
+  /** Test: method=xml. */
+  @Test public void xml() {
+    query(METHOD.arg("xml") + "<html/>", "<html/>");
+    query(METHOD.arg("xml") + "<x a='1 > 0'>1 > 0</x>", "<x a=\"1 &gt; 0\">1 &gt; 0</x>");
+    query(METHOD.arg("xml") + INDENT.arg("yes") + INDENT_ATTRIBUTES.arg("yes")
+        + "<x a='1' b='2' c='3'/>",
+        "<x a=\"1\"\n"
+        + "   b=\"2\"\n"
+        + "   c=\"3\"/>");
+    // no effect if indentation is disabled
+    query(METHOD.arg("xml") + INDENT_ATTRIBUTES.arg("yes") + "<x a='1' b='2' c='3'/>",
+        "<x a=\"1\" b=\"2\" c=\"3\"/>");
+  }
+
+  /** Test: indent-unit. */
+  @Test public void indentUnit() {
+    final String input = "<a><b/></a>";
+    // default: two spaces
+    query(METHOD.arg("xml") + INDENT.arg("yes") + input, "<a>\n  <b/>\n</a>");
+    // single tab
+    query(METHOD.arg("xml") + INDENT.arg("yes") + INDENT_UNIT.arg("\t") + input,
+        "<a>\n\t<b/>\n</a>");
+    // tab, supplied as the escape sequence \t
+    query(METHOD.arg("xml") + INDENT.arg("yes") + INDENT_UNIT.arg("\\t") + input,
+        "<a>\n\t<b/>\n</a>");
+    // four spaces
+    query(METHOD.arg("xml") + INDENT.arg("yes") + INDENT_UNIT.arg("    ") + input,
+        "<a>\n    <b/>\n</a>");
+    // empty unit: line breaks but no indentation
+    query(METHOD.arg("xml") + INDENT.arg("yes") + INDENT_UNIT.arg("") + input,
+        "<a>\n<b/>\n</a>");
+    // takes precedence over tabulator/indents
+    query(METHOD.arg("xml") + INDENT.arg("yes") + TABULATOR.arg("yes") + INDENTS.arg("8")
+        + INDENT_UNIT.arg(" ") + input, "<a>\n <b/>\n</a>");
+  }
+
+  /** Test: line-ending. */
+  @Test public void lineEnding() {
+    final String ser = "serialize(<a><b/></a>, map { 'method': 'xml', 'indent': true()";
+    query(ser + " }) => contains('&#13;')", false);
+    query(ser + ", 'line-ending': '&#13;&#10;' }) => contains('&#13;&#10;')", true);
+    query(ser + ", 'line-ending': '\\r\\n' }) => contains('&#13;&#10;')", true);
+    query(ser + ", 'line-ending': '\\r' }) => contains('&#10;')", false);
+    query(ser + ", 'newline': '\\n', 'line-ending': '&#13;&#10;' }) "
+        + "=> contains('&#13;&#10;')", true);
+    query("serialize('a&#13;b', map { 'method': 'text' }) => contains('&#13;')", true);
+  }
+
+  /** Test: cdata-section-elements. */
+  @Test public void cdataSectionElements() {
+    final String ser = "serialize(<a>{ $text }</a>, "
+        + "map { 'cdata-section-elements': xs:QName('a') })";
+    query("let $text := 'x' return " + ser, "<a><![CDATA[x]]></a>");
+    // sections are split before the closing delimiter
+    query("let $text := 'x]]>y' return " + ser, "<a><![CDATA[x]]]]><![CDATA[>y]]></a>");
+    // characters that require escaping are moved outside the section
+    query("let $text := 'x&#xD;y' return " + ser, "<a><![CDATA[x]]>&#xD;<![CDATA[y]]></a>");
+    query("let $text := 'x&#x85;y' return " + ser, "<a><![CDATA[x]]>&#x85;<![CDATA[y]]></a>");
+    query("let $text := 'x&#x2028;y' return " + ser, "<a><![CDATA[x]]>&#x2028;<![CDATA[y]]></a>");
+    // tabs and newlines are retained
+    query("let $text := 'x&#x9;&#xA;y' return " + ser, "<a><![CDATA[x\t\ny]]></a>");
+    // carriage returns survive a round trip
+    query("string-to-codepoints(parse-xml(let $text := 'x&#xD;&#xA;y' return " + ser + ")/a)",
+        "120\n13\n10\n121");
+  }
+
+  /** Test: normalization-form. */
+  @Test public void normalizationForm() {
+    // u with diaeresis: composed is codepoint 252, decomposed is 117 followed by 776
+    final String composed = "<p a='&#xFC;'>&#xFC;</p>", decomposed = "<p a='u&#x308;'>u&#x308;</p>";
+    for(final String method : new String[] { "xml", "xhtml", "html" }) {
+      // no normalization: values are serialized unchanged
+      query(occurrences(composed, method, "none", 252), 2);
+      query(occurrences(decomposed, method, "none", 776), 2);
+      // text and attribute values are normalized alike
+      query(occurrences(composed, method, "NFD", 776), 2);
+      query(occurrences(composed, method, "NFD", 252), 0);
+      query(occurrences(decomposed, method, "NFC", 252), 2);
+      query(occurrences(decomposed, method, "NFC", 776), 0);
+    }
+  }
+
+  /**
+   * Returns a query that counts how often a codepoint occurs in a serialized element.
+   * @param element element to serialize
+   * @param method serialization method
+   * @param form normalization form
+   * @param cp codepoint to count
+   * @return query
+   */
+  private static String occurrences(final String element, final String method, final String form,
+      final int cp) {
+    return "count(index-of(string-to-codepoints(serialize(" + element + ", map { 'method': '"
+        + method + "', 'normalization-form': '" + form + "' })), " + cp + "))";
+  }
+
+  /** Test: method=xhtml. */
+  @Test public void xhtml() {
+    final String option = METHOD.arg("xhtml");
+    query(option + "<html/>", "<!DOCTYPE html><html></html>");
+    query(option + HTML_VERSION.arg("4.01") + "<html/>", "<html></html>");
+    final String[] empties = { "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "basefont", "frame", "isindex", "param" };
+    for(final String e : empties) {
+      query(option + HTML_VERSION.arg("4.01")
+          + "<html xmlns='http://www.w3.org/1999/xhtml'><" + e + "/></html>",
+          "<html xmlns=\"http://www.w3.org/1999/xhtml\"><" + e + " /></html>");
+    }
+    final String[] voids = { "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr" };
+    for(final String e : voids) {
+      query(option + "<html xmlns='http://www.w3.org/1999/xhtml'><" + e + "/></html>",
+          "<!DOCTYPE html><html xmlns=\"http://www.w3.org/1999/xhtml\"><" + e + "/></html>");
+    }
+    query(option + INDENT.arg("yes")
+        + "<html xmlns='http://www.w3.org/1999/xhtml'><body><pre><u>test</u></pre></body></html>",
+        "<!DOCTYPE html>\n"
+        + "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n"
+        + "  <body>\n"
+        + "    <pre><u>test</u></pre>\n"
+        + "  </body>\n"
+        + "</html>");
+    query(option + INDENT.arg("yes") + HTML_VERSION.arg("5.0")
+        + "<html><body><PRE><u>test</u></PRE></body></html>",
+        "<!DOCTYPE html>\n"
+        + "<html>\n"
+        + "  <body>\n"
+        + "    <PRE><u>test</u></PRE>\n"
+        + "  </body>\n"
+        + "</html>");
+    query(option + INDENT.arg("yes") + HTML_VERSION.arg("5.0")
+        + "<html><body><a name='x'>x</a><p><hr/></p><a><hr/></a><br/></body></html>",
+        "<!DOCTYPE html>\n"
+        + "<html>\n"
+        + "  <body><a name=\"x\">x</a><p>\n"
+        + "      <hr/>\n"
+        + "    </p><a>\n"
+        + "      <hr/>\n"
+        + "    </a><br/></body>\n"
+        + "</html>");
+    query(option + HTML_VERSION.arg("4.01") + MEDIA_TYPE.arg("application/xhtml+xml")
+        + INDENT.arg("yes")
+        + INDENT_ATTRIBUTES.arg("yes")
+        + "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:svg='http://www.w3.org/2000/svg'>"
+        + "<head/><body><div id='a' name='b' class='c' style='width: 42px'/></body></html>",
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"\n"
+        + "      xmlns:svg=\"http://www.w3.org/2000/svg\">\n"
+        + "  <head>\n"
+        + "    <meta http-equiv=\"Content-Type\"\n"
+        + "          content=\"application/xhtml+xml; charset=UTF-8\"/>\n"
+        + "  </head>\n"
+        + "  <body>\n"
+        + "    <div id=\"a\"\n"
+        + "         name=\"b\"\n"
+        + "         class=\"c\"\n"
+        + "         style=\"width: 42px\"></div>\n"
+        + "  </body>\n"
+        + "</html>");
+    // URI escaping enabled: href and name will be percent-encoded
+    query(option
+        + "<html xmlns='http://www.w3.org/1999/xhtml'><body><a href='\u8f49\u7fa9.html'"
+        + " name='\u8f49\u7fa9'>Link</a></body></html>",
+        "<!DOCTYPE html>"
+        + "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><a href=\"%E8%BD%89%E7%BE%A9.html\""
+        + " name=\"%E8%BD%89%E7%BE%A9\">Link</a></body></html>");
+    // URI escaping disabled: raw Unicode is preserved
+    query(option + ESCAPE_URI_ATTRIBUTES.arg("no")
+        + "<html xmlns='http://www.w3.org/1999/xhtml'><body><a href='\u672a\u8f49\u7fa9.html'"
+        + " name='\u672a\u8f49\u7fa9'>Link</a></body></html>",
+        "<!DOCTYPE html>"
+        + "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><a href=\"\u672a\u8f49\u7fa9.html\""
+        + " name=\"\u672a\u8f49\u7fa9\">Link</a></body></html>");
+  }
+
+  /** method=xhtml, meta element. */
+  @Test public void gh1933() {
+    final String query1 = "let $string := serialize("
+        + "<head><meta http-equiv='Content-Type'/></head>";
+    final String query2 = ", { 'method': 'xhtml' })"
+        + "return count(analyze-string($string, '<meta ')//fn:match)";
+
+    query(query1 + query2, 1);
+    query(query1 + "update {}" + query2, 1);
+  }
+
+  /** Test: method=html. */
+  @Test public void html() {
+    final String option = METHOD.arg("html");
+    query(option + "<html/>", "<!DOCTYPE HTML><html></html>");
+    // prior to HTML5, end tags are omitted for elements with an empty content model
+    final String[] empties = { "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "basefont", "frame", "isindex", "param" };
+    for(final String e : empties) {
+      query(option + HTML_VERSION.arg("4.01") + '<' + e + "/>", '<' + e + '>');
+    }
+    // with HTML5, end tags are omitted for void elements
+    final String[] voids = { "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr" };
+    for(final String e : voids) {
+      query(option + '<' + e + "/>", '<' + e + '>');
+    }
+    for(final String e : new String[] { "basefont", "frame", "isindex" }) {
+      query(option + '<' + e + "/>", '<' + e + "></" + e + '>');
+      query(option + HTML_VERSION.arg("4.01") + '<' + e + "/>", '<' + e + '>');
+    }
+    for(final String e : new String[] { "source", "track", "wbr" }) {
+      query(option + HTML_VERSION.arg("4.01") + '<' + e + "/>", '<' + e + "></" + e + '>');
+    }
+
+    query(option + "<html><script>&lt;</script></html>",
+        "<!DOCTYPE HTML><html><script><</script></html>");
+    query(option + "<html><style>{ serialize(<a/>) }</style></html>",
+        "<!DOCTYPE HTML><html><style><a/></style></html>");
+    query(option + "<a b='&lt;'/>", "<a b=\"<\"></a>");
+
+    query(option + "<a>&#x90;</a>", "<a>&#x90;</a>");
+    error(option + HTML_VERSION.arg("4.01") + "<a>&#x90;</a>", SERILL_X);
+
+    query(option + "<option selected='selected'/>", "<option selected></option>");
+
+    query(option + "<?x y?>", "<!--?x y?-->");
+    query(option + HTML_VERSION.arg("4.01") + "<?x y?>", "<?x y>");
+    error(option + HTML_VERSION.arg("4.01") + "<?x > ?>", SERPI);
+
+    query(option + INDENT.arg("yes")
+        + "<html><body><PRE><u>test</u></PRE></body></html>",
+        "<!DOCTYPE HTML>\n"
+        + "<html>\n"
+        + "  <body>\n"
+        + "    <PRE><u>test</u></PRE>\n"
+        + "  </body>\n"
+        + "</html>");
+    query(option + INDENT.arg("yes") + HTML_VERSION.arg("5.0")
+        + "<html><body><PRE><u>test</u></PRE></body></html>",
+        "<!DOCTYPE HTML>\n"
+        + "<html>\n"
+        + "  <body>\n"
+        + "    <PRE><u>test</u></PRE>\n"
+        + "  </body>\n"
+        + "</html>");
+    query(option + INDENT.arg("yes") + HTML_VERSION.arg("5.0")
+        + "<html><body><p><b>x</b><ul><li>1</li><li>2</li></ul></p><br/></body></html>",
+        "<!DOCTYPE HTML>\n"
+        + "<html>\n"
+        + "  <body>\n"
+        + "    <p><b>x</b><ul>\n"
+        + "        <li>1</li>\n"
+        + "        <li>2</li>\n"
+        + "      </ul>\n"
+        + "    </p><br></body>\n"
+        + "</html>");
+    query(option + INDENT_ATTRIBUTES.arg("yes") + INDENT.arg("yes")
+        + "<html><body onload='alert(\"loaded\")' style='background: black'/></html>",
+        "<!DOCTYPE HTML>\n"
+        + "<html>\n"
+        + "  <body onload=\"alert(&quot;loaded&quot;)\"\n"
+        + "        style=\"background: black\"></body>\n"
+        + "</html>");
+  }
+
+  /** Test: method=html, version=5.0. */
+  @Test public void version50() {
+    final String option = METHOD.arg("html") + VERSION.arg("5.0");
+    query(option + "<html/>", "<!DOCTYPE HTML><html></html>");
+    final String[] empties = { "area", "base", "br", "col", "command", "embed", "hr",
+        "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr" };
+    for(final String e : empties) {
+      query(option + '<' + e + "/>", "<" + e + '>');
+    }
+    query(option + "<a>&#x90;</a>", "<a>&#x90;</a>");
+    query(option + "<html/>", "<!DOCTYPE HTML><html></html>");
+    query("declare namespace xhtml = 'http://www.w3.org/1999/xhtml';\n"
+        + option + INDENT_ATTRIBUTES.arg("yes") + INDENT.arg("yes")
+        + "<html>\n"
+        + "  <xhtml:body xhtml:test='x' xmlns='http://www.w3.org/2000/svg'>\n"
+        + "     <svg/>\n"
+        + "  </xhtml:body>\n"
+        + "</html>",
+        "<!DOCTYPE HTML>\n"
+        + "<html>\n"
+        + "  <body xmlns:xhtml=\"http://www.w3.org/1999/xhtml\"\n"
+        + "        xmlns=\"http://www.w3.org/1999/xhtml\"\n"
+        + "        xhtml:test=\"x\"><svg xmlns=\"http://www.w3.org/2000/svg\"/></body>\n"
+        + "</html>");
+  }
+
+  /** Test: method=text. */
+  @Test public void text() {
+    final String option = METHOD.arg("text");
+    query(option + "1, 2", "1 2");
+    query(option + "<a>1</a>", 1);
+    query(option + "1, <a>2</a>, 3", 123);
+    query(option + USE_CHARACTER_MAPS.arg(";=,,") + "'1;2'", "1,2");
+    // delimiters and whitespace in keys are percent-encoded
+    query(option + USE_CHARACTER_MAPS.arg("%3D=EQ") + "'1=2'", "1EQ2");
+    query(option + USE_CHARACTER_MAPS.arg("%2C=CM") + "'1,2'", "1CM2");
+    query(option + USE_CHARACTER_MAPS.arg("%20=SP") + "'1 2'", "1SP2");
+    query(option + USE_CHARACTER_MAPS.arg("%25=PC") + "'1%2'", "1PC2");
+    query(option + USE_CHARACTER_MAPS.arg("%=PC") + "'1%2'", "1PC2");
+  }
+
+  /** Test: item-separator. */
+  @Test public void itemSeparator() {
+    query(ITEM_SEPARATOR.arg("-") + "1, 2", "1-2");
+    query(ITEM_SEPARATOR.arg("") + "1, 2", 12);
+    query(ITEM_SEPARATOR.arg("ABC") + "1 to 3", "1ABC2ABC3");
+
+    query(ITEM_SEPARATOR.arg("&#xa;") + "<a/>, <b/>", "<a/>\n<b/>");
+    query(ITEM_SEPARATOR.arg("&#xa;") + METHOD.arg("text") + "1, 2", "1\n2");
+
+    // GH-2163: XQuery, serialization item-separator option
+    Map.of("xml", "", "text", "", "adaptive", "[]").forEach((key, value) ->
+      query(METHOD.arg(key) + ITEM_SEPARATOR.arg("|") + "[]", value));
+    Map.of("xml", 1, "text", 1, "adaptive", "[1]").forEach((key, value) ->
+      query(METHOD.arg(key) + ITEM_SEPARATOR.arg("|") + "[1]", value));
+    Map.of("xml", "", "text", "", "adaptive", "[]|[]").forEach((key, value) ->
+      query(METHOD.arg(key) + ITEM_SEPARATOR.arg("|") + "[], []", value));
+    Map.of("xml", "1|2", "text", "1|2", "adaptive", "[1]|[2]").forEach((key, value) ->
+      query(METHOD.arg(key) + ITEM_SEPARATOR.arg("|") + "[ 1 ], [ 2 ]", value));
+    Map.of("xml", "1|2|3", "text", "1|2|3", "adaptive", "[1,2]|[3]").forEach((key, value) ->
+      query(METHOD.arg(key) + ITEM_SEPARATOR.arg("|") + "[ 1, 2 ], [ 3 ]", value));
+    Map.of("xml", "1|2", "text", "1|2", "adaptive", "1|[[2]]|[]").forEach((key, value) ->
+      query(METHOD.arg(key) + ITEM_SEPARATOR.arg("|") + "1, [[ 2 ]], []", value));
+    Map.of("xml", "1|2|3", "text", "1|2|3", "adaptive", "1|[2,3]").forEach((key, value) ->
+      query(METHOD.arg(key) + ITEM_SEPARATOR.arg("|") + "1, [ 2, 3 ]", value));
+
+    // separators are inserted as text nodes: characters are mapped and escaped
+    final String xml = METHOD.arg("xml");
+    query(xml + ITEM_SEPARATOR.arg("&lt;&amp;") + "<a/>, <b/>", "<a/>&lt;&amp;<b/>");
+    query(xml + ITEM_SEPARATOR.arg("&#xd;") + "<a/>, <b/>", "<a/>&#xD;<b/>");
+    query(xml + ITEM_SEPARATOR.arg("|") + USE_CHARACTER_MAPS.arg("|=--") + "<a/>, <b/>",
+        "<a/>--<b/>");
+    // escaping precedes the line-ending substitution
+    query("serialize((<a/>, <b/>), map { 'method': 'xml', 'item-separator': '&#xd;&#xa;', "
+        + "'line-ending': '&#xd;&#xa;' }) eq '<a/>&amp;#xD;&#xd;&#xa;<b/>'", true);
+    // separators survive a round trip
+    query("string-to-codepoints(parse-xml('<r>' || serialize((<a/>, <b/>), map { "
+        + "'method': 'xml', 'item-separator': '&#xd;&#xa;' }) || '</r>')/r/text())", "13\n10");
+    // separators of the text method are not escaped
+    query("string-to-codepoints(serialize(('a', 'b'), map { 'method': 'text', "
+        + "'item-separator': '&#xd;' }))", "97\n13\n98");
+  }
+
+  /** Test: xml:space='preserve'. */
+  @Test public void preserve() {
+    query("<a xml:space='preserve'>T<b/></a>", "<a xml:space=\"preserve\">T<b/></a>");
+    query("<a xml:space='default'>T<b/></a>", "<a xml:space=\"default\">T<b/></a>");
+    query("<a xml:space='x'>T<b/></a>", "<a xml:space=\"x\">T<b/></a>");
+
+    String option = INDENT.arg("yes");
+    query(option + "<a xml:space='preserve'>T<b/></a>", "<a xml:space=\"preserve\">T<b/></a>");
+    query(option + "<a xml:space='default'>T<b/></a>", "<a xml:space=\"default\">T<b/>\n</a>");
+    query(option + "<a xml:space='x'>T<b/></a>", "<a xml:space=\"x\">T<b/>\n</a>");
+
+    option = INDENT.arg("no");
+    query(option + "<a xml:space='preserve'>T<b/></a>", "<a xml:space=\"preserve\">T<b/></a>");
+    query(option + "<a xml:space='default'>T<b/></a>", "<a xml:space=\"default\">T<b/></a>");
+    query(option + "<a xml:space='x'>T<b/></a>", "<a xml:space=\"x\">T<b/></a>");
+  }
+
+  /** Test: method=json, json-lines=on. */
+  @Test public void jsonLines() {
+    final String option = METHOD.arg("json") + JSON_LINES.arg("on");
+    query(option + "()", "");
+    query(option + "1, 2", "1\n2");
+    query(option + "[1], { '2': 3 }", "[1]\n{\"2\":3}");
+
+    query(option + INDENT.arg("yes") + "[1], { '2': 3 }", "[ 1 ]\n{ \"2\": 3 }");
+  }
+
+  /** Test: expression. */
+  @Test public void expression() {
+    final String option = METHOD.arg("adaptive") + EXPRESSION.arg("yes");
+    // a sequence is parenthesized, whatever its size
+    query(option + "()", "()");
+    query(option + "1", "(1)");
+    query(option + "(1, 'a')", "(1, \"a\")");
+    // strings are quoted at every depth
+    query(option + "'A'", "(\"A\")");
+    query(option + "[ 'A' ]", "([\"A\"])");
+    // the exact type is stated wherever a literal would not yield it
+    query(option + "xs:untypedAtomic('A')", "(xs:untypedAtomic(\"A\"))");
+    query(option + "xs:anyURI('A')", "(xs:anyURI(\"A\"))");
+    query(option + "xs:dayTimeDuration('P1D')", "(xs:dayTimeDuration(\"P1D\"))");
+    query(option + "xs:byte(1)", "(xs:byte(\"1\"))");
+    // a decimal literal needs its decimal point: 1 would be parsed as an integer
+    query(option + "1.5", "(1.5)");
+    query(option + "xs:decimal(1)", "(1.0)");
+    // a double is a literal with an exponent; NaN and the infinities have none
+    query(option + "1e0", "(1E0)");
+    query(option + "1e21", "(1.0E21)");
+    query(option + "xs:double(1000)", "(1000E0)");
+    query(option + "xs:double('NaN')", "(xs:double(\"NaN\"))");
+    query(option + "xs:double('INF')", "(xs:double(\"INF\"))");
+    // no literal exists for a float
+    query(option + "xs:float(2.5)", "(xs:float(\"2.5\"))");
+    // the nodes that have no direct constructor get a computed one
+    query(option + "attribute a { 'v' }", "(attribute a { \"v\" })");
+    query(option + "text { 'v' }", "(text { \"v\" })");
+    query(option + "document { <a/> }", "(document { <a/> })");
+    // the project-specific relaxations of the basex method would not be parsed again
+    query(METHOD.arg("basex") + EXPRESSION.arg("yes") + "true()", "(true())");
+    query(METHOD.arg("basex") + EXPRESSION.arg("yes") + "xs:date('2026-01-01')",
+        "(xs:date(\"2026-01-01\"))");
+
+    // every value is yielded again by the expression it was serialized to
+    for(final String value : new String[] { "'A'", "'a\nb'", "xs:untypedAtomic('A')", "42", "1.5",
+        "xs:decimal(1)", "xs:NCName('X')", "xs:language('en')", "xs:unsignedByte(1)",
+        "xs:gMonthDay('--01-01')", "xs:dateTimeStamp('2001-01-01T01:01:01+01:00')",
+        "1e3", "xs:float(2.5)", "xs:byte(7)", "xs:double('NaN')", "true()",
+        "xs:date('2026-08-17')", "xs:dayTimeDuration('PT30S')", "xs:anyURI('X')",
+        "xs:QName('xml:a')", "xs:base64Binary('QQ==')", "xs:hexBinary('41')", "xs:NCName('n')",
+        "<a b='c'>d</a>", "attribute a { 'v' }", "text { 'v' }", "comment { 'c' }",
+        "processing-instruction p { 'i' }", "document { <a/> }", "{ 'a': [ 1, 2 ] }",
+        "[ 1, 'two' ]", "()", "(1, 'two', <three/>)" }) {
+      query("let $value := " + value +
+          " let $text := serialize($value, { 'method': 'adaptive', 'expression': true() })" +
+          " let $again := xquery:eval($text)" +
+          " return deep-equal($again, $value) and type-of($again) eq type-of($value)", true);
+    }
+  }
+
+  /** Test: method=adaptive. */
+  @Test public void adaptive() {
+    final String option = METHOD.arg("adaptive");
+    query(option + "()", "");
+    query(option + "1", 1);
+    query(option + "1.0", 1);
+    query(option + "1e0", 1);
+    query(option + "1234567890e0", 1234567890);
+    query(option + "1e21", "1e+21");
+    query(option + "xs:double('NaN')", "NaN");
+    query(option + "xs:double('INF')", "INF");
+    query(option + "xs:double('-0')", "-0");
+    query(option + "xs:byte(1)", 1);
+    query(option + "false()", "false()");
+    query(option + "'A'", "A");
+    query(option + "xs:anyURI('A')", "A");
+    query(option + "xs:untypedAtomic('A')", "A");
+    query(option + "xs:QName('xml:a')", "#xml:a");
+    query(option + "xs:QName('fn:a')", "#fn:a");
+    query(option + "xs:dayTimeDuration('P1D')", "xs:duration(\"P1D\")");
+    query(option + "<xml><a>B</a></xml>", "<xml><a>B</a></xml>");
+    query(option + "true#0", "fn:true#0");
+    query(option + "fn() {}", "fn() as empty-sequence() { () }");
+    query(option + "xs:float(1)", 1);
+    query(option + "xs:float(1e21)", "1e+21");
+    query(option + "xs:float(0.1)", 0.1);
+    query(option + "xs:float('-0')", "-0");
+
+    query(option + "[]", "[]");
+    query(option + "[ 1 ]", "[1]");
+    query(option + "[ 1.0 ]", "[1]");
+    query(option + "[ 1e0 ]", "[1]");
+    query(option + "[ 1234567890e0 ]", "[1234567890]");
+    query(option + "[ xs:double('NaN') ]", "[NaN]");
+    query(option + "[ xs:double('INF') ]", "[INF]");
+    query(option + "[ xs:double('-0') ]", "[-0]");
+    query(option + "[ xs:byte(1) ]", "[1]");
+    query(option + "[ false() ]", "[false()]");
+    query(option + "[ 'A' ]", "[\"A\"]");
+    query(option + "[ xs:anyURI('A') ]", "[\"A\"]");
+    query(option + "[ xs:untypedAtomic('A') ]", "[\"A\"]");
+    query(option + "[ xs:QName('xml:a') ]", "[#xml:a]");
+    query(option + "[ xs:dayTimeDuration('P1D') ]", "[xs:duration(\"P1D\")]");
+    query(option + "[ <xml><a>B</a></xml> ]", "[<xml><a>B</a></xml>]");
+    query(option + "[ true#0 ]", "[fn:true#0]");
+    query(option + "[ fn() {} ]", "[fn() as empty-sequence() { () }]");
+    query(option + "[ xs:float(1) ]", "[1]");
+    query(option + "[ xs:float('-0')]", "[-0]");
+
+    query(option + "{ 1: (), 2: 3, 4: (5, 6) }", "{1:(),2:3,4:(5,6)}");
+  }
+
+  /** Test: method=basex. */
+  @Test public void basex() {
+    query("()", "");
+    query("1", 1);
+    query("1.0", 1);
+    query("1e0", 1);
+    query("1234567890e0", 1234567890);
+    query("1e21", "1e+21");
+    query("xs:double('NaN')", "NaN");
+    query("xs:double('INF')", "INF");
+    query("xs:double('-0')", "-0");
+    query("xs:byte(1)", 1);
+    query("false()", "false");
+    query("'A'", "A");
+    query("xs:anyURI('A')", "A");
+    query("xs:untypedAtomic('A')", "A");
+    query("xs:QName('xml:a')", "#xml:a");
+    query("xs:dayTimeDuration('P1D')", "P1D");
+    query("<xml><a>B</a></xml>", "<xml><a>B</a></xml>");
+    query("true#0", "fn:true#0");
+    query("fn() {}", "fn() as empty-sequence() { () }");
+    query("xs:float(1)", 1);
+    query("xs:float(1e21)", "1e+21");
+    query("xs:float(0.1)", 0.1);
+    query("xs:float('-0')", "-0");
+
+    query("[]", "[]");
+    query("[ 1 ]", "[1]");
+    query("[ 1.0 ]", "[1]");
+    query("[ 1e0 ]", "[1]");
+    query("[ 1234567890e0 ]", "[1234567890]");
+    query("[ xs:double('NaN') ]", "[NaN]");
+    query("[ xs:double('INF') ]", "[INF]");
+    query("[ xs:byte(1) ]", "[1]");
+    query("[ false() ]", "[false()]");
+    query("[ 'A' ]", "[\"A\"]");
+    query("[ xs:anyURI('A') ]", "[\"A\"]");
+    query("[ xs:untypedAtomic('A') ]", "[\"A\"]");
+    query("[ xs:QName('xml:a') ]", "[#xml:a]");
+    query("[ xs:dayTimeDuration('P1D') ]", "[\"P1D\"]");
+    query("[ <xml><a>B</a></xml> ]", "[<xml><a>B</a></xml>]");
+    query("[ true#0 ]", "[fn:true#0]");
+    query("[ fn() {} ]", "[fn() as empty-sequence() { () }]");
+    query("[ xs:float(1) ]", "[1]");
+
+    query("{ 1: (), 2: 3, 4: (5, 6) }", "{1:(),2:3,4:(5,6)}");
+  }
+
+  /** HTML Serialization: escaping entities in multiple script elements. */
+  @Test public void gh2575() {
+    final String option = METHOD.arg("html");
+    contains(option + "<html><script>&amp;&amp;</script></html>", ">&&<");
+
+    contains(option + "<html><style>123</style><script>&amp;&amp;</script></html>", ">&&<");
+    contains(option + "<html><style>&amp;&amp;</style><script>123</script></html>", ">&&<");
+    contains(option + "<html><head><style/></head><script>&amp;&amp;</script></html>", ">&&<");
+
+    contains(option + "<html><style/><script>&amp;&amp;</script></html>", ">&&<");
+    contains(option + "<html><style/><body><script>&amp;&amp;</script></body></html>", ">&&<");
+  }
+
+  /** HTML Serialization: restore escaping following empty script tags. */
+  @Test public void gh2645() {
+    final String option = METHOD.arg("html");
+    contains(option + "<html><script/><body>&amp;&amp;</body></html>", ">&amp;&amp;<");
+  }
+
+  /** HTML5 indentation. */
+  @Test public void indentHTML5() {
+    final String option = METHOD.arg("html") + INDENT.arg("on");
+    query(option + "<html/>",
+        "<!DOCTYPE HTML>\n<html></html>");
+    query(option + "<html><head/></html>",
+        "<!DOCTYPE HTML>\n<html>\n  <head>\n    <meta charset=\"UTF-8\">\n  </head>\n</html>");
+    query(option + "<html><script/></html>",
+        "<!DOCTYPE HTML>\n<html><script></script></html>");
+    query(option + "<html><meta/></html>",
+        "<!DOCTYPE HTML>\n<html>\n  <meta>\n</html>");
+    query(option + "<html><meta/><meta/></html>",
+        "<!DOCTYPE HTML>\n<html>\n  <meta>\n  <meta>\n</html>");
+  }
+
+  /** Canonical serialization. */
+  @Test public void canonical() {
+    final String option = METHOD.arg("xml") + CANONICAL.arg("yes");
+
+    query(option + "parse-xml('<doc>Hello, world!<!--C2--></doc><!--C3-->')",
+        "<doc>Hello, world!<!--C2--></doc>\n<!--C3-->");
+    query(option + "parse-xml('<!--C1--><doc>Hello, world!<!--C2--></doc><!--C3-->')",
+        "<!--C1-->\n<doc>Hello, world!<!--C2--></doc>\n<!--C3-->");
+    query(option + "parse-xml('<!--C0--><!--C1--><doc>Hello, world!<!--C2--></doc><!--C3-->')",
+        "<!--C0-->\n<!--C1-->\n<doc>Hello, world!<!--C2--></doc>\n<!--C3-->");
+    query(option + "document { comment {'C1'}, <doc>Hello, world!<!--C2--></doc>, comment {'C3'} }",
+        "<!--C1-->\n<doc>Hello, world!<!--C2--></doc>\n<!--C3-->");
+    query(option + "<x a='1 > 0'>1 > 0</x>", "<x a=\"1 > 0\">1 &gt; 0</x>");
+
+    // relative namespace URIs are not allowed
+    error(option + "<x xmlns='relative'/>", SERCANONURI_X);
+    // document must only have one element root node
+    error(option + "document { <x/>, <x/> }", SERCANONROOTS_X);
+    // document must only have one element root node (use 'update {}': create database node)
+    error(option + "document { <x/>, <x/> } update {}", SERCANONROOTS_X);
+  }
+
+  /** Test: method=json, escaping of C1 control characters (U+007F-U+009F). */
+  @Test public void jsonControls() {
+    final String option = METHOD.arg("json");
+    query(option + "codepoints-to-string(127)", "\"\\u007F\"");
+    query(option + "codepoints-to-string(159)", "\"\\u009F\"");
+    query(option + "'a' || codepoints-to-string(133) || 'b'", "\"a\\u0085b\"");
+    // U+00A0 is outside the C1 range and stays unescaped
+    query("string-to-codepoints(serialize(codepoints-to-string(160), "
+        + "map { 'method': 'json' }))", "34\n160\n34");
+    // canonical serialization leaves C1 control characters unescaped
+    query("string-to-codepoints(serialize(codepoints-to-string(127), "
+        + "map { 'method': 'json', 'canonical': true() }))", "34\n127\n34");
+  }
+}

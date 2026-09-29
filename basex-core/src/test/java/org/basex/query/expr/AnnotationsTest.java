@@ -1,0 +1,76 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.*;
+import org.junit.jupiter.api.*;
+
+/**
+ * Annotations tests.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class AnnotationsTest extends SandboxTest {
+  /** Parsing of function declarations. */
+  @Test public void functionDecl() {
+    query("declare namespace a='a';declare %a:a function local:x() { 1 }; local:x()", 1);
+    query("declare %public function local:x() { 1 }; local:x()", 1);
+    query("declare %private function local:x() { 1 }; local:x()", 1);
+    query("declare namespace a='a';declare %a:a function local:x() { 1 }; local:x()", 1);
+  }
+
+  /** Parsing of variable declarations. */
+  @Test public void varDecl() {
+    query("declare %public variable $x := 1; $x", 1);
+    query("declare %private variable $x := 1; $x", 1);
+    query("declare namespace a='a';declare %a:a variable $x := 1; $x", 1);
+    query("declare namespace a='a';declare %a:a(1) %a:b(2) variable $x:=1; $x", 1);
+    query("declare namespace a='a';declare %a:a(#x) %a:b(#Q{y}z) variable $x:=1; $x", 1);
+    query("declare namespace a='a';declare %a:a(# x) %a:b(# Q{y}z) variable $x:=1; $x", 1);
+
+    // numeric annotation values
+    query("declare %local:x(.1) variable $a := 1; $a", 1);
+    query("declare %local:x(1.) variable $a := 1; $a", 1);
+    error("declare %local:x(.) variable $a := 1; $a", NUMBER_X);
+  }
+
+  /** Parsing errors and conflicts. */
+  @Test public void conflicts() {
+    error("declare namespace a='a';declare %a:a() variable $x:=1; $x", ANNVALUE_X);
+    error("declare namespace a='a';declare %a:a() variable $x:=1; $x", ANNVALUE_X);
+    error("declare %pfff:public variable $x := 1; $x", NOURI_X);
+    error("declare %public %public variable $x := 1; $x", DUPLVARVIS);
+    error("declare %public %private variable $x := 1; $x", DUPLVARVIS);
+    error("declare %updating variable $x := 1; $x", UPDATINGVAR);
+    error("declare %updating updating function local:x() " +
+        "{ insert node <a/> into <b/> }; local:x()", DUPLUPD);
+    error("declare updating %updating function local:x() " +
+        "{ insert node <a/> into <b/> }; local:x()", DUPLUPD);
+    error("declare %updating function local:x() { 1 }; local:x()", UPEXPECTF);
+  }
+
+  /** Parsing errors and conflicts. */
+  @Test public void unknown() {
+    // ignore prefixes with no annotation definitions
+    error("declare %db:xx function local:x() { 1 }; 1", BASEX_ANN1_X);
+    // check unit annotations
+    error("declare %unit:xyz function local:x() { 1 }; 1", BASEX_ANN1_X);
+    // check restxq annotations
+    error("declare %rest:xx function local:x() { 1 }; 1", BASEX_ANN1_X);
+    // check output annotations
+    error("declare %output:xx function local:x() { 1 }; 1", BASEX_ANN1_X);
+    error("declare %output:method function local:x() { 1 }; 1", BASEX_ANN2_X_X);
+    error("declare %output:method(1) function local:x() { 1 }; 1", BASEX_ANN_X_X_X);
+  }
+
+  /** Literals. */
+  @Test public void literals() {
+    query("%Q{_}_ fn { . }(1)", 1);
+    query("%Q{_}_('') fn { . }(1)", 1);
+    query("%Q{_}_( '' ) fn { . }(1)", 1);
+    query("%Q{_}_('',1,-2,-3.4,-5.6e7,true(),false()) fn { . }(1)", 1);
+    query("%Q{_}_(  ''  ,  1  ,  -  2  ,  -  3.4  ,  -  5.6e7  , " +
+        "true  (  )  , false  (  )  )  %Q{_}__  %Q{_}___ fn { . }(1)", 1);
+  }
+}

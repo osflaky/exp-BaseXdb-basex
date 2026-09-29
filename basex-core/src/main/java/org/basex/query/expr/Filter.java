@@ -1,0 +1,356 @@
+package org.basex.query.expr;
+
+import static org.basex.query.func.Function.*;
+
+import java.util.function.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.gflwor.*;
+import org.basex.query.expr.index.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Abstract value filter expression.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class Filter extends Preds {
+  /** Expression. */
+  public Expr root;
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param root root expression
+   * @param preds predicate expressions
+   */
+  protected Filter(final InputInfo info, final Expr root, final Expr... preds) {
+    super(info, Types.ITEM_ZM, preds);
+    this.root = root;
+  }
+
+  /**
+   * Creates a new, optimized filter expression, or the root expression if no predicates exist.
+   * @param cc compilation context
+   * @param info input info (can be {@code null})
+   * @param root root expression
+   * @param preds predicate expressions
+   * @return filter root, path or filter expression
+   * @throws QueryException query exception
+   */
+  public static Expr get(final CompileContext cc, final InputInfo info, final Expr root,
+      final Expr... preds) throws QueryException {
+    return preds.length == 0 ? root : new CachedFilter(info, root, preds).optimize(cc);
+  }
+
+  @Override
+  public final boolean navigational() {
+    return root.navigational();
+  }
+
+  @Override
+  public final Expr compile(final CompileContext cc) throws QueryException {
+    root = root.compile(cc);
+    return super.compile(cc);
+  }
+
+  @Override
+  public final Expr optimize(final CompileContext cc) throws QueryException {
+    // flatten nested filters
+    if(root instanceof final Filter filter) {
+      root = filter.root;
+      exprs = ExprList.concat(filter.exprs, exprs);
+    }
+
+    // return empty root
+    if(root.seqType().zero()) return cc.replaceWith(this, root);
+
+    // optimize predicates
+    if(optimize(cc, root)) return cc.emptySeq(this);
+    // no predicates: return root
+    if(exprs.length == 0) return root;
+
+    // no positional access...
+    if(!mayBePositional()) {
+      // convert to axis path: .[text()] → self::node()[text()]
+      if(root instanceof ContextValue && root.seqType().type instanceof NodeType && root.ddo()) {
+        return Path.get(cc, info, null, Step.self(cc, root, info, exprs));
+      }
+      // convert to axis path: (//x)[text() = 'a'] → //x[text() = 'a']
+      if(root instanceof final AxisPath path) return path.addPredicates(cc, exprs);
+
+      // (//x | //y/z)[. = 'a'] → //x[. = 'a'] | //y/z[. = 'a']
+      if(root instanceof final Union union) {
+        final Expr[] operands = distribute(union.exprs, cc);
+        if(operands != null) return cc.replaceWith(this, new Union(info, operands).optimize(cc));
+      }
+      // (//x, //y/z)[. = 'a'] → (//x[. = 'a'], //y/z[. = 'a'])
+      if(root instanceof final List list) {
+        final Expr[] operands = distribute(list.exprs, cc);
+        if(operands != null) return cc.replaceWith(this, List.get(cc, info, operands));
+      }
+
+      // rewrite filter with document nodes to path to possibly enable index rewritings
+      // example: db:get('db')[.//text() = 'x'] → db:get('db')/.[.//text() = 'x']
+      if(root.seqType().type.kind() == Kind.DOCUMENT && root.ddo()) {
+        final Expr step = Step.self(cc, root, info, exprs);
+        return cc.replaceWith(this, Path.get(cc, info, root, step));
+      }
+
+      // rewrite independent deterministic single filter to 'if' expression:
+      // example: (1 to 10)[$boolean] → if($boolean) then (1 to 10) else ()
+      final Expr expr = exprs[0];
+      if(exprs.length == 1 && expr.isSimple() && !expr.seqType().mayBeNumber()) {
+        final Expr iff = new If(info, expr, root).optimize(cc);
+        return cc.replaceWith(this, iff);
+      }
+
+      // unroll filters with few items
+      // example: (1, 2)[. = 1] → 1[. = 1], 2[. = 1]
+      final ExprList unroll = cc.unroll(root, false);
+      if(unroll != null) {
+        final int us = unroll.size();
+        final ExprList results = new ExprList(us);
+        for(final Expr ex : unroll) {
+          results.add(get(cc, info, ex, results.size() == us - 1 ? exprs :
+            copyAll(cc, new IntObjectMap<>(), exprs)));
+        }
+        return List.get(cc, info, results.finish());
+      }
+
+      // otherwise, return iterative filter
+      return copyType(new IterFilter(info, root, exprs));
+    }
+
+    // rewrite loop-invariant predicates
+    // example: for $i in (1, 'a') return $seq[$i]
+    if(Checks.all(exprs, Expr::isSimple)) {
+      return copyType(new HoistedFilter(info, root, exprs));
+    }
+
+    // rewrite positional predicates
+    Expr expr = root;
+    boolean opt = false;
+    final ExprList preds = new ExprList(exprs.length);
+    final QueryFunction<Expr, Expr> add = e -> preds.isEmpty() ? e : get(cc, info, e, preds.next());
+    final Predicate<Expr> simpleInt = e -> e.seqType().eq(Types.INTEGER_O) && e.isSimple();
+    for(final Expr pred : exprs) {
+      Expr ex = null;
+      if(pred instanceof final IntPos pos) {
+        // E[pos: MIN, MAX] → util:range(E, MIN, MAX)
+        ex = cc.function(_UTIL_RANGE, info, add.apply(expr), Itr.get(pos.min), Itr.get(pos.max));
+      } else if(pred instanceof final SimplePos pos) {
+        if(pos.exact()) {
+          // E[pos: POS] → items-at(E, POS)
+          ex = cc.function(ITEMS_AT, info, add.apply(expr), pred.arg(0));
+        } else {
+          // E[pos: MIN, MAX] → util:range(E, MIN, MAX)
+          final Expr min = pred.arg(0), max = pred.arg(1);
+          if(min.seqType().one() && max.seqType().one())
+            ex = cc.function(_UTIL_RANGE, info, add.apply(expr), min, max);
+        }
+      } else if(pred instanceof final Pos pos) {
+        final Expr posExpr = pos.expr;
+        if(posExpr instanceof Range) {
+          final Expr arg1 = posExpr.arg(0), arg2 = posExpr.arg(1);
+          if(simpleInt.test(arg1) && LAST.is(arg2)) {
+            // E[pos: INT to last()] → util:range(E, INT)
+            ex = cc.function(_UTIL_RANGE, info, add.apply(expr), arg1);
+          } else if(arg1 == Itr.ONE && arg2 instanceof final Arith arth2 && LAST.is(arth2.arg(0)) &&
+              arth2.calc == Calc.SUBTRACT && arth2.arg(1) == Itr.ONE) {
+            // E[pos: 1 to last() - 1] → trunk(E)
+            ex = cc.function(TRUNK, info, add.apply(expr));
+          } else if(arg1 instanceof final Arith arth1 && LAST.is(arth1.arg(0)) &&
+              arth1.calc == Calc.SUBTRACT && simpleInt.test(arth1.arg(1)) && arg2 == Itr.MAX) {
+            // E[pos: last() - INT to MAX] → reverse(subsequence(reverse(E), 1, INT + 1))
+            ex = cc.function(REVERSE, info, cc.function(SUBSEQUENCE, info,
+                cc.function(REVERSE, info, add.apply(expr)), Itr.ONE,
+                new Arith(info, arg1.arg(1), Itr.ONE, Calc.ADD).optimize(cc)));
+          }
+        } else if(LAST.is(posExpr)) {
+          // E[pos: last()] → foot(E)
+          ex = cc.function(FOOT, info, add.apply(expr));
+        } else if(posExpr instanceof final Arith arth && LAST.is(arth.arg(0)) &&
+            arth.calc == Calc.SUBTRACT && simpleInt.test(arth.arg(1))) {
+          // E[pos: last() - INT] → items-at(reverse(E), INT + 1)
+          ex = cc.function(ITEMS_AT, info, cc.function(REVERSE, info, add.apply(expr)),
+              new Arith(info, posExpr.arg(1), Itr.ONE, Calc.ADD).optimize(cc));
+        }
+      } else if(pred instanceof final MixedPos pos) {
+        final Expr posExpr = pos.expr;
+        // Value instances are known to be sorted and duplicate-free (see Pos#get)
+        final boolean sorted = posExpr instanceof Value;
+        // E[pos: INT1, INT2, ...] → items-at(E, INT1, INT2, ...)
+        // E[pos: POSITIONS, ...] → items-at(E, sort(distinct-values((POSITIONS)))
+        ex = cc.function(ITEMS_AT, info, add.apply(expr), sorted ? posExpr :
+          cc.function(SORT, info, cc.function(DISTINCT_VALUES, info, posExpr)), Bln.get(sorted));
+      } else if(pred instanceof final CmpG cmp) {
+        final Expr op1 = pred.arg(0), op2 = pred.arg(1);
+        if(POSITION.is(op1) && cmp.op == CmpOp.NE &&
+            op2.isSimple() && op2.seqType().instanceOf(Types.INTEGER_O)) {
+          // E[position() != pos] → remove(E, pos)
+          ex = cc.function(REMOVE, info, add.apply(expr), op2);
+        }
+      }
+      // replace temporary result expression or add predicate to temporary list
+      if(ex != null) {
+        expr = ex;
+        opt = true;
+      } else {
+        preds.add(pred);
+      }
+    }
+    // return optimized or filter expression
+    if(opt) return cc.replaceWith(this, add.apply(expr));
+
+    // return fallback expression
+    return copyType(new CachedFilter(info, root, exprs));
+  }
+
+  @Override
+  public final void checkUp() throws QueryException {
+    checkNoUp(root);
+    super.checkUp();
+  }
+
+  @Override
+  public final boolean has(final Flag... flags) {
+    return root.has(flags) || super.has(Flag.remove(flags, Flag.POS, Flag.CTX));
+  }
+
+  @Override
+  public final boolean inlineable(final InlineContext ic) {
+    return root.inlineable(ic) && super.inlineable(ic);
+  }
+
+  @Override
+  public final VarUsage count(final Var var) {
+    // context reference check: only consider root
+    final VarUsage inRoot = root.count(var);
+    if(var == null) return inRoot;
+
+    final VarUsage inPreds = super.count(var);
+    return inPreds == VarUsage.NEVER ? inRoot :
+      root.seqType().zeroOrOne() ? inRoot.plus(inPreds) : VarUsage.MORE_THAN_ONCE;
+  }
+
+  @Override
+  public final Expr inline(final InlineContext ic) throws QueryException {
+    final Expr inlined = root.inline(ic);
+    boolean changed = inlined != null;
+    if(changed) root = inlined;
+
+    // do not inline context reference in predicates
+    changed |= ic.var != null && ic.cc.ok(root, true, () -> ic.inline(exprs));
+
+    return changed ? optimize(ic.cc) : null;
+  }
+
+  @Override
+  public final boolean accept(final ASTVisitor visitor) {
+    for(final Expr expr : exprs) {
+      visitor.enterFocus();
+      final boolean more = expr.accept(visitor);
+      visitor.exitFocus();
+      if(!more) return false;
+    }
+    return root.accept(visitor);
+  }
+
+  @Override
+  protected final Expr assignType(final Expr expr) {
+    exprType.assign(root.seqType().union(Occ.ZERO)).data(root);
+    return root;
+  }
+
+  /**
+   * Attaches the predicates to the specified operands.
+   * @param operands operands of a list or union expression
+   * @param cc compilation context
+   * @return new operands, or {@code null} if no index is used
+   * @throws QueryException query exception
+   */
+  private Expr[] distribute(final Expr[] operands, final CompileContext cc)
+      throws QueryException {
+
+    // nondeterministic predicates would be evaluated twice for nodes in two operands
+    if(Checks.any(exprs, expr -> expr.has(Flag.NDT))) return null;
+
+    final ExprList list = new ExprList(operands.length);
+    boolean applied = false;
+    for(final Expr operand : operands) {
+      // the operands are copied, as the rewrite will be discarded if no index can be applied
+      final IntObjectMap<Var> vm = new IntObjectMap<>();
+      final Expr filter = get(cc, info, operand.copy(cc, vm), Arr.copyAll(cc, vm, exprs));
+      applied = applied || IndexAccess.applied(filter);
+      list.add(filter);
+    }
+    return applied ? list.finish() : null;
+  }
+
+  /**
+   * Adds a predicate and returns the optimized expression.
+   * This function is e.g. called by {@link For#addPredicate}.
+   * @param cc compilation context
+   * @param pred predicate to be added
+   * @return new filter
+   * @throws QueryException query exception
+   */
+  public final Expr addPredicate(final CompileContext cc, final Expr pred) throws QueryException {
+    return copyType(get(cc, info, root, ExprList.concat(exprs, pred)));
+  }
+
+  @Override
+  public final Expr simplifyFor(final Simplify mode, final CompileContext cc)
+      throws QueryException {
+
+    Expr expr = this;
+    if(mode.oneOf(Simplify.EBV, Simplify.PREDICATE)) {
+      // E[a[. = 'x']] → E[a = 'x']
+      expr = flattenEbv(root, true, cc);
+    } else if(mode.oneOf(Simplify.DISTINCT, Simplify.SET) && !mayBePositional()) {
+      final Expr ex = root.simplifyFor(mode, cc);
+      if(ex != root) expr = get(cc, info, ex, exprs);
+    } else if(mode.oneOf(Simplify.COUNT, Simplify.EXISTENCE) && exprs.length == 1 &&
+        exprs[0].seqType().instanceOf(Types.XNODE_ZO)) {
+      // $nodes[@attr] → $nodes ! @attr
+      expr = SimpleMap.get(cc, info, root, exprs[0]);
+    }
+    return cc.simplify(this, expr, mode);
+  }
+  @Override
+  public final boolean ddo() {
+    return root.ddo();
+  }
+
+  @Override
+  public final int exprSize() {
+    return root.exprSize() + super.exprSize();
+  }
+
+  @Override
+  public final void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this), root, exprs);
+  }
+
+  @Override
+  public final boolean equals(final Object obj) {
+    return this == obj || obj instanceof final Filter fltr && root.equals(fltr.root) &&
+        super.equals(obj);
+  }
+
+  @Override
+  protected final void rootToString(final QueryString qs) {
+    qs.token(root);
+  }
+}

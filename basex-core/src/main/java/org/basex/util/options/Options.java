@@ -1,0 +1,1152 @@
+package org.basex.util.options;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Prop.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.Map.*;
+import java.util.function.*;
+
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.io.in.*;
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.http.*;
+import org.basex.util.list.*;
+import org.basex.util.similarity.*;
+
+/**
+ * This class provides methods for accessing, reading and storing options.
+ * Options (name/value pairs) may either be instances of the {@link Option} class.
+ * If an instance of this class contains no pre-defined options, assigned options will
+ * be added as free options.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class Options implements Iterable<Option<?>> {
+  /** Yes/No enumeration. */
+  public enum YesNo {
+    /** Yes. */ YES,
+    /** No.  */ NO;
+
+    @Override
+    public String toString() {
+      return Enums.string(this);
+    }
+  }
+
+  /** Yes/No/Omit enumeration. */
+  public enum YesNoOmit {
+    /** Yes.  */ YES,
+    /** No.   */ NO,
+    /** Omit. */ OMIT;
+
+    @Override
+    public String toString() {
+      return Enums.string(this);
+    }
+  }
+
+  /** Comment in configuration file. */
+  private static final String PROPUSER = "# Local Options";
+
+  /**
+   * Cached option metadata (identical for all instances of a subclass).
+   * @param all all options in declaration order (with comments)
+   * @param definitions option names to definitions
+   * @param offset index of the first option (subtracted from option indexes)
+   * @param values default values (cloned per instance)
+   */
+  private record Meta(Option<?>[] all, SortedMap<String, Option<?>> definitions, int offset,
+      Object[] values) { }
+
+  /** Metadata cache, computed once per subclass. */
+  private static final ClassValue<Meta> META = new ClassValue<>() {
+    @Override
+    protected Meta computeValue(final Class<?> clz) {
+      final ArrayList<Option<?>> all = new ArrayList<>();
+      final TreeMap<String, Option<?>> definitions = new TreeMap<>();
+      int min = Integer.MAX_VALUE, max = -1;
+      try {
+        for(final Field f : clz.getFields()) {
+          if(!Modifier.isStatic(f.getModifiers())) continue;
+          if(f.get(null) instanceof final Option opt) {
+            all.add(opt);
+            if(!(opt instanceof Comment)) {
+              definitions.put(opt.name(), opt);
+              min = Math.min(min, opt.index());
+              max = Math.max(max, opt.index());
+            }
+          }
+        }
+      } catch(final IllegalAccessException ex) {
+        throw Util.notExpected(ex);
+      }
+      // options of a class are created consecutively: address them via the smallest index
+      final int offset = max == -1 ? 0 : min;
+      final Object[] values = new Object[max - offset + 1];
+      for(final Option<?> option : definitions.values()) {
+        values[option.index() - offset] = option.value();
+      }
+      return new Meta(all.toArray(Option[]::new),
+          Collections.unmodifiableSortedMap(definitions), offset, values);
+    }
+  };
+
+  /** Cached metadata of the options class. */
+  private final Meta meta;
+  /** Option values, addressed by the index of an option. */
+  private final Object[] values;
+  /** Free option assignments. */
+  private final HashMap<String, String> free;
+  /** Number of assignments. */
+  private volatile int version;
+
+  /** Options, cached from an input file. */
+  private final StringList user = new StringList();
+  /** Options file. */
+  private IOFile file;
+  /** Indicates that the options must not be modified anymore. */
+  private boolean sealed;
+
+  /**
+   * Default constructor.
+   */
+  public Options() {
+    this((IOFile) null);
+  }
+
+  /**
+   * Constructor with options file.
+   * @param opts options file (can be {@code null})
+   */
+  protected Options(final IOFile opts) {
+    meta = META.get(getClass());
+    values = meta.values.clone();
+    free = new HashMap<>();
+    if(opts != null) read(opts);
+  }
+
+  /**
+   * Constructor with options to be copied.
+   * @param opts options
+   */
+  @SuppressWarnings("unchecked")
+  protected Options(final Options opts) {
+    meta = opts.meta;
+    values = opts.values.clone();
+    free = (HashMap<String, String>) opts.free.clone();
+    user.add(opts.user);
+    file = opts.file;
+  }
+
+  /**
+   * Writes the options to disk.
+   */
+  public final synchronized void write() {
+    final StringList lines = new StringList();
+    try {
+      for(final Option<?> option : meta.all) {
+        final String name = option.name();
+        if(option instanceof Comment) {
+          if(!lines.isEmpty()) lines.add("");
+          lines.add("# " + name);
+        } else if(option instanceof final NumbersOption no) {
+          final int[] ints = get(no);
+          final int is = ints == null ? 0 : ints.length;
+          for(int i = 0; i < is; i++) lines.add(name + i + " = " + ints[i]);
+        } else if(option instanceof final StringsOption so) {
+          final String[] strings = get(so);
+          final int ss = strings == null ? 0 : strings.length;
+          lines.add(name + " = " + ss);
+          for(int s = 0; s < ss; s++) lines.add(name + (s + 1) + " = " + strings[s]);
+        } else {
+          lines.add(name + " = " + get(option));
+        }
+      }
+      lines.add("").add(PROPUSER).add(user);
+
+      // only write file if contents have changed
+      final TokenBuilder tb = new TokenBuilder();
+      for(final String line : lines) tb.add(line).add(NL);
+      final byte[] contents = tb.finish();
+
+      boolean skip = file.exists();
+      if(skip) {
+        final TokenBuilder tmp = new TokenBuilder(contents.length);
+        try(NewlineInput nli = new NewlineInput(file)) {
+          for(String line; (line = nli.readLine()) != null;) tmp.add(line).add(NL);
+        }
+        skip = eq(contents, tmp.finish());
+      }
+      if(!skip) {
+        file.parent().md();
+        file.write(contents);
+      }
+    } catch(final Exception ex) {
+      Util.errln("% could not be written.", file);
+      Util.debug(ex);
+    }
+  }
+
+  /**
+   * Returns the option with the specified name.
+   * @param name name of the option
+   * @return value (can be {@code null})
+   */
+  public final synchronized Option<?> option(final String name) {
+    return meta.definitions.get(name);
+  }
+
+  /**
+   * Returns the value of the specified option.
+   * @param option option
+   * @return value (can be {@code null})
+   */
+  public final Object get(final Option<?> option) {
+    final int index = option.index() - meta.offset;
+    return index >= 0 && index < values.length ? values[index] : null;
+  }
+
+  /**
+   * Returns the value of the specified option.
+   * @param name name of option
+   * @return value (can be {@code null})
+   */
+  public final Object get(final String name) {
+    final Option<?> option = meta.definitions.get(name);
+    return option != null ? get(option) : null;
+  }
+
+  /**
+   * Sets an option to a value without checking its type.
+   * @param option option
+   * @param value value to be assigned
+   */
+  public final synchronized void put(final Option<?> option, final Object value) {
+    checkSealed(option.name());
+    values[option.index() - meta.offset] = option.normalize(value);
+    version++;
+  }
+
+  /**
+   * Returns the number of assignments, which can be used to invalidate cached values.
+   * @return number of assignments
+   */
+  public final int version() {
+    return version;
+  }
+
+  /**
+   * Assigns a free option.
+   * @param name name of option
+   * @param value value to be assigned
+   */
+  private synchronized void putFree(final String name, final String value) {
+    checkSealed(name);
+    free.put(name, value);
+  }
+
+  /**
+   * Rejects all subsequent modifications of these options.
+   * @param <E> options type
+   * @return self reference
+   */
+  @SuppressWarnings("unchecked")
+  public final synchronized <E extends Options> E seal() {
+    sealed = true;
+    return (E) this;
+  }
+
+  /**
+   * Ensures that the options have not been sealed.
+   * @param name name of option to be modified
+   */
+  private void checkSealed(final String name) {
+    if(sealed) throw Util.notExpected("Sealed options, cannot assign '%'.", name);
+  }
+
+  /**
+   * Checks if a value was set for the specified option.
+   * @param option option
+   * @return result of check
+   */
+  public final synchronized boolean contains(final Option<?> option) {
+    return get(option) != null;
+  }
+
+  /**
+   * Checks if the value of the specified option differs from its default value.
+   * @param option option
+   * @return result of check
+   */
+  public final synchronized boolean modified(final Option<?> option) {
+    final Object value = get(option);
+    return value != null && !value.equals(option.value());
+  }
+
+  /**
+   * Returns the requested string.
+   * @param option option to be found
+   * @return value or {@code null}
+   */
+  public final synchronized String get(final StringOption option) {
+    return (String) get((Option<?>) option);
+  }
+
+  /**
+   * Returns the requested number.
+   * @param option option to be found
+   * @return value or {@code null}
+   */
+  public final synchronized Integer get(final NumberOption option) {
+    return (Integer) get((Option<?>) option);
+  }
+
+  /**
+   * Returns the requested boolean.
+   * @param option option to be found
+   * @return value or {@code null}
+   */
+  public final synchronized Boolean get(final BooleanOption option) {
+    return (Boolean) get((Option<?>) option);
+  }
+
+  /**
+   * Returns the requested value.
+   * @param option option to be found
+   * @return value or {@code null}
+   */
+  public final synchronized Value get(final ValueOption option) {
+    return (Value) get((Option<?>) option);
+  }
+
+  /**
+   * Returns the requested string array.
+   * @param option option to be found
+   * @return value or {@code null}
+   */
+  public final synchronized String[] get(final StringsOption option) {
+    return (String[]) get((Option<?>) option);
+  }
+
+  /**
+   * Returns the requested integer array.
+   * @param option option to be found
+   * @return value or {@code null}
+   */
+  public final synchronized int[] get(final NumbersOption option) {
+    return (int[]) get((Option<?>) option);
+  }
+
+  /**
+   * Returns the requested options.
+   * @param option option to be found
+   * @param <O> options
+   * @return value or {@code null}
+   */
+  @SuppressWarnings("unchecked")
+  public final synchronized <O extends Options> O get(final OptionsOption<O> option) {
+    return (O) get((Option<?>) option);
+  }
+
+  /**
+   * Returns the requested enum value.
+   * @param option option to be found
+   * @param <E> enumeration value
+   * @return value or {@code null}
+   */
+  @SuppressWarnings("unchecked")
+  public final synchronized <E extends Enum<E>> E get(final EnumOption<E> option) {
+    return (E) get((Option<?>) option);
+  }
+
+  /**
+   * Sets the string value of an option.
+   * @param option option to be set
+   * @param value value to be written
+   */
+  public final synchronized void set(final StringOption option, final String value) {
+    put(option, value);
+  }
+
+  /**
+   * Sets the integer value of an option.
+   * @param option option to be set
+   * @param value value to be written
+   */
+  public final synchronized void set(final NumberOption option, final int value) {
+    put(option, value);
+  }
+
+  /**
+   * Sets the boolean value of an option.
+   * @param option option to be set
+   * @param value value to be written
+   */
+  public final synchronized void set(final BooleanOption option, final boolean value) {
+    put(option, value);
+  }
+
+  /**
+   * Sets the string array value of an option.
+   * @param option option to be set
+   * @param value value to be written
+   */
+  public final synchronized void set(final StringsOption option, final String[] value) {
+    put(option, value);
+  }
+
+  /**
+   * Sets the integer array value of an option.
+   * @param option option to be set
+   * @param value value to be written
+   */
+  public final synchronized void set(final NumbersOption option, final int[] value) {
+    put(option, value);
+  }
+
+  /**
+   * Sets the options of an option.
+   * @param option option to be set
+   * @param value value to be set
+   * @param <O> options
+   */
+  public final synchronized <O extends Options> void set(final OptionsOption<O> option,
+      final O value) {
+    put(option, value);
+  }
+
+  /**
+   * Sets the enumeration of an option.
+   * @param option option to be set
+   * @param value value to be set
+   * @param <V> enumeration value
+   */
+  public final synchronized <V extends Enum<V>> void set(final EnumOption<V> option,
+      final Enum<V> value) {
+    put(option, value);
+  }
+
+  /**
+   * Sets the enumeration of an option.
+   * @param option option to be set
+   * @param value string value, which will be converted to an enum value or {@code null}
+   * @param <V> enumeration value
+   */
+  public final synchronized <V extends Enum<V>> void set(final EnumOption<V> option,
+      final String value) {
+    put(option, option.get(value));
+  }
+
+  /**
+   * Sets the value of an option.
+   * @param option option to be set
+   * @param value value to be set
+   */
+  public final synchronized void set(final ValueOption option, final Value value) {
+    put(option, value);
+  }
+
+  /**
+   * Assigns a value after casting it to the correct type. If the option is unknown,
+   * it will be added as free option.
+   * @param name name of option
+   * @param value value
+   * @throws BaseXException database exception
+   */
+  public synchronized void assign(final String name, final String value) throws BaseXException {
+    if(meta.definitions.isEmpty()) {
+      putFree(name, value);
+    } else {
+      assign(name, value, -1, true);
+    }
+  }
+
+  /**
+   * Assigns a value after casting it to the correct type. If the option is unknown,
+   * it will be added as free option.
+   * @param name name of option
+   * @param value value to be assigned
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @throws QueryException query exception
+   */
+  public synchronized void assign(final Item name, final Value value, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+
+    final String nm = name(name, info);
+    if(meta.definitions.isEmpty()) {
+      putFree(nm, serialize(value, info));
+    } else {
+      assign(nm, value, qc, info);
+    }
+  }
+
+  /**
+   * Returns the name of an option.
+   * @param name name (QName or string)
+   * @param info input info (can be {@code null})
+   * @return name
+   * @throws QueryException query exception
+   */
+  public static String name(final Item name, final InputInfo info) throws QueryException {
+    if(name instanceof final QNm qnm) {
+      // implementation-defined options must have a non-absent namespace
+      if(qnm.uri().length == 0) throw INVALIDOPTION_X.get(info,
+          Util.info("Option name has no namespace: '%'.", qnm.local()));
+      return string(qnm.unique());
+    }
+    if(name.type.isStringOrUntyped()) return string(name.string(info));
+    throw INVALIDOPTION_X_X_X.get(info, BasicType.STRING, name.type, name);
+  }
+
+  /**
+   * Creates a string representation of the specified value.
+   * @param value value
+   * @param info input info (can be {@code null})
+   * @return string
+   * @throws QueryException query exception
+   */
+  public static String serialize(final Value value, final InputInfo info) throws QueryException {
+    final TokenBuilder tb = new TokenBuilder();
+    for(final Item item : value) {
+      if(!tb.isEmpty()) tb.add(' ');
+      if(item instanceof final XQMap map) {
+        map.forEach((key, v) -> {
+          if(!tb.isEmpty()) tb.add(',');
+          tb.add(escape(string(key.string(info)))).add('=');
+          if(v.size() != 1) throw INVALIDOPTION_X_X_X.get(info, BasicType.STRING, v.seqType(), v);
+          tb.add(string(((Item) v).string(info)).replace(",", ",,"));
+        });
+      } else if(item instanceof final XQArray array) {
+        // workaround for array options
+        for(final Value member : array.members()) {
+          if(!tb.isEmpty()) tb.add(' ');
+          tb.add(serialize(member, info));
+        }
+      } else if(item instanceof final QNm qnm) {
+        tb.add(qnm.unique());
+      } else {
+        tb.add(item.string(info));
+      }
+    }
+    return tb.toString();
+  }
+
+  /**
+   * Escapes the delimiters of a key in a flattened map ({@code %} itself, {@code ,} and {@code =})
+   * and characters that may be stripped by whitespace normalization.
+   * Names of options and variables are not affected by this conversion.
+   * @param key key
+   * @return escaped key
+   * @see #unescape(String)
+   */
+  public static String escape(final String key) {
+    final StringBuilder sb = new StringBuilder(key.length());
+    final int kl = key.length();
+    for(int k = 0; k < kl; k++) {
+      final char ch = key.charAt(k);
+      if(ch == '%' || ch == ',' || ch == '=' || ch <= ' ') {
+        sb.append('%').append((char) HEX_TABLE[ch >> 4]).append((char) HEX_TABLE[ch & 0xF]);
+      } else {
+        sb.append(ch);
+      }
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Resolves percent-encoded characters in a key. A percent sign that is not followed by two
+   * hexadecimal digits is adopted as is.
+   * @param key key
+   * @return unescaped key
+   * @see #escape(String)
+   */
+  public static String unescape(final String key) {
+    final StringBuilder sb = new StringBuilder(key.length());
+    final int kl = key.length();
+    for(int k = 0; k < kl; k++) {
+      final char ch = key.charAt(k);
+      final int cp = ch == '%' && k + 2 < kl ? dec(key.charAt(k + 1), key.charAt(k + 2)) : -1;
+      if(cp != -1) {
+        sb.append((char) cp);
+        k += 2;
+      } else {
+        sb.append(ch);
+      }
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Returns all name/value pairs without pre-defined option.
+   * @return options
+   */
+  public final synchronized HashMap<String, String> free() {
+    return free;
+  }
+
+  /**
+   * Returns a map representation of the entries of the requested string (separated by commas).
+   * @param option option to be found
+   * @return map
+   */
+  public final Map<String, String> toMap(final StringOption option) {
+    return toMap(get(option));
+  }
+
+  /**
+   * Returns an error string for an unknown option.
+   * @param option option
+   * @return error string
+   */
+  public final synchronized String similar(final Object option) {
+    return similar(option, meta.definitions);
+  }
+
+  /**
+   * Returns an error string for an unknown option, excluding the supplied options.
+   * @param option option
+   * @param map options map
+   * @param info input info (can be {@code null})
+   * @return error string
+   * @throws QueryException query exception
+   */
+  private synchronized String similar(final Object option, final XQMap map, final InputInfo info)
+      throws QueryException {
+    final TreeMap<String, Option<?>> defs = new TreeMap<>(meta.definitions);
+    for(final Item key : map.keys()) defs.remove(name(key, info));
+    return similar(option, defs);
+  }
+
+  /**
+   * Returns an error string for an unknown option, followed by a similar or all allowed options.
+   * @param option option
+   * @param options options
+   * @return error string
+   */
+  public static String similar(final Object option, final Map<String, Option<?>> options) {
+    final String[] names = options.keySet().stream().sorted().toArray(String[]::new);
+    final String similar = Levenshtein.similar(token(option), names);
+    if(similar != null) return Util.info(Text.UNKNOWN_OPT_SIMILAR_X_X, option, similar);
+    return names.length == 0 ? unknown(option) :
+      Util.info(Text.UNKNOWN_OPT_ONEOF_X_X, option, list((Object[]) names));
+  }
+
+  /**
+   * Returns an error string for an unknown option.
+   * @param option option
+   * @return error string
+   */
+  public static String unknown(final Object option) {
+    return Util.info(Text.UNKNOWN_OPTION_X, option);
+  }
+
+  /**
+   * Inverts the boolean value of an option.
+   * @param option option
+   * @return new value
+   */
+  public final synchronized boolean invert(final BooleanOption option) {
+    final boolean val = !get(option);
+    set(option, val);
+    return val;
+  }
+
+  /**
+   * Overwrites the options with global options and system properties.
+   * All properties starting with {@code org.basex.} will be assigned as options.
+   */
+  public void setSystem() {
+    // assign global options
+    for(final Entry<String, String> entry : entries()) {
+      String name = entry.getKey();
+      final String value = entry.getValue();
+      if(name.startsWith(DBPREFIX)) {
+        name = name.substring(DBPREFIX.length()).toUpperCase(Locale.ENGLISH);
+        try {
+          if(assign(name, value, -1, false)) Util.debugln(name + Text.COLS + value);
+        } catch(final BaseXException ex) {
+          Util.errln(ex);
+        }
+      }
+    }
+  }
+
+  /**
+   * Parses the specified options.
+   * @param type media type
+   * @throws BaseXException database exception
+   */
+  public final synchronized void assign(final MediaType type) throws BaseXException {
+    for(final Entry<String, String> entry : type.parameters()) {
+      if(meta.definitions.isEmpty()) {
+        putFree(entry.getKey(), entry.getValue());
+      } else {
+        assign(entry.getKey(), entry.getValue(), -1, false);
+      }
+    }
+  }
+
+  /**
+   * Parses and assigns options string from the specified string.
+   * @param string options string
+   * @throws BaseXException database exception
+   */
+  public final synchronized void assign(final String string) throws BaseXException {
+    for(final Map.Entry<String, String> entry : toMap(string).entrySet()) {
+      assign(entry.getKey(), entry.getValue());
+    }
+  }
+
+  /**
+   * Parses and assigns options from the specified map.
+   * @param map options map
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @throws QueryException query exception
+   */
+  public final synchronized void assign(final XQMap map, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+    // reject unknown options
+    if(!meta.definitions.isEmpty() && map.structSize() != 0) {
+      for(final Item key : map.keys()) {
+        final String nm = name(key, info);
+        if(!meta.definitions.containsKey(nm) && !nm.startsWith("Q{"))
+          throw INVALIDOPTION_X.get(info, similar(nm, map, info));
+      }
+    }
+    map.forEach((key, value) -> assign(key, value, qc, info));
+  }
+
+  /**
+   * Returns the names of all options.
+   * @return names
+   */
+  public final synchronized String[] names() {
+    final StringList sl = new StringList(meta.definitions.size());
+    for(final Option<?> option : this) sl.add(option.name());
+    return sl.finish();
+  }
+
+  @Override
+  public final synchronized Iterator<Option<?>> iterator() {
+    return meta.definitions.values().iterator();
+  }
+
+  @Override
+  public final synchronized String toString() {
+    // only those options are listed whose value differs from default value
+    final StringBuilder sb = new StringBuilder();
+    for(final Option<?> option : meta.definitions.values()) {
+      final Object value = get(option);
+      if(value != null) {
+        final StringList list = new StringList();
+        final Object value2 = option.value();
+        if(value instanceof final String[] strings) {
+          for(final String s : strings) list.add(s);
+        } else if(value instanceof final int[] ints) {
+          for(final int i : ints) list.add(Integer.toString(i));
+        } else if(value instanceof Options) {
+          final String s = value.toString();
+          if(value2 == null || !s.equals(value2.toString())) list.add(s);
+        } else if(!value.equals(value2)) {
+          if(value instanceof final Value val) {
+            for(final Item item : val) list.add(lexical(item));
+          } else {
+            list.add(value.toString());
+          }
+        }
+        for(final String s : list) {
+          if(!sb.isEmpty()) sb.append(',');
+          sb.append(option.name()).append('=').append(s.replace(",", ",,"));
+        }
+      }
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Returns the lexical representation of an option value. Options are stored in their lexical
+   * form; values without such a form (maps, arrays, functions) can only occur in option sets
+   * that are never assigned as strings.
+   * @param item item
+   * @return string
+   */
+  private static String lexical(final Item item) {
+    try {
+      return string(item.string(null));
+    } catch(final QueryException ex) {
+      throw Util.notExpected(ex);
+    }
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Assigns a value to an option.
+   * @param option option
+   * @param value value to be assigned
+   * @param index index of an array value (optional, can be {@code -1})
+   * @param assign function to assign the value
+   * @param options current options (can be {@code null})
+   * @return error string or {@code null}
+   */
+  public static String assign(final Option<?> option, final String value, final int index,
+      final Consumer<Object> assign, final Options options) {
+
+    final String name = option.name();
+    if(option instanceof final BooleanOption bo) {
+      Boolean v;
+      if(value.isEmpty() && options != null) {
+        // no value given: invert current value
+        v = options.get(bo);
+        if(v != null) v = !v;
+      } else {
+        v = Strings.toBoolean(value);
+      }
+      if(v == null) return Util.info(Text.OPT_BOOLEAN_X_X, name, value);
+      assign.accept(v);
+    } else if(option instanceof NumberOption) {
+      final int v = Strings.toInt(value);
+      if(v == Integer.MIN_VALUE) return Util.info(Text.OPT_NUMBER_X_X, name, value);
+      assign.accept(v);
+    } else if(option instanceof StringOption) {
+      assign.accept(value);
+    } else if(option instanceof ValueOption) {
+      final Boolean b = Strings.toBoolean(value);
+      assign.accept(b != null ? Bln.get(b) : Str.get(value));
+    } else if(option instanceof final EnumOption eo) {
+      final Object v = eo.get(normalizeEnum(value));
+      if(v == null) return allowed(eo, value, (Object[]) eo.values());
+      assign.accept(v);
+    } else if(option instanceof final OptionsOption oo) {
+      final Options o = oo.newInstance();
+      try {
+        o.assign(value);
+      } catch(final BaseXException ex) {
+        Util.debug(ex);
+        return Util.message(ex);
+      }
+      assign.accept(o);
+    } else if(option instanceof NumbersOption && options != null) {
+      final int v = Strings.toInt(value);
+      if(v == Integer.MIN_VALUE) return Util.info(Text.OPT_NUMBER_X_X, name, value);
+      int[] ii = (int[]) options.get(option);
+      if(index == -1) {
+        if(ii == null) ii = new int[0];
+        final IntList il = new IntList(ii.length + 1);
+        for(final int i : ii) il.add(i);
+        assign.accept(il.add(v).finish());
+      } else {
+        if(index < 0 || index >= ii.length) return Util.info(Text.OPT_OFFSET_X, name);
+        // the current value may be the default value, which is shared by all instances
+        final int[] copy = ii.clone();
+        copy[index] = v;
+        assign.accept(copy);
+      }
+    } else if(option instanceof StringsOption && options != null) {
+      String[] ss = (String[]) options.get(option);
+      if(index == -1) {
+        if(ss == null) ss = new String[0];
+        final StringList sl = new StringList(ss.length + 1);
+        for(final String s : ss) sl.add(s);
+        assign.accept(sl.add(value).finish());
+      } else if(index == 0) {
+        final int i = Strings.toInt(value);
+        if(i < 0) return Util.info(Text.OPT_NUMBER_X_X, name, value);
+        options.put(option, new String[i]);
+      } else {
+        if(index <= 0 || index > ss.length) return Util.info(Text.OPT_OFFSET_X, name);
+        final String[] copy = ss.clone();
+        copy[index - 1] = value;
+        assign.accept(copy);
+      }
+    } else {
+      throw Util.notExpected("Unsupported option (%): %", Util.className(option), option);
+    }
+    return null;
+  }
+
+  /**
+   * Returns a message with allowed keys.
+   * @param option option
+   * @param value supplied value
+   * @param all allowed values
+   * @return exception
+   */
+  public static String allowed(final Option<?> option, final String value, final Object... all) {
+    return Util.info(Text.OPT_ONEOF_X_X_X, option.name(), value, list(all));
+  }
+
+  // PRIVATE METHODS ==============================================================================
+
+  /**
+   * Returns a comma-separated list of the specified values.
+   * @param values values
+   * @return list
+   */
+  private static String list(final Object... values) {
+    final TokenBuilder tb = new TokenBuilder();
+    for(final Object value : values) {
+      if(!tb.isEmpty()) tb.add(", ");
+      tb.add(value);
+    }
+    return tb.toString();
+  }
+
+  /**
+   * Reads the configuration file and initializes the options.
+   * The file is located in the project home directory.
+   * @param io options file
+   */
+  private synchronized void read(final IOFile io) {
+    file = io;
+    final StringList read = new StringList(), errs = new StringList();
+    final boolean exists = file.exists();
+    if(exists) {
+      try(NewlineInput ni = new NewlineInput(io)) {
+        boolean local = false;
+        for(String line; (line = ni.readLine()) != null;) {
+          line = line.trim();
+
+          // start of local options
+          if(line.equals(PROPUSER)) {
+            local = true;
+            continue;
+          }
+          if(local) user.add(line);
+
+          if(line.isEmpty() || line.charAt(0) == '#') continue;
+          final int d = line.indexOf('=');
+          if(d < 0) {
+            errs.add("line \"" + line + "\" ignored.");
+            continue;
+          }
+
+          final String val = line.substring(d + 1).trim();
+          String name = line.substring(0, d).trim();
+
+          // extract numeric value in key
+          int num = 0;
+          final int ss = name.length();
+          for(int s = 0; s < ss; s++) {
+            if(Character.isDigit(name.charAt(s))) {
+              num = Strings.toInt(name.substring(s));
+              name = name.substring(0, s);
+              break;
+            }
+          }
+
+          if(local) {
+            // cache local options as global options
+            Prop.put(DBPREFIX + name.toLowerCase(Locale.ENGLISH), val);
+          } else {
+            try {
+              assign(name, val, num, true);
+              read.add(name);
+            } catch(final BaseXException ex) {
+              errs.add(ex.getMessage());
+            }
+          }
+        }
+      } catch(final IOException ex) {
+        errs.add("file could not be parsed.");
+        Util.errln(ex);
+      }
+    }
+
+    // check if all mandatory files have been read
+    boolean ok = true;
+    if(errs.isEmpty()) {
+      for(final Option<?> opt : meta.all) {
+        if(ok && !(opt instanceof Comment)) ok = read.contains(opt.name());
+      }
+    }
+
+    if(!ok || !exists || !errs.isEmpty()) {
+      write();
+      errs.add("writing new configuration file.");
+      for(final String s : errs) Util.errln(file + ": " + s);
+    }
+  }
+
+  /**
+   * Assigns the specified name and value.
+   * @param name name of option
+   * @param value value to be assigned
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @throws QueryException query exception
+   */
+  private synchronized void assign(final String name, final Value value, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+
+    final Option<?> option = meta.definitions.get(name);
+    if(option == null) {
+      if(getClass() == Options.class || name.startsWith("Q{")) return;
+      throw INVALIDOPTION_X.get(info, similar(name));
+    }
+
+    final SeqType st = value.seqType();
+    final QueryFunction<Object, QueryException> expected = type ->
+      INVALIDOPTION_X_X_X_X.get(info, name, type, st, value);
+
+    // apply coercion rules if a required type is defined (other values are parsed lexically)
+    Value val = value;
+    final SeqType required = option.seqType();
+    if(required != null) {
+      try {
+        // without query context, values must already have the required type
+        if(qc != null) val = required.coerce(value, qc, info);
+        else if(!required.instance(value)) throw expected.apply(required);
+      } catch(final QueryException ex) {
+        throw ex.error() == INVTYPE_X ? expected.apply(required) : ex;
+      }
+      // empty sequence: reset option to its default value
+      if(val.isEmpty()) {
+        put(option, option.copy());
+        return;
+      }
+    }
+    final Item item = val.size() == 1 ? (Item) val : null;
+
+    Object result = null;
+    if(option instanceof ValueOption) {
+      result = val;
+    } else if(option instanceof BooleanOption) {
+      // coercion has already yielded a single boolean
+      result = item.bool(info);
+    } else if(option instanceof NumberOption) {
+      result = (int) item.itr(info);
+    } else if(option instanceof StringOption) {
+      result = serialize(val, info);
+    } else if(option instanceof StringsOption) {
+      final StringList list = new StringList();
+      for(final Item it :  val) list.add(serialize(it, info));
+      result = list.finish();
+    } else if(option instanceof NumbersOption) {
+      final IntList list = new IntList();
+      for(final Item it :  val) list.add(Strings.toInt(string(it.string(info))));
+      result = list.finish();
+    } else if(option instanceof final EnumOption eo) {
+      final String string = normalizeEnum(serialize(val, info));
+      result = eo.get(string);
+      if(result == null) {
+        throw INVALIDOPTIONVALUE_X.get(info, allowed(eo, string, (Object[]) eo.values()));
+      }
+    } else if(option instanceof final OptionsOption oo) {
+      if(!(item instanceof final XQMap map)) throw expected.apply(Types.MAP);
+      result = oo.newInstance();
+      ((Options) result).assign(map, qc, info);
+    }
+    put(option, result);
+  }
+
+  /**
+   * Normalizes an enumeration value.
+   * Contains various tweaks for peculiarities of output declarations.
+   * @param value value
+   * @return normalized value
+   */
+  private static String normalizeEnum(final String value) {
+    String v = value.trim();
+    // Boolean properties
+    final Boolean b = Strings.toBoolean(v);
+    if(b == Boolean.TRUE) return Text.YES;
+    if(b == Boolean.FALSE) return Text.NO;
+    if(v.isEmpty()) return YesNoOmit.OMIT.toString();
+    // QName properties
+    if(v.startsWith("Q{")) {
+      final byte[][] parsed = QNm.parseExpanded(token(v), false);
+      if(parsed != null && parsed[1].length == 0) v = string(parsed[0]);
+    }
+    return v;
+  }
+
+  /**
+   * Assigns the specified name and value.
+   * @param name name of option
+   * @param value value to be assigned
+   * @param index index of an array value (optional, can be {@code -1})
+   * @param error raise error if the option is unknown
+   * @return success flag
+   * @throws BaseXException database exception
+   */
+  private synchronized boolean assign(final String name, final String value, final int index,
+      final boolean error) throws BaseXException {
+
+    final Option<?> option = meta.definitions.get(name);
+    if(option == null) {
+      if(error) throw new BaseXException(similar(name));
+      return false;
+    }
+    final String err = assign(option, value, index, v -> put(option, v), this);
+    if(error && err != null) throw new BaseXException(err);
+
+    return true;
+  }
+
+  /**
+   * Returns a map representation of the comma-separated options string.
+   * @param string options string
+   * @return map
+   */
+  private static Map<String, String> toMap(final String string) {
+    return toMap(string, new HashMap<>(), String::trim);
+  }
+
+  /**
+   * Parses a comma-separated string of key/value pairs. Keys and values are separated by an
+   * equals sign; literal commas in values are duplicated.
+   * @param string string representation
+   * @param map target map (defines the iteration order of the entries)
+   * @param name key conversion
+   * @return supplied map
+   */
+  public static Map<String, String> toMap(final String string, final Map<String, String> map,
+      final UnaryOperator<String> name) {
+
+    final StringBuilder key = new StringBuilder(), value = new StringBuilder();
+    final Runnable add = () -> map.put(name.apply(key.toString()), value.toString());
+
+    boolean left = true;
+    final int sl = string.length();
+    for(int s = 0; s < sl; s++) {
+      final char ch = string.charAt(s);
+      if(left) {
+        if(ch == '=') {
+          left = false;
+        } else {
+          key.append(ch);
+        }
+      } else {
+        if(ch == ',') {
+          if(s + 1 == sl || string.charAt(s + 1) != ',') {
+            add.run();
+            key.setLength(0);
+            value.setLength(0);
+            left = true;
+            continue;
+          }
+          // literal commas are escaped by a second comma
+          s++;
+        }
+        value.append(ch);
+      }
+    }
+    if(!left) add.run();
+    return map;
+  }
+}

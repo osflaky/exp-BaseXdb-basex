@@ -1,0 +1,60 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.value.type.BasicType.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Date/time functions.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+abstract class DateTimeFn extends StandardFunc {
+  /**
+   * Returns the timezone.
+   * @param it input item
+   * @return timezone or {@link Empty#VALUE}
+   */
+  protected static Item zon(final ADate it) {
+    return it.hasTz() ? new DTDur(0, it.tz()) : Empty.VALUE;
+  }
+
+  /**
+   * Adjusts a date/time item to the specified time zone.
+   * @param type target type
+   * @param qc query context
+   * @return adjusted item
+   * @throws QueryException query exception
+   */
+  final Item adjust(final BasicType type, final QueryContext qc) throws QueryException {
+    final Item value = arg(0).atomItem(qc, info);
+    final Item zone = arg(1).atomItem(qc, info);
+    if(value.isEmpty()) return Empty.VALUE;
+
+    final ADate date = toDate(value, type, qc);
+    final boolean empty = zone.isEmpty(), undefined = defined(1) && empty;
+    // without a zone argument, the implicit timezone of the query is assigned
+    final DTDur dur = !empty ? (DTDur) checkType(zone, DAY_TIME_DURATION) :
+      undefined ? null : new DTDur(0, qc.dateTime().zone);
+    return date.timeZone(dur, undefined, info);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) {
+    return optFirst(!mayBeEmpty(), true, null);
+  }
+
+  /**
+   * Indicates if an empty sequence can be returned for a non-empty argument.
+   * @return result of check
+   */
+  protected boolean mayBeEmpty() {
+    return false;
+  }
+}

@@ -1,0 +1,67 @@
+package org.basex.core.jobs;
+
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+
+/**
+ * Result of a query job.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class QueryJobResult {
+  /** Job. */
+  public final Job job;
+  /** Query result (can be {@code null}). */
+  public Value value;
+  /** Exception (can be {@code null}). */
+  public QueryException exception;
+  /** Query information (can be {@code null}). */
+  public XQMap info;
+  /** Evaluation time (ns). */
+  public long time;
+
+  /**
+   * Initializes the job result.
+   */
+  public void init() {
+    value = null;
+    exception = null;
+    info = null;
+    time = 0;
+  }
+
+  /**
+   * Job.
+   * @param job job
+   */
+  public QueryJobResult(final Job job) {
+    this.job = job;
+  }
+
+  /**
+   * Checks if the query result has been cached.
+   * @return result of check
+   */
+  public boolean cached() {
+    return job.state == JobState.CACHED;
+  }
+
+  /**
+   * Returns the outcome of a query (result or exception).
+   * @return value
+   * @throws QueryException query exception
+   */
+  public Value get() throws QueryException {
+    if(exception != null) throw exception;
+    return value != null ? value : Empty.VALUE;
+  }
+
+  @Override
+  public String toString() {
+    return Util.className(this) + '[' + (exception != null ? exception : value) + ']';
+  }
+}

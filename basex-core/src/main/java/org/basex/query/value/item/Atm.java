@@ -1,0 +1,108 @@
+package org.basex.query.value.item;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.util.*;
+import org.basex.query.util.collation.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Untyped atomic item ({@code xs:untypedAtomic}).
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Atm extends Item {
+  /** Zero-length atomic item. */
+  public static final Atm EMPTY = new Atm(Token.EMPTY);
+
+  /** String data. */
+  private final byte[] value;
+
+  /**
+   * Constructor.
+   * @param value value
+   */
+  private Atm(final byte[] value) {
+    super(BasicType.UNTYPED_ATOMIC);
+    this.value = value;
+  }
+
+  /**
+   * Returns an instance of this class.
+   * @param value value
+   * @return instance
+   */
+  public static Atm get(final String value) {
+    return get(Token.token(value));
+  }
+
+  /**
+   * Returns an instance of this class.
+   * @param value value
+   * @return instance
+   */
+  public static Atm get(final byte[] value) {
+    return value.length == 0 ? EMPTY : new Atm(value);
+  }
+
+  @Override
+  public byte[] string(final InputInfo ii) {
+    return value;
+  }
+
+  @Override
+  public int hashCode() {
+    return Token.hashCode(value);
+  }
+
+  @Override
+  public boolean bool(final InputInfo ii) {
+    return value.length != 0;
+  }
+
+  @Override
+  public boolean comparable(final Item item) {
+    return item.type.isStringOrUntyped();
+  }
+
+  @Override
+  public boolean deepEqual(final Item item, final DeepEqual deep) throws QueryException {
+    return comparable(item) && Token.eq(string(deep.info), item.string(deep.info), deep);
+  }
+
+  @Override
+  public int compare(final Item item, final Collation coll, final boolean transitive,
+      final QueryContext qc, final InputInfo ii) throws QueryException {
+    return item.type.isStringOrUntyped() ?
+      Token.compare(value, item.string(ii), Collation.get(coll, ii)) :
+      -item.compare(this, coll, transitive, qc, ii);
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    Expr expr = this;
+    if(mode.oneOf(Simplify.EBV, Simplify.PREDICATE)) {
+      // E[xs:untypedAtomic('x')] → E[true()]
+      expr = Bln.get(this != EMPTY);
+    }
+    return cc.simplify(this, expr, mode);
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final Atm atm && Token.eq(value, atm.value);
+  }
+
+  @Override
+  public String toJava() {
+    return Token.string(value);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.quoted(value);
+  }
+}

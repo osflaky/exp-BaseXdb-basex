@@ -1,0 +1,55 @@
+package org.basex.query.func.prof;
+
+import static org.basex.query.func.Function.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ProfVariables extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Value bindings = arg(0).unwrappedValue(qc);
+    final String label = toStringOrNull(arg(1), qc);
+
+    final StringBuilder sb = new StringBuilder();
+    for(final Item binding : bindings) {
+      toMap(binding).forEach((key, value) -> {
+        if(value != Empty.UNDEFINED) {
+          sb.append(Prop.NL).append("  ").append(key.toJava()).append(" := ").append(value);
+        }
+      });
+    }
+    qc.trace(label == null || label.isEmpty() ? "Assignments:" : label, sb::toString);
+    return Empty.VALUE;
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    if(defined(0)) return this;
+
+    // prof:variables() → prof:variables([map:entry('$x', $x), ...])
+    // create single-entry maps with context value and variables
+    final ExprList list = new ExprList();
+    if(cc.qc.focus.value != null) {
+      list.add(cc.function(_MAP_ENTRY, info, Str.get("."), new ContextValue(info)));
+    }
+    for(final Var var : cc.vs().vars) {
+      final Str key = Str.get(Strings.concat('$', var.name.prefixId()));
+      list.add(cc.function(_MAP_ENTRY, info, key, new VarRef(info, var)));
+    }
+    return cc.function(_PROF_VARIABLES, info, List.get(cc, info, list.reverse().finish()), arg(1));
+  }
+}

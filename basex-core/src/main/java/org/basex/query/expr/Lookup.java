@@ -1,0 +1,195 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.gflwor.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Lookup expression.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Lookup extends Arr {
+  /** Wildcard string. */
+  public static final Str WILDCARD = Str.get('*');
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param expr context expression and key specifier
+   */
+  public Lookup(final InputInfo info, final Expr... expr) {
+    super(info, Types.ITEM_ZM, expr);
+  }
+
+  @Override
+  public boolean navigational() {
+    final Expr input = exprs[0];
+    return (input instanceof Path || input instanceof Lookup) && input.navigational();
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) throws QueryException {
+    exprs[1] = exprs[1].simplifyFor(Simplify.DATA, cc);
+
+    final Expr inputs = exprs[0], keys = exprs[1];
+    final long is = inputs.size();
+    if(is == 0) return cc.replaceWith(this, inputs);
+
+    // skip optimizations if input may yield items other than maps or arrays
+    final Type tp = inputs.seqType().type;
+    final boolean map = tp instanceof MapType, array = tp instanceof ArrayType;
+    if(!(map || array)) return this;
+
+    // pre-evaluate a single-key lookup
+    if(is == 1 && inputs instanceof Value && keys instanceof Item) return cc.preEval(this);
+
+    final Expr expr = opt(cc);
+    if(expr != this) return cc.replaceWith(this, expr);
+
+    // derive type from input expression
+    final SeqType kt = keys.seqType();
+    final SeqType st = map ? ((MapType) tp).valueType() : ((ArrayType) tp).valueType();
+    Occ occ = st.occ;
+    if(inputs.size() != 1 || keys == WILDCARD || !kt.one() || kt.mayBeWrapped()) {
+      // key is wildcard, or expressions yield no single item
+      occ = occ.union(Occ.ZERO_OR_MORE);
+    } else if(map) {
+      // map lookup may result in empty sequence
+      occ = occ.union(Occ.ZERO);
+    }
+    exprType.assign(st.type, occ);
+    return this;
+  }
+
+  /**
+   * Rewrites the lookup to another expression.
+   * @param cc compilation context
+   * @return optimized or original expression
+   * @throws QueryException query exception
+   */
+  private Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = exprs[0], keys = exprs[1];
+    final long is = input.size();
+    final long ks = keys.seqType().mayBeWrapped() || keys.has(Flag.NDT) ? -1 : keys.size();
+    if(ks == 0) return keys;
+
+    final Type it = input.seqType().type;
+    final boolean map = it instanceof MapType, array = it instanceof ArrayType;
+    if(map || array) {
+      // keep the lookup if a runtime value could be a strict record that lacks a requested key
+      if(keys != WILDCARD && it instanceof final MapType mt && (mt instanceof final ShapeType sh
+          ? sh.strict() && !(ks == 1 && keys instanceof final AStr str &&
+              sh.fields().contains(str.string(info)))
+          : mt.keyType().intersect(BasicType.STRING) != null)) return this;
+
+      /* REWRITE LOOKUP:
+       *  MAP?*     → map:items(MAP)
+       *  ARRAY?*   → array:items(MAP)
+       *  MAP?KEY   → map:get(INPUT, KEY)
+       *  ARRAY?KEY → array:get(INPUT, KEY) */
+      final QueryBiFunction<Expr, Expr, Expr> rewrite = (in, arg) -> keys == WILDCARD ?
+        cc.function(map ? Function._MAP_ITEMS : Function._ARRAY_ITEMS, info, in) :
+        cc.function(map ? Function._MAP_GET : Function._ARRAY_GET, info, in, arg);
+
+      // single key
+      if(ks == 1) {
+        // single input:  INPUT?KEY → REWRITE(INPUT, KEY)
+        if(is == 1) return rewrite.apply(input, keys);
+        // multiple inputs:  INPUTS?KEY → INPUTS ! REWRITE(., KEY)
+        return SimpleMap.get(cc, info, input,
+            cc.get(input, true, () -> rewrite.apply(ContextValue.get(cc, info), keys)));
+      }
+
+      // multiple deterministic keys, input can be duplicated and is focus-independent
+      if(ks != -1 && input.duplicable() && !input.has(Flag.CTX)) {
+        // single input:  INPUT?KEYS → KEYS ! REWRITE(INPUT, .)
+        if(is == 1) return SimpleMap.get(cc, info, keys,
+            cc.get(keys, true, () -> rewrite.apply(input, ContextValue.get(cc, info))));
+        // multiple inputs:  INPUT?KEYS → for $item in INPUT return KEYS ! REWRITE($item, .)
+        final FLWORBuilder flwor = new FLWORBuilder(1, cc, info);
+        final Expr next = cc.get(keys, true, () ->
+          rewrite.apply(flwor.ref(flwor.item), ContextValue.get(cc, info)));
+        final Expr rtrn = SimpleMap.get(cc, info, keys, next);
+        return flwor.finish(input, null, rtrn);
+      }
+    }
+    return this;
+  }
+
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    return new Iter() {
+      final Iter lhs = exprs[0].iter(qc);
+      Iter rhs;
+
+      @Override
+      public Item next() throws QueryException {
+        while(true) {
+          if(rhs != null) {
+            final Item item = qc.next(rhs);
+            if(item != null) return item;
+          }
+          final Item item = qc.next(lhs);
+          if(item == null) return null;
+          rhs = lookup(item);
+        }
+      }
+
+      private Iter lookup(final Item item) throws QueryException {
+        final ValueBuilder vb = new ValueBuilder(qc);
+        final Iter keyIter = exprs[1].atomIter(qc, info);
+        for(Item key; (key = keyIter.next()) != null;) {
+          final Value items = item instanceof final JNode jnode ? jnode.value.item(qc, info) : item;
+          for(final Item it : items) {
+            if(!(it instanceof final XQStruct struct)) throw LOOKUP_X.get(info, it);
+            vb.add(key == WILDCARD ? struct.items(qc) : struct.invoke(qc, info, key));
+          }
+        }
+        return vb.value().iter();
+      }
+    };
+  }
+
+  @Override
+  public Lookup copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new Lookup(info, copyAll(cc, vm, exprs)));
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof Lookup && super.equals(obj);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.token(exprs[0]).token('?');
+
+    final Expr keys = exprs[1];
+    Object key = null;
+    if(keys == WILDCARD) {
+      key = WILDCARD.string();
+    } else if(keys instanceof final Str str) {
+      if(XMLToken.isNCName(str.string())) key = str.toJava();
+    } else if(keys instanceof final Itr itr) {
+      final long l = itr.itr();
+      if(l >= 0) key = l;
+    }
+    if(key != null) qs.token(key);
+    else qs.paren(keys);
+  }
+}

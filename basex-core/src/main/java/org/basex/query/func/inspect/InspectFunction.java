@@ -1,0 +1,27 @@
+package org.basex.query.func.inspect;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class InspectFunction extends StandardFunc {
+  @Override
+  public FNode value(final QueryContext qc) throws QueryException {
+    final FItem function = toFunction(arg(0), qc);
+
+    final QNm name = function.funcName();
+    StaticFunc func = null;
+    if(name != null) {
+      final int arity = function.arity();
+      func = qc.functions.get(sc(), name, arity, true);
+    }
+    return new PlainDoc(qc, info).function(name, func, function.funcType(), function.annotations());
+  }
+}

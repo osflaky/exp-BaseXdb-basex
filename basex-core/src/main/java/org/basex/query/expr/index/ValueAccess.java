@@ -1,0 +1,330 @@
+package org.basex.query.expr.index;
+
+import static org.basex.query.QueryText.*;
+import static org.basex.util.Token.*;
+
+import java.util.*;
+
+import org.basex.data.*;
+import org.basex.index.*;
+import org.basex.index.query.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.basex.util.list.*;
+
+/**
+ * This index class retrieves texts and attribute values from the index.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ValueAccess extends IndexAccess {
+  /** Index type. */
+  private final IndexType type;
+  /** Parent name test (can be {@code null}). */
+  private final Test test;
+  /** Token set ({@code null} if expression was specified). */
+  private final TokenSet tokens;
+  /** Search expression (empty sequence if token set was specified). */
+  private Expr expr;
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param tokens tokens
+   * @param type index type
+   * @param test name test (can be {@code null})
+   * @param db index database
+   */
+  public ValueAccess(final InputInfo info, final TokenSet tokens, final IndexType type,
+      final Test test, final IndexDb db) {
+    this(info, type, test, db, Empty.VALUE, tokens);
+  }
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param expr search expression
+   * @param type index type
+   * @param test test (can be {@code null})
+   * @param db index database
+   */
+  public ValueAccess(final InputInfo info, final Expr expr, final IndexType type,
+      final Test test, final IndexDb db) {
+    this(info, type, test, db, expr, null);
+  }
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param type index type ({@link IndexType#TEXT}, {@link IndexType#TOKEN},
+   *   {@link IndexType#ATTRIBUTE})
+   * @param test test (can be {@code null})
+   * @param db index database
+   * @param expr search expression
+   * @param tokens tokens (can be {@code null})
+   */
+  private ValueAccess(final InputInfo info, final IndexType type, final Test test,
+      final IndexDb db, final Expr expr, final TokenSet tokens) {
+    super(db, info, test != null ? NodeType.ELEMENT : type == IndexType.TEXT ? NodeType.TEXT :
+      NodeType.ATTRIBUTE);
+    this.type = type;
+    this.test = test;
+    this.expr = expr;
+    this.tokens = tokens;
+  }
+
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    // cache distinct search terms
+    final TokenSet cache;
+    if(tokens == null) {
+      cache = new TokenSet();
+      final Iter ir = expr.iter(qc);
+      for(Item item; (item = qc.next(ir)) != null;) {
+        cache.add(toToken(item));
+      }
+    } else {
+      cache = tokens;
+    }
+
+    // no search terms: return empty iterator
+    final int c = cache.size();
+    if(c == 0) return Empty.ITER;
+
+    // single search term: return single iterator
+    final Data data = db.data(qc, type);
+    if(c == 1) return iter(cache.key(1), data);
+
+    // multiple search terms: collect results, return result iterator
+    final GNodeBuilder nodes = new GNodeBuilder();
+    for(final byte[] token : cache) {
+      for(final GNode node : iter(token, data)) {
+        qc.checkStop();
+        nodes.add(node);
+      }
+    }
+    return nodes.value(this).iter();
+  }
+
+  /**
+   * Returns an index iterator.
+   * @param term search term
+   * @param data data reference
+   * @return iterator
+   */
+  private BasicNodeIter iter(final byte[] term, final Data data) {
+    // special case: empty text node
+    // - no element name: return 0 results (empty text nodes are non-existent)
+    // - otherwise, return scan-based element iterator
+    final int tl = term.length;
+    if(tl == 0 && type == IndexType.TEXT)
+      return test == null ? BasicNodeIter.EMPTY : scanEmpty(data);
+
+    // check if index is available and if it may contain the requested term
+    // otherwise, use sequential scan
+    final boolean index = data.meta.index(type) && (
+        !(type == IndexType.TEXT || type == IndexType.ATTRIBUTE) ||
+        tl > 0 && tl <= data.meta.maxlen
+    );
+
+    final IndexIterator iter = index ? data.iter(new StringToken(type, term)) : scan(term, data);
+    if(iter.size() == 0) return BasicNodeIter.EMPTY;
+
+    final int kind = type == IndexType.TEXT ? Data.TEXT : Data.ATTR;
+
+    // test names of parents (index access or sequential scan)
+    if(test != null) {
+      return new DBNodeIter(data) {
+        @Override
+        public DBNode next() {
+          while(iter.more()) {
+            final DBNode node = new DBNode(data, data.parent(iter.pre(), kind), Data.ELEM);
+            if(test.matches(node)) return node;
+          }
+          return null;
+        }
+      };
+    }
+
+    // sequential scan
+    if(!index) {
+      return new DBNodeIter(data) {
+        @Override
+        public DBNode next() {
+          return iter.more() ? new DBNode(data, iter.pre(), kind) : null;
+        }
+      };
+    }
+
+    // cache retrieved values for direct access
+    return new DBNodeIter(data) {
+      final IntList list = new IntList();
+
+      @Override
+      public DBNode next() {
+        if(iter.more()) {
+          final int pre = iter.pre();
+          list.add(pre);
+          return new DBNode(data, pre, kind);
+        }
+        return null;
+      }
+      @Override
+      public DBNode get(final long i) {
+        while(i >= list.size() && iter.more()) list.add(iter.pre());
+        return new DBNode(data, list.get((int) i), kind);
+      }
+      @Override
+      public long size() {
+        return iter.size();
+      }
+      @Override
+      public Value value(final QueryContext qc, final Expr ex) {
+        while(iter.more()) {
+          qc.checkStop();
+          list.add(iter.pre());
+        }
+        return DBNodeSeq.get(list.finish(), data, ex);
+      }
+    };
+  }
+
+  /**
+   * Returns a scan-based index iterator, which looks for text nodes with the specified value.
+   * @param value value to be looked up
+   * @param data data reference
+   * @return node iterator
+   */
+  private IndexIterator scan(final byte[] value, final Data data) {
+    return new IndexIterator() {
+      final boolean text = type == IndexType.TEXT;
+      final byte kind = text ? Data.TEXT : Data.ATTR;
+      final int sz = data.nodes();
+      int pre = -1;
+
+      @Override
+      public int pre() {
+        return pre;
+      }
+      @Override
+      public boolean more() {
+        while(++pre < sz) {
+          if(data.kind(pre) == kind && eq(data.text(pre, text), value)) return true;
+        }
+        return false;
+      }
+      @Override
+      public int size() {
+        return Math.max(1, sz / 2);
+      }
+    };
+  }
+
+  /**
+   * Returns a scan-based iterator, which returns elements
+   * a) matching the name test and
+   * b) having no descendants.
+   * @param data data reference
+   * @return node iterator
+   */
+  private DBNodeIter scanEmpty(final Data data) {
+    return new DBNodeIter(data) {
+      final int sz = data.nodes();
+      int pre = -1;
+
+      @Override
+      public DBNode next() {
+        while(++pre < sz) {
+          if(data.kind(pre) == Data.ELEM && data.size(pre, Data.ELEM) == 1) {
+            final DBNode node = new DBNode(data, pre, Data.ELEM);
+            if(test == null || test.matches(node)) return node;
+          }
+        }
+        return null;
+      }
+    };
+  }
+
+  @Override
+  public boolean has(final Flag... flags) {
+    return expr.has(flags) || super.has(flags);
+  }
+
+  @Override
+  public boolean inlineable(final InlineContext ic) {
+    return expr.inlineable(ic) && super.inlineable(ic);
+  }
+
+  @Override
+  public VarUsage count(final Var var) {
+    return expr.count(var).plus(super.count(var));
+  }
+
+  @Override
+  public Expr inline(final InlineContext ic) throws QueryException {
+    final Expr inlined = expr.inline(ic);
+    if(inlined != null) expr = inlined;
+    final boolean inlinedDb = inlineDb(ic);
+    return inlined != null || inlinedDb ? optimize(ic.cc) : null;
+  }
+
+  @Override
+  public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new ValueAccess(info, type, test, db.copy(cc, vm), expr.copy(cc, vm), tokens));
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return expr.accept(visitor) && super.accept(visitor);
+  }
+
+  @Override
+  public int exprSize() {
+    return expr.exprSize() + super.exprSize();
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final ValueAccess va && type == va.type &&
+        Objects.equals(tokens, va.tokens) && expr.equals(va.expr) &&
+        Objects.equals(test, va.test) && super.equals(obj);
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this, INDEX, type, NAME, test), db, toExpr());
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    final Function function = type == IndexType.TEXT ? Function._DB_TEXT :
+      type == IndexType.ATTRIBUTE ? Function._DB_ATTRIBUTE : Function._DB_TOKEN;
+    qs.function(function, db, toExpr());
+    if(test != null) qs.token('/').token(new CachedStep(info, Axis.PARENT, test));
+  }
+
+  /**
+   * Returns an expression instance for cached tokens, or the search expression itself.
+   * @return expression
+   */
+  private Expr toExpr() {
+    if(tokens == null) return expr;
+    final TokenList tl = new TokenList(tokens.size());
+    for(final byte[] token : tokens) tl.add(token);
+    return StrSeq.get(tl);
+  }
+}

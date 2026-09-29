@@ -1,0 +1,227 @@
+package org.basex.query.value.type;
+
+import static org.basex.query.QueryError.*;
+
+import java.io.*;
+import java.util.*;
+
+import org.basex.io.in.DataInput;
+import org.basex.query.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+
+/**
+ * XDM node types.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class NodeType implements Type {
+  /** Cached types. */
+  static final EnumMap<Kind, NodeType> TYPES = new EnumMap<>(Kind.class);
+
+  static {
+    for(final Kind kind : Kind.values()) TYPES.put(kind, new NodeType(kind, null));
+  }
+
+  /** Node type: GNode. */
+  public static final NodeType NODE = TYPES.get(Kind.NODE);
+  /** Node type: JNode. */
+  public static final NodeType JNODE = TYPES.get(Kind.JNODE);
+  /** Node type: XNode. */
+  public static final NodeType XNODE = TYPES.get(Kind.XNODE);
+  /** Node type: text. */
+  public static final NodeType TEXT = TYPES.get(Kind.TEXT);
+  /** Node type: processing instruction. */
+  public static final NodeType PROCESSING_INSTRUCTION = TYPES.get(Kind.PROCESSING_INSTRUCTION);
+  /** Node type: element. */
+  public static final NodeType ELEMENT = TYPES.get(Kind.ELEMENT);
+  /** Node type: document. */
+  public static final NodeType DOCUMENT = TYPES.get(Kind.DOCUMENT);
+  /** Node type: attribute. */
+  public static final NodeType ATTRIBUTE = TYPES.get(Kind.ATTRIBUTE);
+  /** Node type: comment. */
+  public static final NodeType COMMENT = TYPES.get(Kind.COMMENT);
+  /** Node type: namespace. */
+  public static final NodeType NAMESPACE = TYPES.get(Kind.NAMESPACE);
+
+  /** Node kind. */
+  private final Kind kind;
+  /** Node test (can be {@code null}). */
+  public final Test test;
+
+  /** Sequence types. */
+  private final SeqType[] seqTypes = SeqType.cache(this);
+
+  /**
+   * Constructor.
+   * @param kind node kind
+   * @param test node test (can be {@code null})
+   */
+  private NodeType(final Kind kind, final Test test) {
+    this.kind = kind;
+    this.test = test;
+  }
+
+  /**
+   * Returns an instance for the specified kind.
+   * @param kind node kind
+   * @return type
+   */
+  public static NodeType get(final Kind kind) {
+    return TYPES.get(kind);
+  }
+
+  /**
+   * Returns an instance for the specified test.
+   * @param test node test
+   * @return type
+   */
+  public static NodeType get(final Test test) {
+    final Kind kind = test.kind;
+    return test instanceof NodeTest ? get(kind) : new NodeType(kind, test);
+  }
+
+  /**
+   * Returns a JNode type for the specified key and value type.
+   * @param key key ({@code null} for wildcard, {@link Empty#VALUE} for root node)
+   * @param valueType value type (can be {@code null})
+   * @return JNode type
+   */
+  public static NodeType get(final Item key, final SeqType valueType) {
+    return get(JNodeTest.get(key, valueType));
+  }
+
+  @Override
+  public Kind kind() {
+    return kind;
+  }
+
+  @Override
+  public boolean isNumber() {
+    return false;
+  }
+
+  @Override
+  public boolean isUntyped() {
+    return kind.oneOf(Kind.ELEMENT, Kind.ATTRIBUTE, Kind.TEXT, Kind.DOCUMENT);
+  }
+
+  @Override
+  public boolean isNumberOrUntyped() {
+    return isUntyped();
+  }
+
+  @Override
+  public boolean isStringOrUntyped() {
+    return !kind.oneOf(Kind.NODE, Kind.JNODE);
+  }
+
+  @Override
+  public boolean isSortable() {
+    return isStringOrUntyped();
+  }
+
+  @Override
+  public GNode cast(final Item item, final QueryContext qc, final InputInfo info)
+      throws QueryException {
+    if(item.type == this) return (GNode) item;
+    throw typeError(item, this, info);
+  }
+
+  @Override
+  public GNode cast(final Object value, final QueryContext qc, final InputInfo info)
+      throws QueryException {
+    return kind.cast(value, info);
+  }
+
+  @Override
+  public GNode read(final DataInput in, final QueryContext qc) throws IOException, QueryException {
+    return cast(in.readToken(), qc, null);
+  }
+
+  @Override
+  public SeqType seqType(final Occ occ) {
+    return SeqType.get(seqTypes, this, occ);
+  }
+
+  @Override
+  public boolean eq(final Type type) {
+    return this == type || type instanceof final NodeType nt && nt.kind == kind &&
+        Objects.equals(test, nt.test);
+  }
+
+  @Override
+  public boolean instanceOf(final Type type) {
+    if(type == this || type == BasicType.ITEM || type == NODE) return true;
+    if(type instanceof final NodeType nt) {
+      if(!kind.instanceOf(nt.kind)) return false;
+      return nt.test == null || test != null && test.instanceOf(nt.test);
+    }
+    if(type instanceof final ChoiceItemType cit) {
+      return cit.hasInstance(this);
+    }
+    return false;
+  }
+
+  @Override
+  public Type union(final Type type) {
+    if(type instanceof final ChoiceItemType cit) return cit.union(this);
+    if(type.instanceOf(this)) return this;
+    if(instanceOf(type)) return type;
+    if(type instanceof final NodeType nt) {
+      if(nt.kind != kind) return get(kind.union(nt.kind));
+      return get(Test.get(Arrays.asList(test, nt.test)));
+    }
+    return BasicType.ITEM;
+  }
+
+  @Override
+  public Type intersect(final Type type) {
+    if(type instanceof final ChoiceItemType cit) return cit.intersect(this);
+    if(instanceOf(type)) return this;
+    if(type.instanceOf(this)) return type;
+    if(type instanceof final NodeType nt) {
+      final Test t = (test != null ? test : NodeTest.get(kind)).intersect(
+        nt.test != null ? nt.test : NodeTest.get(nt.kind));
+      if(t != null) return get(t);
+    }
+    return null;
+  }
+
+  @Override
+  public BasicType atomic() {
+    return kind.oneOf(Kind.NODE, Kind.JNODE) ? null :
+      kind == Kind.XNODE ? BasicType.ANY_ATOMIC_TYPE :
+      kind.oneOf(Kind.PROCESSING_INSTRUCTION, Kind.COMMENT, Kind.NAMESPACE) ? BasicType.STRING :
+      BasicType.UNTYPED_ATOMIC;
+  }
+
+  @Override
+  public ID id() {
+    return kind.id;
+  }
+
+  @Override
+  public boolean refinable() {
+    return kind == Kind.XNODE;
+  }
+
+  @Override
+  public boolean nsSensitive() {
+    return false;
+  }
+
+  @Override
+  public Object name() {
+    return kind;
+  }
+
+  @Override
+  public String toString() {
+    return test != null ? test.toString() : kind.toString("");
+  }
+}

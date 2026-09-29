@@ -1,0 +1,145 @@
+package org.basex.io.in;
+
+import java.io.*;
+
+import org.basex.io.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+
+/**
+ * This is an input stream for project specific data types.
+ * It bears resemblance to Java's {@link DataInputStream}.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class DataInput extends BufferInput {
+  /**
+   * Constructor.
+   * @param io input to be read
+   * @throws IOException I/O exception
+   */
+  public DataInput(final IO io) throws IOException {
+    super(io);
+  }
+
+  /**
+   * Reads a boolean value.
+   * @return boolean value
+   * @throws IOException I/O exception
+   */
+  public boolean readBool() throws IOException {
+    return read() == 1;
+  }
+
+  /**
+   * Reads a token, represented by its compressed length and its byte array.
+   * @return byte array
+   * @throws IOException I/O exception
+   */
+  public byte[] readToken() throws IOException {
+    final int l = readNum();
+    return l == 0 ? Token.EMPTY : readNBytes(l);
+  }
+
+  /**
+   * Reads a double value.
+   * @return byte array
+   * @throws IOException I/O exception
+   */
+  public double readDouble() throws IOException {
+    return Token.toDouble(readToken());
+  }
+
+  /**
+   * Reads a distance-mapped integer array.
+   * @return integer array
+   * @throws IOException I/O exception
+   */
+  public IntList readDiffs() throws IOException {
+    final int[] tmp = new int[readNum()];
+    final int al = tmp.length;
+    for(int a = 0; a < al; a++) tmp[a] = (a == 0 ? 0 : tmp[a - 1]) + readNum();
+    return new IntList(tmp);
+  }
+
+  /**
+   * Reads a compressed integer array.
+   * @return integer array
+   * @throws IOException I/O exception
+   */
+  public int[] readNums() throws IOException {
+    return readNums(readNum());
+  }
+
+  /**
+   * Reads compressed integer values of the specified size.
+   * @param s array size
+   * @return integer array
+   * @throws IOException I/O exception
+   */
+  private int[] readNums(final int s) throws IOException {
+    final int[] tmp = new int[s];
+    for(int a = 0; a < s; a++) tmp[a] = readNum();
+    return tmp;
+  }
+
+  /**
+   * Reads a token array.
+   * @return double array
+   * @throws IOException I/O exception
+   */
+  public byte[][] readTokens() throws IOException {
+    final int l = readNum();
+    final byte[][] tmp = new byte[l][];
+    for(int i = 0; i < l; i++) tmp[i] = readToken();
+    return tmp;
+  }
+
+  /**
+   * Reads a compressed integer value; see {@link Num} for more.
+   * @return read value
+   * @throws IOException I/O exception
+   */
+  public int readNum() throws IOException {
+    final int v = read();
+    return v == -1 ? 0 : switch((v & 0xC0) >>> 6) {
+      case 0  -> v;
+      case 1  -> (v & 0x3F) << 8 | read();
+      case 2  -> (v & 0x3F) << 24 | read() << 16 | read() << 8 | read();
+      default -> read() << 24 | read() << 16 | read() << 8 | read();
+    };
+  }
+
+  /**
+   * Reads a long value.
+   * @return read value
+   * @throws IOException I/O exception
+   */
+  public long readLong() throws IOException {
+    final int v = readNum();
+    return v == 0x3FFF ? read8() : v;
+  }
+
+  /**
+   * Reads an array of long values.
+   * @param s array size
+   * @return array of longs
+   * @throws IOException I/O exception
+   */
+  public long[] readLongs(final int s) throws IOException {
+    final long[] tmp = new long[s];
+    for(int a = 0; a < s; a++) tmp[a] = read8();
+    return tmp;
+  }
+
+  /**
+   * Read a long value.
+   * @return read value
+   * @throws IOException I/O exception
+   */
+  private long read8() throws IOException {
+    return (long) read() << 56 | (long) read() << 48 | (long) read() << 40 | (long) read() << 32 |
+        (long) read() << 24 | read() << 16 | read() << 8 | read();
+  }
+}

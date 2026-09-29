@@ -1,0 +1,50 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnExactlyOne extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    // if possible, retrieve single item
+    final Expr input = arg(0);
+    Item item;
+    if(input.seqType().zeroOrOne()) {
+      item = input.item(qc, info);
+      if(item != Empty.VALUE) return item;
+    } else {
+      final Iter iter = input.iter(qc);
+      item = iter.next();
+      if(item != null && iter.next() != null) item = null;
+      if(item != null) return item;
+    }
+    throw EXACTLYONE.get(info);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = arg(0);
+    final SeqType st = input.seqType();
+    // exactly-one($item) → $item
+    if(st.one()) return input;
+    if((st.zero() || input.size() > 1) && !input.has(Flag.NDT)) throw EXACTLYONE.get(info);
+
+    exprType.assign(st.with(Occ.EXACTLY_ONE)).data(input);
+    return this;
+  }
+}

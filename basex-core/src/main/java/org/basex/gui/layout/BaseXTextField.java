@@ -1,0 +1,228 @@
+package org.basex.gui.layout;
+
+import static org.basex.gui.layout.BaseXKeys.*;
+
+import java.awt.*;
+import java.awt.event.*;
+import java.awt.geom.*;
+import java.util.*;
+
+import javax.swing.*;
+import javax.swing.event.*;
+import javax.swing.text.*;
+
+import org.basex.gui.*;
+import org.basex.gui.listener.*;
+import org.basex.util.*;
+import org.basex.util.options.*;
+
+/**
+ * Project specific text field implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class BaseXTextField extends JTextField {
+  /** Default width of text fields. */
+  public static final int DWIDTH = 450;
+  /** Default foreground color. */
+  private static Color back;
+
+  /** Options. */
+  private Options options;
+  /** Option. */
+  private Option<?> option;
+
+  /** Hint, displayed if the text field is empty (can be {@code null}). */
+  private String hint;
+  /** Last input. */
+  private String last = "";
+
+  /**
+   * Constructor.
+   * @param gui reference to the main window
+   */
+  public BaseXTextField(final GUI gui) {
+    this(gui, null);
+  }
+
+  /**
+   * Constructor.
+   * @param dialog dialog window
+   */
+  public BaseXTextField(final BaseXDialog dialog) {
+    this(dialog, null);
+  }
+
+  /**
+   * Constructor.
+   * @param dialog dialog window
+   * @param option option
+   * @param options options
+   */
+  public BaseXTextField(final BaseXDialog dialog, final NumberOption option,
+      final Options options) {
+    this(dialog, (Option<?>) option, options);
+  }
+
+  /**
+   * Constructor.
+   * @param dialog dialog window
+   * @param option option
+   * @param options options
+   */
+  public BaseXTextField(final BaseXDialog dialog, final StringOption option,
+      final Options options) {
+    this(dialog, (Option<?>) option, options);
+  }
+
+  /**
+   * Constructor.
+   * @param dialog dialog window
+   * @param option option
+   * @param options options
+   */
+  private BaseXTextField(final BaseXDialog dialog, final Option<?> option, final Options options) {
+    this(dialog, options.get(option) == null ? null : options.get(option).toString());
+    this.options = options;
+    this.option = option;
+  }
+
+  /**
+   * Constructor.
+   * @param win window (of type {@link BaseXDialog} or {@link GUI})
+   * @param text input text (can be {@code null})
+   */
+  public BaseXTextField(final BaseXWindow win, final String text) {
+    BaseXLayout.setWidth(this, DWIDTH);
+    BaseXLayout.addInteraction(this, win);
+    if(back == null) back = getBackground();
+
+    if(text != null) setText(text);
+
+    // discard legacy bindings: Ctrl+H shadows a menu shortcut, the others have no use in BaseX
+    final InputMap imap = getInputMap();
+    if(!Prop.MAC) imap.put(KeyStroke.getKeyStroke("control H"), "none");
+    imap.put(KeyStroke.getKeyStroke("control BACK_SLASH"), "none");
+    imap.put(KeyStroke.getKeyStroke("shift control O"), "none");
+
+    addFocusListener((FocusGainedListener) e -> selectAll());
+    addKeyListener((KeyPressedListener) e -> {
+      if(UNDOSTEP.is(e) || REDOSTEP.is(e)) {
+        final String t = getText();
+        setText(last);
+        last = t;
+        e.consume();
+      }
+    });
+
+    // copy and paste text with middle mouse button
+    addMouseListener(new MouseInputAdapter() {
+      @Override
+      public void mousePressed(final MouseEvent e) {
+        if(!SwingUtilities.isMiddleMouseButton(e)) return;
+        final String txt = getSelectedText();
+        if(txt != null) {
+          BaseXLayout.toClipboard(txt);
+          setCaretPosition(getCaretPosition());
+        } else if(isEnabled() && isEditable()) {
+          final ArrayList<Object> clips = BaseXLayout.fromClipboard(null);
+          if(!clips.isEmpty()) {
+            final String string = clips.getFirst().toString();
+            setText(new StringBuilder(getText()).insert(getCaretPosition(), string).toString());
+          }
+        }
+      }
+    });
+
+    final BaseXDialog dialog = win.dialog();
+    if(dialog != null) addKeyListener(dialog.keys);
+  }
+
+  @Override
+  public void setFont(final Font f) {
+    super.setFont(f);
+    // the height of a fixed component size must be adapted to the new font
+    if(isPreferredSizeSet()) {
+      final int w = getPreferredSize().width;
+      setPreferredSize(null);
+      setPreferredSize(new Dimension(w, getPreferredSize().height));
+    }
+  }
+
+  @Override
+  protected void paintComponent(final Graphics g) {
+    super.paintComponent(g);
+    if(hint == null || getDocument().getLength() != 0) return;
+    try {
+      // request text position from the look and feel; it may differ from the component insets
+      final Rectangle2D rect = modelToView2D(0);
+      if(rect == null) return;
+      BaseXLayout.hints(g);
+      g.setColor(GUIConstants.gray);
+      g.drawString(hint, (int) rect.getX(), (int) rect.getY() + g.getFontMetrics().getAscent());
+    } catch(final BadLocationException ex) {
+      Util.debug(ex);
+    }
+  }
+
+  /**
+   * Adds a hint to the text field.
+   * @param label text of the hint
+   * @return self reference
+   */
+  public final BaseXTextField hint(final String label) {
+    hint = label;
+    setToolTipText(label.replaceAll("\\.\\.\\.$", ""));
+    repaint();
+    return this;
+  }
+
+  @Override
+  public void setText(final String text) {
+    last = text;
+    super.setText(text);
+  }
+
+  /**
+   * Assigns the current value.
+   * @return success flag
+   */
+  public final boolean assign() {
+    return check(true);
+  }
+
+  /**
+   * Checks the current value.
+   * @return success flag
+   */
+  public final boolean check() {
+    return check(false);
+  }
+
+  /**
+   * Marks the input as valid or invalid.
+   * @param valid valid flag
+   */
+  public final void valid(final boolean valid) {
+    setBackground(valid ? back : GUIConstants.lightRed);
+  }
+
+  /**
+   * Checks and assigns the current value.
+   * @param assign assign value
+   * @return success flag
+   */
+  private boolean check(final boolean assign) {
+    if(option instanceof final NumberOption number) {
+      final int num = Strings.toInt(getText());
+      final boolean valid = num != Integer.MIN_VALUE;
+      valid(valid);
+      if(!valid) return false;
+      if(assign) options.set(number, num);
+    } else {
+      options.set((StringOption) option, getText());
+    }
+    return true;
+  }
+}

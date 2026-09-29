@@ -1,0 +1,97 @@
+package org.basex.http.rest;
+
+import static org.basex.http.rest.RESTText.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.AbstractMap.*;
+import java.util.Map.*;
+
+import org.basex.http.*;
+import org.basex.io.in.*;
+import org.basex.query.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.options.*;
+
+/**
+ * This class processes GET requests sent to the REST server.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+final class RESTGet {
+  /** Private constructor. */
+  private RESTGet() { }
+
+  /**
+   * Creates and returns a REST command.
+   * @param session REST session
+   * @return code
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  public static RESTCmd get(final RESTSession session) throws QueryException, IOException {
+    return get(session, null);
+  }
+
+  /**
+   * Creates and returns a REST command for a QUERY request.
+   * @param session REST session
+   * @return code
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  public static RESTCmd query(final RESTSession session) throws QueryException, IOException {
+    final HTTPConnection conn = session.conn;
+    final String query;
+    try(NewlineInput ni = new NewlineInput(conn.request.getInputStream(),
+        conn.request.getCharacterEncoding())) {
+      query = Token.string(ni.content());
+    } catch(final IOException ex) {
+      throw HTTPStatus.BAD_REQUEST_X.get(ex);
+    }
+    return get(session, query);
+  }
+
+  /**
+   * Creates and returns a REST command.
+   * @param session REST session
+   * @param query body of a QUERY request, or {@code null} for GET
+   * @return code
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private static RESTCmd get(final RESTSession session, final String query)
+      throws QueryException, IOException {
+    final Map<String, Entry<Object, String>> bindings = new HashMap<>();
+
+    // parse query string
+    String op = null, input = null;
+    final HTTPConnection conn = session.conn;
+    final Options sopts = conn.sopts(), mopts = conn.context.options;
+    for(final Entry<String, String[]> param : conn.requestCtx.queryStrings().entrySet()) {
+      final String key = param.getKey();
+      final String[] values = param.getValue();
+
+      if(query == null && Strings.eqic(key, COMMAND, QUERY, RUN)) {
+        if(op != null || values.length > 1)
+          throw HTTPStatus.MULTIPLE_OPS_X.get(String.join(", ", values));
+        op = key;
+        input = values[0];
+      } else if(key.equalsIgnoreCase(CONTEXT)) {
+        // context parameter
+        bindings.put(null, new SimpleEntry<>(values, NodeType.DOCUMENT.toString()));
+      } else if(!RESTCmd.assign(sopts, param, false) && !RESTCmd.assign(mopts, param, false)) {
+        // assign database option, serialization parameter or external variable
+        bindings.put(key, new SimpleEntry<>(values, null));
+      }
+    }
+
+    if(query != null) return RESTQuery.get(session, query, bindings);
+    if(op == null) return RESTRetrieve.get(session);
+    if(op.equals(QUERY)) return RESTQuery.get(session, input, bindings);
+    if(op.equals(RUN)) return RESTRun.get(session, input, bindings);
+    return RESTCommands.get(session, input, true);
+  }
+}

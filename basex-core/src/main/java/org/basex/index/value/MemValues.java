@@ -1,0 +1,314 @@
+package org.basex.index.value;
+
+import static org.basex.core.Text.*;
+import static org.basex.util.Token.*;
+
+import java.util.*;
+
+import org.basex.core.*;
+import org.basex.data.*;
+import org.basex.index.*;
+import org.basex.index.query.*;
+import org.basex.index.stats.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.basex.util.list.*;
+
+/**
+ * This class provides main memory access to attribute values and text contents.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class MemValues extends ValueIndex {
+  /** Values. */
+  private final TokenSet values;
+  /** IDs lists. */
+  private ArrayList<int[]> idsList;
+  /** ID array lengths. */
+  private IntList lenList;
+  /** Order flags (can be {@code null}). */
+  private BoolList reorder;
+
+  /**
+   * Constructor.
+   * @param data data instance
+   * @param type index type
+   */
+  public MemValues(final Data data, final IndexType type) {
+    super(data, type);
+    // token index: work extra token set instance
+    values = type == IndexType.TOKEN ? new TokenSet() :
+      ((MemData) data).values(type == IndexType.TEXT);
+    final int s = values.size() + 1;
+    idsList = new ArrayList<>(s);
+    lenList = new IntList(s);
+  }
+
+  @Override
+  public IndexIterator iter(final IndexSearch search) {
+    final int[] pres;
+    final int size;
+    if(search instanceof final StringRange range) {
+      pres = idRange(range).finish();
+      size = pres.length;
+    } else {
+      // the token set may contain values of deleted nodes that have no index entries
+      final int id = values.index(search.token());
+      if(id == 0 || id >= idsList.size()) return IndexIterator.EMPTY;
+      size = lenList.get(id);
+      if(size == 0) return IndexIterator.EMPTY;
+      final int[] ids = idsList.get(id);
+      if(data.meta.updindex) {
+        final IntList tmp = new IntList();
+        for(int i = 0; i < size; i++) tmp.add(data.pre(ids[i]));
+        pres = tmp.sort().finish();
+      } else {
+        pres = ids;
+      }
+    }
+
+    return new IndexIterator() {
+      int p;
+      @Override
+      public boolean more() { return p < size; }
+      @Override
+      public int pre() { return pres[p++]; }
+      @Override
+      public int size() { return size; }
+    };
+  }
+
+  /**
+   * Performs a string-based range query.
+   * @param range index range
+   * @return sorted PRE values
+   */
+  private IntList idRange(final StringRange range) {
+    final boolean upd = data.meta.updindex;
+    final IntList pres = new IntList();
+    final int s = values.size();
+    for(int p = 1; p <= s; p++) {
+      final int len = lenList.get(p);
+      if(len == 0) continue;
+      final byte[] key = values.key(p);
+      if(compare(key, range.min()) < (range.mni() ? 0 : 1) ||
+         compare(key, range.max()) > (range.mxi() ? 0 : -1)) continue;
+      final int[] ids = idsList.get(p);
+      for(int i = 0; i < len; i++) pres.add(upd ? data.pre(ids[i]) : ids[i]);
+    }
+    return pres.sort();
+  }
+
+  @Override
+  public IndexCosts costs(final IndexSearch search) {
+    if(search instanceof StringRange) return IndexCosts.get(Math.max(1, data.nodes() / 10));
+    return IndexCosts.exact(lenList.get(values.index(search.token())));
+  }
+
+  @Override
+  public EntryIterator entries(final IndexEntries entries) {
+    final byte[] token = entries.token();
+
+    return new EntryIterator() {
+      // the token set may contain values of deleted nodes that have no index entries
+      final int s = Math.min(values.size(), lenList.size() - 1);
+      int p;
+
+      @Override
+      public byte[] next() {
+        while(++p <= s) {
+          if(lenList.get(p) == 0) continue;
+          final byte[] key = values.key(p);
+          if(startsWith(key, token)) return key;
+        }
+        return null;
+      }
+
+      @Override
+      public int count() {
+        return lenList.get(p);
+      }
+    };
+  }
+
+  @Override
+  public byte[] info(final MainOptions options) {
+    final TokenBuilder tb = new TokenBuilder();
+    tb.add(LI_STRUCTURE).add(HASH).add(NL);
+    tb.add(LI_NAMES).add(data.meta.names(type)).add(NL);
+
+    final IndexStats stats = new IndexStats(options.get(MainOptions.MAXSTAT));
+    final int s = values.size();
+    for(int p = 1; p <= s; p++) {
+      final int oc = lenList.get(p);
+      if(oc > 0 && stats.adding(oc)) stats.add(values.key(p), oc);
+    }
+    stats.print(tb);
+    return tb.finish();
+  }
+
+  @Override
+  public int size() {
+    // returns the actual number of indexed entries
+    final int ll = lenList.size();
+    int s = 0;
+    for(int c = 1; c < ll; c++) {
+      if(lenList.get(c) > 0) s++;
+    }
+    return s;
+  }
+
+  @Override
+  public boolean drop() {
+    idsList = null;
+    lenList = null;
+    return true;
+  }
+
+  @Override
+  public void delete(final int pre, final int size) {
+    delete(new ValueCache(pre, size, type, data));
+  }
+
+  @Override
+  public void insert(final int pre, final int size) {
+    add(new ValueCache(pre, size, type, data));
+  }
+
+  @Override
+  public void rename(final int pre, final int kind) {
+    delete(new ValueCache(renamedUnits(pre, kind), type, data));
+  }
+
+  @Override
+  public void renamed(final int pre, final int kind) {
+    add(new ValueCache(renamedUnits(pre, kind), type, data));
+  }
+
+  /**
+   * Adds cached entries to the index.
+   * @param cache value cache
+   */
+  private void add(final ValueCache cache) {
+    for(final byte[] key : cache) {
+      final IntList ids = cache.ids(key);
+      if(!ids.isEmpty()) add(key, ids.sort().finish());
+    }
+    finish();
+  }
+
+  /**
+   * Deletes cached entries from the index.
+   * @param cache value cache
+   */
+  private void delete(final ValueCache cache) {
+    for(final byte[] key : cache) {
+      delete(key, cache.ids(key).sort().finish());
+    }
+  }
+
+  @Override
+  public void flush(final boolean close) { }
+
+  @Override
+  public void close() { }
+
+  /**
+   * Adds values to the index.
+   * @param key key to be indexed
+   * @param vals sorted values
+   */
+  void add(final byte[] key, final int... vals) {
+    // token index: add key. otherwise, reference existing key
+    add(type == IndexType.TOKEN ? values.put(key) : values.index(key), vals);
+  }
+
+  /**
+   * Adds values for an existing key to the index.
+   * @param ref key reference
+   * @param vals sorted values
+   */
+  void add(final int ref, final int... vals) {
+    final int vl = vals.length;
+    // updatable index: if required, resize existing arrays
+    while(idsList.size() < ref + 1) idsList.add(null);
+    if(lenList.size() < ref + 1) lenList.set(ref, 0);
+
+    final int len = lenList.get(ref), size = len + vl;
+    int[] ids = idsList.get(ref);
+    if(ids == null) {
+      ids = vals;
+    } else {
+      if(ids.length < size) ids = Arrays.copyOf(ids, Array.newCapacity(size));
+      Array.copyFromStart(vals, vl, ids, len);
+      if(ids[len - 1] > vals[0]) {
+        if(reorder == null) reorder = new BoolList(values.size());
+        reorder.set(ref, true);
+      }
+    }
+    idsList.set(ref, ids);
+    lenList.set(ref, size);
+  }
+
+  /**
+   * Finishes the index creation.
+   */
+  void finish() {
+    if(reorder == null) return;
+    for(int i = 1; i < reorder.size(); i++) {
+      if(reorder.get(i)) Arrays.sort(idsList.get(i), 0, lenList.get(i));
+    }
+    reorder = null;
+  }
+
+  /**
+   * Removes values from the index.
+   * @param key key
+   * @param vals sorted values
+   */
+  void delete(final byte[] key, final int... vals) {
+    final int id = values.index(key), vl = vals.length, l = lenList.get(id), s = l - vl;
+    final int[] ids = idsList.get(id);
+    for(int i = 0, n = 0, v = 0; i < l; i++) {
+      if(v == vl || ids[i] != vals[v]) ids[n++] = ids[i];
+      else v++;
+    }
+    lenList.set(id, s);
+    if(s == 0) idsList.set(id, null);
+  }
+
+  /**
+   * Returns a string representation of the index structure.
+   * @param all include database contents in the representation. During updates, database lookups
+   *        must be avoided, as the data structures will be inconsistent
+   * @return string
+   */
+  public String toString(final boolean all) {
+    final TokenBuilder tb = new TokenBuilder();
+    tb.add(type).add(" INDEX, '").add(data.meta.name).add("':\n");
+    final int s = lenList.size();
+    for(int m = 1; m < s; m++) {
+      final int len = lenList.get(m);
+      if(len == 0) continue;
+      final int[] ids = idsList.get(m);
+      tb.add("  ").addInt(m);
+      if(all) tb.add(", key: \"").add(data.text(data.pre(ids[0]), type == IndexType.TEXT)).add('"');
+      tb.add(", ids");
+      if(all) tb.add("/pres");
+      tb.add(": ");
+      for(int n = 0; n < len; n++) {
+        if(n != 0) tb.add(",");
+        tb.addInt(ids[n]);
+        if(all) tb.add('/').addInt(data.pre(ids[n]));
+      }
+      tb.add("\n");
+    }
+    return tb.toString();
+  }
+
+  @Override
+  public String toString() {
+    return toString(false);
+  }
+}

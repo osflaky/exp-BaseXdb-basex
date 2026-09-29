@@ -1,0 +1,131 @@
+package org.basex.query.util.pkg;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.util.pkg.PkgText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.function.*;
+
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.util.*;
+
+/**
+ * Parses the package descriptors and performs schema checks.
+ *
+ * @author BaseX Team, BSD License
+ * @author Rositsa Shadura
+ */
+public final class PkgParser {
+  /** Input info (can be {@code null}). */
+  private final InputInfo info;
+
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   */
+  public PkgParser(final InputInfo info) {
+    this.info = info;
+  }
+
+  /**
+   * Parses package descriptor.
+   * @param io XML input
+   * @return package container
+   * @throws QueryException query exception
+   */
+  public Pkg parse(final IO io) throws QueryException {
+    final XNode node;
+    try {
+      // checks root node
+      node = (XNode) XMLAccess.children(new DBNode(io)).next();
+      if(!eqNS(E_PACKAGE, node.qname()))
+        throw REPO_DESCRIPTOR_X.get(info, Util.info(WHICHELEM, node.qname()));
+    } catch(final IOException ex) {
+      throw REPO_PARSE_X_X.get(info, io.name(), ex);
+    }
+
+    final QueryFunction<QNm, String> attribute = name -> {
+      final byte[] value = node.attribute(name);
+      if(value == null) throw REPO_DESCRIPTOR_X.get(info, Util.info(MISSATTR, name, E_PACKAGE));
+      return string(value);
+    };
+    final Pkg pkg = new Pkg(attribute.apply(Q_NAME));
+    pkg.abbrev = attribute.apply(Q_ABBREV);
+    pkg.spec = attribute.apply(Q_SPEC);
+    pkg.version = attribute.apply(Q_VERSION);
+
+    parseChildren(node, pkg);
+    return pkg;
+  }
+
+  /**
+   * Parses the children of <package/>.
+   * @param node package node
+   * @param pkg package container
+   * @throws QueryException query exception
+   */
+  private void parseChildren(final XNode node, final Pkg pkg) throws QueryException {
+    for(final GNode gchild : XMLAccess.children(node)) {
+      final XNode child = (XNode) gchild;
+      final QNm name = child.qname();
+      if(eqNS(E_DEPENDENCY, name)) pkg.dep.add(parseDependency(child));
+      else if(eqNS(E_XQUERY, name)) pkg.comps.add(parseComp(child));
+    }
+  }
+
+  /**
+   * Parses <dependency/>.
+   * @param node node <dependency/> to be parsed
+   * @return dependency container
+   */
+  private static PkgDep parseDependency(final XNode node) {
+    final Function<QNm, String> attribute = name -> {
+      final byte[] value = node.attribute(name);
+      return value == null ? null : string(value);
+    };
+
+    final PkgDep dep = new PkgDep(attribute.apply(Q_PACKAGE));
+    dep.processor = attribute.apply(Q_PROCESSOR);
+    dep.versions = attribute.apply(Q_VERSIONS);
+    dep.semver = attribute.apply(Q_SEMVER);
+    dep.semverMin = attribute.apply(Q_SEMVER_MIN);
+    dep.semverMax = attribute.apply(Q_SEMVER_MAX);
+    return dep;
+  }
+
+  /**
+   * Parses <xquery/>.
+   * @param node xquery component
+   * @return component container
+   * @throws QueryException query exception
+   */
+  private PkgComponent parseComp(final XNode node) throws QueryException {
+    final PkgComponent comp = new PkgComponent();
+    for(final GNode child : XMLAccess.children(node)) {
+      final QNm name = child.qname();
+      if(eqNS(A_NAMESPACE, name)) comp.uri = string(child.string());
+      else if(eqNS(A_FILE, name)) comp.file = string(child.string());
+      else throw REPO_DESCRIPTOR_X.get(info, Util.info(WHICHELEM, name));
+    }
+
+    // check mandatory children
+    if(comp.uri == null) throw REPO_DESCRIPTOR_X.get(info, Util.info(MISSCOMP, A_NAMESPACE));
+    if(comp.file == null) throw REPO_DESCRIPTOR_X.get(info, Util.info(MISSCOMP, A_FILE));
+    return comp;
+  }
+
+  /**
+   * Checks if the specified name equals the qname and if it uses the packaging
+   * namespace.
+   * @param cmp input
+   * @param name name to be compared
+   * @return result of check
+   */
+  private static boolean eqNS(final byte[] cmp, final QNm name) {
+    return name.eq(new QNm(cmp, QueryText.PKG_URI));
+  }
+}

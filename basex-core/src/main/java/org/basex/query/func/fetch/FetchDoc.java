@@ -1,0 +1,44 @@
+package org.basex.query.func.fetch;
+
+import static org.basex.query.QueryError.*;
+
+import java.io.*;
+
+import org.basex.build.*;
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.up.primitives.*;
+import org.basex.query.value.*;
+import org.basex.query.value.node.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class FetchDoc extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return fetch(toIO(arg(0), qc), qc);
+  }
+
+  /**
+   * Parses the input and creates an XML document.
+   * @param source source
+   * @param qc query context
+   * @return node
+   * @throws QueryException query exception
+   */
+  protected DBNode fetch(final IO source, final QueryContext qc) throws QueryException {
+    final DBOptions dbopts = new DBOptions(toEmptyMap(arg(1), qc), MainOptions.PARSING, qc, info);
+    final MainOptions mopts = dbopts.assignTo(new MainOptions());
+    try {
+      return new DBNode(Parser.singleParser(source, mopts, ""));
+    } catch(final IOException ex) {
+      throw FETCH_OPEN_X.get(info, ex);
+    }
+  }
+}

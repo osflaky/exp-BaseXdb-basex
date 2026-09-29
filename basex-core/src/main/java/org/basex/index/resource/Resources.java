@@ -1,0 +1,147 @@
+package org.basex.index.resource;
+
+import java.io.*;
+
+import org.basex.data.*;
+import org.basex.io.in.DataInput;
+import org.basex.io.out.DataOutput;
+import org.basex.util.hash.*;
+import org.basex.util.list.*;
+
+/**
+ * This index organizes the resources of a database.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Resources {
+  /** Binary resource types. */
+  public static final ResourceType[] BINARIES = { ResourceType.BINARY, ResourceType.VALUE };
+  /** Data reference. */
+  private final Data data;
+  /** Document references. */
+  private final Docs docs;
+
+  /**
+   * Constructor.
+   * @param data data reference
+   */
+  public Resources(final Data data) {
+    this.data = data;
+    docs = new Docs(data);
+  }
+
+  /**
+   * Reads information on database resources from disk.
+   * @param in input stream
+   * @throws IOException I/O exception
+   */
+  public synchronized void read(final DataInput in) throws IOException {
+    docs.read(in);
+  }
+
+  /**
+   * Writes information on database resources to disk.
+   * @param out output stream
+   * @throws IOException I/O exception
+   */
+  public void write(final DataOutput out) throws IOException {
+    docs.write(out);
+  }
+
+  /**
+   * Returns the {@code pre} values of all document nodes.
+   * @return document nodes (internal representation!)
+   */
+  public synchronized IntList docs() {
+    return docs.docs();
+  }
+
+  /**
+   * Adds entries to the index and updates subsequent nodes.
+   * @param pre insertion position
+   * @param clip data clip
+   */
+  public void insert(final int pre, final DataClip clip) {
+    docs.insert(pre, clip);
+  }
+
+  /**
+   * Deletes the specified entry and updates subsequent nodes.
+   * @param pre PRE value
+   * @param size number of deleted nodes
+   */
+  public void delete(final int pre, final int size) {
+    docs.delete(pre, size);
+  }
+
+  /**
+   * Updates the index after a document has been renamed.
+   * @param pre PRE value of updated document
+   * @param value new name
+   */
+  public void rename(final int pre, final byte[] value) {
+    docs.rename(pre, value);
+  }
+
+  /**
+   * Returns the PRE values of all document nodes that start with the specified path.
+   * @param path input path
+   * @return PRE values (internal representation!)
+   */
+  public synchronized IntList docs(final String path) {
+    return docs(path, false);
+  }
+
+  /**
+   * Returns the PRE values of all document nodes that start with the specified path.
+   * @param path input path
+   * @param dir directory view
+   * @return PRE values (internal representation!)
+   */
+  public synchronized IntList docs(final String path, final boolean dir) {
+    return docs.docs(path, dir);
+  }
+
+  /**
+   * Returns the PRE value of the document node that matches the specified path.
+   * @param path input path
+   * @return PRE value or {@code -1}
+   */
+  public int doc(final String path) {
+    return docs.doc(path);
+  }
+
+  /**
+   * Returns the database paths to all file resources that start with the specified path.
+   * @param path input path
+   * @param type resource type
+   * @return paths
+   */
+  public synchronized StringList paths(final String path, final ResourceType type) {
+    return Binaries.paths(data, path, type);
+  }
+
+  /**
+   * Determines whether the given path is the path to a directory.
+   * @param path given path
+   * @return result of check
+   */
+  public synchronized boolean isDir(final String path) {
+    return docs.isDir(path) || Binaries.isDir(data, path, ResourceType.BINARY) ||
+        Binaries.isDir(data, path, ResourceType.VALUE);
+  }
+
+  /**
+   * Returns the child resources for the given path.
+   * @param path path
+   * @param dir returns directories
+   * @return paths with resource types
+   */
+  public synchronized TokenObjectMap<ResourceType> children(final String path, final boolean dir) {
+    final TokenObjectMap<ResourceType> map = new TokenObjectMap<>();
+    docs.children(path, dir, map);
+    Binaries.children(data, path, dir, map);
+    return map;
+  }
+}

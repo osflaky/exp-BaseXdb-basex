@@ -1,0 +1,74 @@
+package org.basex.query.util.index;
+
+import java.util.*;
+
+import org.basex.index.path.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.path.*;
+
+/**
+ * Index predicate: context expression.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+class IndexContext extends IndexPred {
+  /**
+   * Constructor.
+   * @param info index info
+   */
+  IndexContext(final IndexInfo info) {
+    super(info);
+  }
+
+  /**
+   * Returns the last step pointing to the requested nodes. Examples:
+   * <ul>
+   *   <li>{@code /xml/a[. = 'A']}        → {@code a}</li>
+   *   <li>{@code /xml/a/text()[. = 'A']} → {@code text()}</li>
+   * </ul>
+   * @return parent step
+   */
+  @Override
+  Step step() {
+    return info.step;
+  }
+
+  /**
+   * Returns the local name and namespace URI of the last name test. Examples:
+   * <ul>
+   *   <li> {@code //x[. = 'TEXT']}  → {@code x}</li>
+   *   <li> {@code //@x[. = 'TEXT']} → {@code x}</lI>
+   * </ul>
+   * @return parent step
+   */
+  @Override
+  Step qname() {
+    return info.step;
+  }
+
+  /**
+   * Returns no step, as the parent element is addressed by a preceding step of the path.
+   * @return {@code null}
+   */
+  @Override
+  Step dropText() {
+    return null;
+  }
+
+  @Override
+  Expr invert(final Expr root) throws QueryException {
+    final Step st = info.step;
+    if(info.text || !(st.test instanceof NameTest || st.test instanceof UnionTest)) return root;
+
+    // attribute index request: add attribute step
+    final Expr step = Step.self(info.cc, root, st.info(), st.test);
+    return Path.get(root.info(), root, step);
+  }
+
+  @Override
+  ArrayList<PathNode> nodes(final ArrayList<PathNode> nodes) {
+    return nodes;
+  }
+}

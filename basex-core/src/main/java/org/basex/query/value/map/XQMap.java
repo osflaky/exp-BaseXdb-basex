@@ -1,0 +1,613 @@
+package org.basex.query.value.map;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.core.*;
+import org.basex.data.*;
+import org.basex.io.out.DataOutput;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.hash.*;
+import org.basex.query.util.hash.ItemSet.*;
+import org.basex.query.value.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * The map item.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public abstract class XQMap extends XQStruct {
+  /**
+   * Single map entry. Instances of this record are returned by {@link #entries()}.
+   * @param key key
+   * @param value value
+   */
+  public record Entry(Item key, Value value) { }
+
+  /**
+   * Constructor.
+   * @param type map type
+   */
+  XQMap(final Type type) {
+    super(type);
+  }
+
+  /**
+   * The empty map.
+   * @return (unique) instance of an empty map
+   */
+  public static XQMap empty() {
+    return XQTrieMap.EMPTY;
+  }
+
+  /**
+   * Creates a map with a single entry.
+   * @param key key
+   * @param value value
+   * @return map
+   */
+  public static XQMap get(final Item key, final Value value) {
+    return new XQSingletonMap(key, value);
+  }
+
+  /**
+   * Creates a map with a known shape.
+   * @param shape shape
+   * @param values values, one per field
+   * @return map
+   */
+  public static XQMap get(final ShapeType shape, final Value... values) {
+    return values.length == 1 ? get(shape, values[0]) : new XQShapeValueMap(shape, values);
+  }
+
+  /**
+   * Creates a map with a shape that has a single field.
+   * @param shape shape with a single field
+   * @param value value of the field
+   * @return map
+   */
+  public static XQMap get(final ShapeType shape, final Value value) {
+    if(value instanceof final Itr itr && itr.type == BasicType.INTEGER) {
+      return new XQShapeIntMap(shape, itr.itr());
+    }
+    if(value instanceof final Dbl dbl) return new XQShapeDblMap(shape, dbl.dbl());
+    return new XQShapeSingletonMap(shape, value);
+  }
+
+  /**
+   * Returns a representation of this map that is based on a hash array mapped trie.
+   * @return map
+   * @throws QueryException query exception
+   */
+  XQMap trie() throws QueryException {
+    XQMap map = empty();
+    final long is = structSize();
+    for(int i = 0; i < is; i++) map = map.put(keyAt(i), valueAt(i));
+    return map;
+  }
+
+  @Override
+  public final void write(final DataOutput out) throws IOException, QueryException {
+    out.writeNum((int) structSize());
+    for(final Entry entry : entries()) {
+      Stores.write(out, entry.key());
+      Stores.write(out, entry.value());
+    }
+  }
+
+  @Override
+  public final void refineType(final Expr expr) {
+    if(this != empty()) super.refineType(expr);
+  }
+
+  /**
+   * Adopts the supplied type if it is more specific than the current one.
+   * @param refined refined type
+   */
+  final void refineType(final Type refined) {
+    if(this != empty() && refined.instanceOf(type)) type = refined;
+  }
+
+  @Override
+  public final void cache(final boolean lazy, final InputInfo ii) throws QueryException {
+    forEach((key, value) -> {
+      key.cache(lazy, ii);
+      value.cache(lazy, ii);
+    });
+  }
+
+  @Override
+  public final Value invokeInternal(final QueryContext qc, final InputInfo ii, final Value[] args)
+      throws QueryException {
+    final Item k = key(args[0], qc, ii);
+    if(type instanceof final ShapeType sh && sh.strict() &&
+        (!k.type.isStringOrUntyped() || !sh.fields().contains(k.string(null)))) {
+      throw RECORDFIELD_X_X.get(ii, this, k);
+    }
+    return get(k);
+  }
+
+  /**
+   * Gets a value from this map.
+   * @param key key to look for
+   * @return value if found, empty sequence otherwise
+   * @throws QueryException query exception
+   */
+  public final Value get(final Item key) throws QueryException {
+    final Value value = getOrNull(key);
+    return value != null ? value : Empty.VALUE;
+  }
+
+  /**
+   * Gets a value from this map.
+   * @param key key to look for
+   * @return value if found, {@code null} otherwise
+   * @throws QueryException query exception
+   */
+  public abstract Value getOrNull(Item key) throws QueryException;
+
+  /**
+   * Gets a value from this map.
+   * @param key atomic key to look for
+   * @return value if found, {@code null} otherwise
+   */
+  public final Value value(final Item key) {
+    try {
+      return getOrNull(key);
+    } catch(final QueryException ex) {
+      // the exception is only caused by atomizing the key
+      throw Util.notExpected(ex);
+    }
+  }
+
+  /**
+   * Returns an iterable instance for all entries of this map.
+   * @return iterable
+   */
+  public final Iterable<Entry> entries() {
+    return () -> new Iterator<>() {
+      private long i;
+
+      @Override
+      public boolean hasNext() {
+        return i < structSize();
+      }
+
+      @Override
+      public Entry next() {
+        final long c = i++;
+        return new Entry(keyAt(c), valueAt(c));
+      }
+    };
+  }
+
+  /**
+   * Puts a value with the specified key into this map.
+   * @param key key to insert
+   * @param value value to insert
+   * @return updated map if changed, {@code this} otherwise
+   * @throws QueryException query exception
+   */
+  public abstract XQMap put(Item key, Value value) throws QueryException;
+
+  /**
+   * Puts a value with the specified key into this map.
+   * @param index map index (starting with 0, must be valid)
+   * @param value value to insert
+   * @return updated map
+   * @throws QueryException query exception
+   */
+  public abstract XQMap putAt(int index, Value value) throws QueryException;
+
+  /**
+   * Removed a key from this map.
+   * @param key key to remove
+   * @return updated map if changed, {@code this} otherwise
+   * @throws QueryException query exception
+   */
+  public abstract XQMap remove(Item key) throws QueryException;
+
+  /**
+   * Applies a function on all entries.
+   * @param func function to apply on keys and values
+   * @throws QueryException query exception
+   */
+  public abstract void forEach(QueryBiConsumer<Item, Value> func) throws QueryException;
+
+  /**
+   * Tests all entries.
+   * @param func predicate function
+   * @return {@code true} if the check is successful for all entries
+   * @throws QueryException query exception
+   */
+  public abstract boolean test(QueryBiPredicate<Item, Value> func) throws QueryException;
+
+  /**
+   * Checks if the given key exists in the map.
+   * @param key key to look for
+   * @return result of check
+   * @throws QueryException query exception
+   */
+  public final boolean contains(final Item key) throws QueryException {
+    return getOrNull(key) != null;
+  }
+
+  @Override
+  public final Value atomValue(final QueryContext qc, final InputInfo ii) throws QueryException {
+    throw FIATOMIZE_X.get(ii, this);
+  }
+
+  @Override
+  public final Item atomItem(final QueryContext qc, final InputInfo ii) throws QueryException {
+    throw FIATOMIZE_X.get(ii, this);
+  }
+
+  @Override
+  public XQMap materialize(final Predicate<Data> test, final boolean funcs, final InputInfo ii,
+      final QueryContext qc) throws QueryException {
+
+    if(materialized(test, funcs, ii)) return this;
+
+    final MapBuilder mb = new MapBuilder(structSize());
+    forEach((key, value) -> {
+      qc.checkStop();
+      mb.put(key, value.materialize(test, funcs, ii, qc));
+    });
+    return mb.map();
+  }
+
+  @Override
+  public boolean materialized(final Predicate<Data> test, final boolean funcs, final InputInfo ii)
+      throws QueryException {
+    return funcType().declType.type.instanceOf(BasicType.ANY_ATOMIC_TYPE) ||
+        test((key, value) -> value.materialized(test, funcs, ii));
+  }
+
+  @Override
+  public final boolean instanceOf(final Type tp, final boolean coerce) {
+    if(type == tp) return true;
+    if(coerce && tp instanceof FuncType) return false;
+
+    try {
+      // a map matches a record type only if it is a record, i.e. if it carries a record annotation
+      if(tp instanceof final ShapeType sh) {
+        // coercion to a record type creates a record with the field order of that type
+        return type instanceof final RecordType rt &&
+            (coerce && !sh.any() ? rt.equals(sh) : rt.matches(sh));
+      }
+      if(type.instanceOf(tp) && !(coerce && ShapeType.rebuilds(type, tp))) return true;
+
+      final Type kt;
+      final SeqType vt;
+      if(tp instanceof final MapType mt) {
+        kt = mt.keyType() == BasicType.ANY_ATOMIC_TYPE ? null : mt.keyType();
+        vt = mt.valueType().eq(Types.ITEM_ZM) ? null : mt.valueType();
+      } else if(tp instanceof final FuncType ft) {
+        if(ft.declType.occ.min != 0 || ft.argTypes.length != 1 ||
+            !ft.argTypes[0].instanceOf(Types.ANY_ATOMIC_TYPE_O)) return false;
+        kt = null;
+        vt = ft.declType.eq(Types.ITEM_ZM) ? null : ft.declType;
+      } else {
+        return false;
+      }
+      return kt == null && vt == null || test((key, value) ->
+        (kt == null || kt.seqType().instance(key, coerce)) &&
+        (vt == null || vt.instance(value, coerce)));
+    } catch(final QueryException ex) {
+      throw Util.notExpected(ex);
+    }
+  }
+
+  /**
+   * Returns all keys of this map.
+   * @return keys
+   */
+  public abstract Value keys();
+
+  @Override
+  public final Iter itemsIter() {
+    final long size = structSize();
+    if(size == 0) return Empty.ITER;
+    if(size == 1) return valueAt(0).iter();
+
+    // single-item values?
+    if(((MapType) type).valueType().one()) {
+      return new BasicIter<>(size) {
+        @Override
+        public Item get(final long i) {
+          return (Item) valueAt((int) i);
+        }
+      };
+    }
+
+    final Iterator<Entry> entries = entries().iterator();
+    return new Iter() {
+      Iter iter = Empty.ITER;
+
+      @Override
+      public Item next() throws QueryException {
+        while(true) {
+          final Item item = iter.next();
+          if(item != null) return item;
+          if(!entries.hasNext()) return null;
+          iter = entries.next().value().iter();
+        }
+      }
+    };
+  }
+
+  /**
+   * Converts this map to the given map type.
+   * @param mt map type
+   * @param qc query context
+   * @param ii input info (can be {@code null})
+   * @param cc compilation context ({@code null} during runtime)
+   * @return coerced map
+   * @throws QueryException query exception
+   */
+  public final XQMap coerceTo(final MapType mt, final QueryContext qc, final InputInfo ii,
+      final CompileContext cc) throws QueryException {
+
+    final SeqType kt = mt.keyType().seqType(), vt = mt.valueType();
+    final MapBuilder mb = new MapBuilder(structSize());
+    forEach((key, value) -> {
+      qc.checkStop();
+      final Item k = (Item) kt.coerce(key, qc, ii, null, cc);
+      if(mb.contains(k)) throw typeError(this, mt, ii);
+      mb.put(k, vt.coerce(value, qc, ii, null, cc));
+    });
+    return mb.map();
+  }
+
+  /**
+   * Converts this map to the given record type.
+   * @param rt record type
+   * @param qc query context
+   * @param ii input info (can be {@code null})
+   * @param cc compilation context ({@code null} during runtime)
+   * @return coerced map
+   * @throws QueryException query exception
+   */
+  public final XQMap coerceTo(final RecordType rt, final QueryContext qc, final InputInfo ii,
+      final CompileContext cc) throws QueryException {
+
+    // record(*) is abstract: it is matched, but never constructed, by coercion
+    if(rt.any()) throw typeError(this, rt, ii);
+
+    final TokenObjectMap<ShapeField> fields = rt.fields();
+    // reject undeclared keys
+    for(final Item key : keys()) {
+      if(!key.type.isStringOrUntyped() || !fields.contains(key.string(null))) {
+        throw typeError(this, rt, ii);
+      }
+    }
+
+    // build record; a field that cannot be coerced is named in the error message
+    final int fs = fields.size();
+    final Value[] values = new Value[fs];
+    for(int f = 0; f < fs; f++) {
+      final byte[] key = fields.key(f + 1);
+      final SeqType ft = fields.value(f + 1).seqType();
+      final Value value = getOrNull(Str.get(key));
+      if(value == null && ft.occ.min > 0) throw typeError(this, rt, ii);
+      try {
+        values[f] = ft.coerce(value != null ? value : Empty.VALUE, qc, ii, null, cc);
+      } catch(final QueryException ex) {
+        if(ex.error() != INVTYPE_X) throw ex;
+        final String msg = ex.getLocalizedMessage();
+        throw INVTYPE_X.get(ex.info(), "Field " + Token.string(QueryString.toQuoted(key)) + " of " +
+          rt + ": " + (msg.endsWith(".") ? msg.substring(0, msg.length() - 1) : msg));
+      }
+    }
+    return get(rt, values);
+  }
+
+  /**
+   * Casts this map to the given map type (see {@link SeqType#cast}).
+   * @param mt map type
+   * @param error raise error (return {@code null} otherwise)
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return cast map, or {@code null} if casting failed and no error was raised
+   * @throws QueryException query exception
+   */
+  public final XQMap castTo(final MapType mt, final boolean error, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+    if(mt == Types.MAP) return this;
+    final SeqType kt = mt.keyType().seqType(), vt = mt.valueType();
+    final MapBuilder mb = new MapBuilder(structSize());
+    for(final Item key : keys()) {
+      qc.checkStop();
+      final Value ck = kt.convert(key, error, qc, info);
+      if(ck == null) return null;
+      final Item k = (Item) ck;
+      if(mb.contains(k)) {
+        if(error) throw MAPDUPLKEY_X.get(info, k);
+        return null;
+      }
+      final Value cv = vt.convert(get(key), error, qc, info);
+      if(cv == null) return null;
+      mb.put(k, cv);
+    }
+    return mb.map();
+  }
+
+  /**
+   * Casts this map to the given record type (see {@link SeqType#cast}). Undeclared entries are
+   * discarded; a missing field yields the empty sequence if that is a valid field value.
+   * @param rt record type
+   * @param error raise error (return {@code null} otherwise)
+   * @param qc query context
+   * @param info input info (can be {@code null})
+   * @return cast record, or {@code null} if casting failed and no error was raised
+   * @throws QueryException query exception
+   */
+  public final XQMap castTo(final RecordType rt, final boolean error, final QueryContext qc,
+      final InputInfo info) throws QueryException {
+    // record(*) is abstract: only records can be cast to it
+    if(rt.any()) return instanceOf(rt, false) ? this : null;
+    final TokenObjectMap<ShapeField> fields = rt.fields();
+    final int fs = fields.size();
+    final Value[] values = new Value[fs];
+    for(int f = 0; f < fs; f++) {
+      qc.checkStop();
+      final SeqType ft = fields.value(f + 1).seqType();
+      final Value value = getOrNull(Str.get(fields.key(f + 1)));
+      final Value cast;
+      if(value != null) {
+        cast = ft.convert(value, error, qc, info);
+      } else if(ft.instance(Empty.VALUE)) {
+        cast = Empty.VALUE;
+      } else {
+        if(error) throw INVCONVERT_X_X.get(info, Empty.VALUE, ft);
+        cast = null;
+      }
+      if(cast == null) return null;
+      values[f] = cast;
+    }
+    return get(rt, values);
+  }
+
+  @Override
+  public boolean refineType() {
+    Type refined = null;
+    for(final Entry entry : entries()) {
+      final Value value = entry.value();
+      final MapType mt = MapType.get(entry.key().type, value.seqType());
+      refined = refined == null ? mt : refined.union(mt);
+      if(refined.eq(type)) return true;
+    }
+    type = refined;
+    return true;
+  }
+
+  @Override
+  protected final XQMap rebuild(final QueryContext qc) throws QueryException {
+    final MapBuilder mb = new MapBuilder(structSize());
+    forEach((key, value) -> mb.put(key, value.shrink(qc)));
+    return mb.map(this);
+  }
+
+  @Override
+  public final HashMap<Object, Object> toJava() throws QueryException {
+    final HashMap<Object, Object> map = new HashMap<>((int) structSize());
+    forEach((key, value) -> map.put(key.toJava(), value.toJava()));
+    return map;
+  }
+
+  @Override
+  public final boolean deepEqual(final Item item, final DeepEqual deep) throws QueryException {
+    if(this == item) return true;
+    if(!(item instanceof final XQMap map)) return false;
+
+    // choose keys to compare
+    Iterable<Item> keys1 = null, keys2 = null;
+    if(deep != null && deep.options.get(DeepEqualOptions.IGNORE_EMPTY_ENTRIES)) {
+      final HashItemSet set1 = new HashItemSet(Mode.DEEP, deep.info);
+      forEach((k, v) -> { if(v != Empty.VALUE) set1.add(k); });
+      final HashItemSet set2 = new HashItemSet(Mode.DEEP, deep.info);
+      map.forEach((k, v) -> { if(v != Empty.VALUE) set2.add(k); });
+      if(set1.size() == set2.size()) {
+        keys1 = set1;
+        keys2 = set2;
+      }
+    } else if(structSize() == map.structSize()) {
+      keys1 = keys();
+      keys2 = map.keys();
+    }
+    if(keys1 == null) return false;
+
+    // deep = null: ordered comparison at compile time
+    final Boolean order = deep == null ? null : deep.options.get(DeepEqualOptions.MAP_ORDER);
+    final Iterator<Item> k2 = keys2.iterator();
+    for(final Item k1 : keys1) {
+      final Value v1 = getOrNull(k1), v2 = map.getOrNull(k1);
+      if(order == Boolean.FALSE) {
+        if(v2 == null || !deep.equal(v1, v2)) return false;
+      } else if(order == Boolean.TRUE) {
+        if(!(k2.hasNext() && k1.atomicEqual(k2.next()) && deep.equal(v1, v2))) return false;
+      } else {
+        if(!(k2.hasNext() && k1.equals(k2.next()) && v1.equals(v2))) return false;
+      }
+    }
+    return true;
+  }
+
+  @Override
+  public final void string(final boolean indent, final TokenBuilder tb, final int level,
+      final InputInfo ii) throws QueryException {
+
+    tb.add("{");
+    int c = 0;
+    final IntConsumer addWS = lvl -> {
+      for(int l = 0; l < lvl; l++) tb.add("  ");
+    };
+    for(final Entry entry : entries()) {
+      if(c++ > 0) tb.add(',');
+      if(indent) {
+        tb.add('\n');
+        addWS.accept(level + 1);
+      }
+      tb.add(entry.key()).add(':');
+      if(indent) tb.add(' ');
+      final Value value = entry.value();
+      final boolean par = value.size() != 1;
+      if(par) tb.add('(');
+      int cc = 0;
+      for(final Item item : value) {
+        if(cc++ > 0) {
+          tb.add(',');
+          if(indent) tb.add(' ');
+        }
+        if(item instanceof final XQMap map) map.string(indent, tb, level + 1, ii);
+        else if(item instanceof final XQArray array) array.string(indent, tb, level, ii);
+        else tb.add(item);
+      }
+      if(par) tb.add(')');
+    }
+    if(indent) {
+      tb.add('\n');
+      addWS.accept(level);
+    }
+    tb.add('}');
+  }
+
+  @Override
+  public final String description() {
+    return MAP;
+  }
+
+  @Override
+  public final void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this, ENTRIES, structSize()));
+  }
+
+  @Override
+  public final void toString(final QueryString qs) {
+    if(structSize() == 0) {
+      qs.token("{}");
+    } else {
+      final TokenBuilder tb = new TokenBuilder();
+      for(final Entry entry : entries()) {
+        if(!tb.moreInfo()) break;
+        final Value value = entry.value();
+        tb.add(entry.key).add(MAPASG).add(qs.error() ? value.toErrorString() : value).add(SEP);
+      }
+      qs.braced("{ ", tb.toString().replaceAll(", $", ""), " }");
+    }
+  }
+}

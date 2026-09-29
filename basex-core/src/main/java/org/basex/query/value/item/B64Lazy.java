@@ -1,0 +1,103 @@
+package org.basex.query.value.item;
+
+import java.io.*;
+import java.util.function.*;
+
+import org.basex.data.*;
+import org.basex.io.*;
+import org.basex.io.in.*;
+import org.basex.query.*;
+import org.basex.util.*;
+
+/**
+ * Lazy base64 item ({@code xs:base64Binary}).
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class B64Lazy extends B64 implements Lazy {
+  /** Caching flag. */
+  private boolean cache;
+  /** Contents, assigned on first access (can be {@code null}). */
+  private IO contents;
+
+  /**
+   * Returns the contents of the item; called on first access.
+   * @return input reference
+   * @throws IOException I/O exception
+   */
+  abstract IO source() throws IOException;
+
+  /**
+   * Opens a stream on the uncached value.
+   * @return buffered input
+   * @throws IOException I/O exception
+   */
+  private BufferInput open() throws IOException {
+    if(contents == null) {
+      contents = source();
+      if(contents instanceof IOContent) data = contents.read();
+    }
+    return BufferInput.get(contents);
+  }
+
+  /**
+   * Returns the query exception for a failed access.
+   * @param ex I/O exception
+   * @param ii input info (can be {@code null})
+   * @return query exception
+   */
+  abstract QueryException exception(IOException ex, InputInfo ii);
+
+  @Override
+  public final byte[] binary(final InputInfo info) throws QueryException {
+    cache(info);
+    return data;
+  }
+
+  @Override
+  public final BufferInput input(final InputInfo ii) throws QueryException {
+    if(cache) cache(ii);
+    if(isCached()) return super.input(ii);
+    try {
+      return open();
+    } catch(final IOException ex) {
+      throw exception(ex, ii);
+    }
+  }
+
+  @Override
+  public final void cache(final boolean lazy, final InputInfo ii) throws QueryException {
+    if(lazy) cache = true;
+    else cache(ii);
+  }
+
+  @Override
+  public final void cache(final InputInfo ii) throws QueryException {
+    if(isCached()) return;
+    try(BufferInput bi = open()) {
+      data = bi.content();
+    } catch(final IOException ex) {
+      throw exception(ex, ii);
+    }
+  }
+
+  @Override
+  public final boolean isCached() {
+    return data != null;
+  }
+
+  @Override
+  public final Item materialize(final Predicate<Data> test, final boolean funcs, final InputInfo ii,
+      final QueryContext qc) throws QueryException {
+    cache(ii);
+    return this;
+  }
+
+  @Override
+  public final boolean materialized(final Predicate<Data> test, final boolean funcs,
+      final InputInfo ii) throws QueryException {
+    cache(ii);
+    return true;
+  }
+}

@@ -1,0 +1,95 @@
+package org.basex.gui;
+
+import static org.basex.gui.GUIConstants.*;
+
+import javax.swing.*;
+
+import org.basex.gui.layout.*;
+import org.basex.gui.listener.*;
+
+/**
+ * This is the menu bar of the main window.
+ * The menu structure is defined in {@link GUIConstants#MENUBAR} and
+ * {@link GUIConstants#MENUITEMS}.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class GUIMenu extends JMenuBar {
+  /** Referenced menu items. */
+  private final JMenuItem[] items;
+  /** Reference to the main window. */
+  private final GUI gui;
+
+  /**
+   * Initializes the menu bar.
+   * @param gui reference to the main window
+   */
+  GUIMenu(final GUI gui) {
+    this.gui = gui;
+
+    // create menu for each top level menu entries
+    int c = 0;
+    for(final GUICommand[] cmds : MENUITEMS) c += cmds.length;
+    items = new JMenuItem[c];
+
+    c = 0;
+    // loop through all menu entries
+    final StringBuilder gmnem = new StringBuilder();
+    final int bl = MENUBAR.length;
+    for(int b = 0; b < bl; b++) {
+      final JMenu menu = new JMenu(MENUBAR[b]);
+      BaseXLayout.setMnemonic(menu, gmnem);
+      // the state of editor commands changes without triggering a refresh of the controls
+      menu.addMenuListener((MenuSelectedListener) e -> refresh());
+
+      // create menu point for each sub menu entry
+      final StringBuilder mnemCache = new StringBuilder();
+      for(final GUICommand cmd : MENUITEMS[b]) {
+        // add a separator
+        if(cmd == GUICommand.SEPARATOR) {
+          menu.addSeparator();
+        } else if(cmd != null) {
+          // add a menu entry
+          final JMenuItem item = newItem(cmd, gui, mnemCache);
+          item.setAccelerator(BaseXLayout.keyStroke(cmd));
+          items[c++] = item;
+          menu.add(item);
+        }
+      }
+      add(menu);
+    }
+  }
+
+  /**
+   * Creates a new menu item.
+   * @param cmd command
+   * @param gui gui reference
+   * @param mnem assigned mnemonics
+   * @return menu item
+   */
+  public static JMenuItem newItem(final GUICommand cmd, final GUI gui, final StringBuilder mnem) {
+    final String label = cmd.label();
+    final JMenuItem item = cmd.toggle() ? new JCheckBoxMenuItem(label) : new JMenuItem(label);
+    item.addActionListener(e -> {
+      if(!gui.updating) cmd.execute(gui);
+    });
+    BaseXLayout.setMnemonic(item, mnem);
+    return item;
+  }
+
+  /**
+   * Refreshes the menu items.
+   */
+  void refresh() {
+    int c = 0;
+    for(final GUICommand[] cmds : MENUITEMS) {
+      for(final GUICommand cmd : cmds) {
+        if(cmd != GUICommand.SEPARATOR && cmd != null) {
+          items[c].setEnabled(cmd.enabled(gui));
+          items[c++].setSelected(cmd.selected(gui));
+        }
+      }
+    }
+  }
+}

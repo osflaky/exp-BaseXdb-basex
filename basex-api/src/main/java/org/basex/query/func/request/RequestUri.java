@@ -1,0 +1,18 @@
+package org.basex.query.func.request;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class RequestUri extends ApiFunc {
+  @Override
+  public Uri value(final QueryContext qc) throws QueryException {
+    return Uri.get(state(qc).url());
+  }
+}

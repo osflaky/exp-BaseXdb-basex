@@ -1,0 +1,482 @@
+package org.basex.query.util.pkg;
+
+import static org.basex.core.Text.*;
+import static org.basex.query.QueryError.*;
+import static org.basex.query.util.pkg.PkgText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.jar.*;
+import java.util.regex.*;
+
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.io.in.*;
+import org.basex.query.*;
+import org.basex.query.value.node.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+
+/**
+ * Repository manager.
+ *
+ * @author BaseX Team, BSD License
+ * @author Rositsa Shadura
+ */
+public final class RepoManager {
+  /** Main-class pattern. */
+  private static final Pattern MAIN_CLASS = Pattern.compile("^Main-Class: *(.+?) *$");
+  /** Context. */
+  private final Context context;
+  /** Input info (can be {@code null}). */
+  private final InputInfo info;
+
+  /**
+   * Constructor.
+   * @param context database context
+   */
+  public RepoManager(final Context context) {
+    this(context, null);
+  }
+
+  /**
+   * Constructor.
+   * @param context database context
+   * @param info input info (can be {@code null})
+   */
+  public RepoManager(final Context context, final InputInfo info) {
+    this.context = context;
+    this.info = info;
+  }
+
+  /**
+   * Installs a package.
+   * @param source source
+   * @return {@code true} if existing package was replaced
+   * @throws QueryException query exception
+   */
+  public boolean install(final String source) throws QueryException {
+    // check if package exists, and cache contents
+    final IO io = IO.get(source);
+    final byte[] content;
+    try {
+      content = io.read();
+    } catch(final IOException ex) {
+      throw REPO_NOTFOUND_X.get(info, source).cause(ex);
+    }
+
+    try {
+      if(io.hasSuffix(IO.XQSUFFIXES)) return installXQ(content, source);
+      if(io.hasSuffix(IO.JARSUFFIX)) return installJAR(content, source);
+      final byte[] desc = new RepoArchive(content).entry(WEBDESCRIPTOR);
+      return desc != null ? installWeb(content, io.name(), webPkg(desc, io.name())) :
+        installXAR(content);
+    } catch(final IOException ex) {
+      throw REPO_PARSE_X_X.get(info, io.name(), ex);
+    }
+  }
+
+  /**
+   * Returns all installed packages in a table.
+   * @return table
+   */
+  public Table table() {
+    final Table table = new Table();
+    table.description = PACKAGES_X;
+    table.header.add(NAME);
+    table.header.add(VERSINFO);
+    table.header.add(TYPE);
+    table.header.add(PATH);
+    for(final Pkg pkg : packages()) {
+      final TokenList tl = new TokenList();
+      tl.add(pkg.name());
+      tl.add(pkg.version());
+      tl.add(pkg.type().toString());
+      tl.add(path(pkg).path());
+      table.contents.add(tl);
+    }
+    return table;
+  }
+
+  /**
+   * Returns a list of all package IDs.
+   * @return packages
+   */
+  public StringList ids() {
+    final StringList sl = new StringList();
+    for(final Pkg pkg : packages()) sl.add(pkg.id());
+    return sl;
+  }
+
+  /**
+   * Removes a package from the repository.
+   * @param name name or ID of the package
+   * @throws QueryException query exception
+   */
+  public void delete(final String name) throws QueryException {
+    // find registered packages to be deleted
+    boolean deleted = false;
+    final EXPathRepo repo = context.repo;
+    for(final Pkg pkg : packages()) {
+      final String pkgPath = pkg.path();
+      // packages are addressed by name, ID, or their relative or absolute path
+      if(pkg.name().equals(name) || pkg.id().equals(name) || pkgPath.equals(name) ||
+          path(pkg).path().equals(name)) {
+
+        // web applications are single archives, located in the RESTXQ directory
+        if(pkg.type() == PkgType.WEB) {
+          if(!path(pkg).delete()) throw REPO_DELETE_X.get(info, pkgPath);
+          deleted = true;
+          continue;
+        }
+
+        final boolean isExpath = pkg.type() == PkgType.EXPATH;
+        ClassLoaderCache.invalidate(isExpath
+            ? ModuleLoader.pkgUrls(repo.path(pkgPath), pkg.modDir(repo.path(pkgPath)), info)
+            : ModuleLoader.jarUrls(context, Strings.uriToClasspath(name)));
+
+        if(isExpath) {
+          // check if package to be deleted participates in a dependency
+          final String dep = dependency(pkg);
+          if(dep != null) throw REPO_DELETE_X_X.get(info, dep, name);
+          // delete files in main-memory repository
+          repo.delete(pkg);
+        }
+
+        final IOFile pkgFile = repo.path(pkgPath);
+
+        // delete directory with extracted jars
+        final String className = Strings.uriToClasspath(pkg.name().replaceAll("^.*\\.", ""));
+        final IOFile extDir = pkgFile.parent().resolve('.' + className);
+        if(!extDir.delete()) throw REPO_DELETE_X.get(info, extDir);
+
+        if(pkg.type() == PkgType.COMBINED) {
+          // delete associated JAR file
+          final IOFile jarFile = pkgFile.parent().resolve(className + IO.JARSUFFIX);
+          if(!jarFile.delete()) throw REPO_DELETE_X.get(info, pkgPath);
+        }
+
+        // delete package directory or file
+        if(!pkgFile.delete()) throw REPO_DELETE_X.get(info, pkgPath);
+
+        deleted = true;
+      }
+    }
+    if(!deleted) throw REPO_NOTFOUND_X.get(info, name);
+  }
+
+  /**
+   * Returns a sorted list of all currently available packages.
+   * @return packages
+   */
+  public ArrayList<Pkg> packages() {
+    final TreeMap<String, Pkg> map = new TreeMap<>();
+    final EXPathRepo repo = context.repo.reset();
+    final HashSet<String> paths = new HashSet<>();
+    for(final Pkg pkg : repo.pkgDict().values()) {
+      add(pkg, map);
+      paths.add(pkg.path());
+    }
+    // ignore files and directories starting with dot (#1122)
+    for(final IOFile child : repo.path().children(IOFile.NO_HIDDEN)) {
+      final String name = child.name();
+      if(!child.isDir()) {
+        add(name.replaceAll("\\..*", "").replace('/', '.'), name, map);
+      } else if(!paths.contains(name)) {
+        for(final String path : child.descendants(IOFile.NO_HIDDEN)) {
+          add(name + '.' + path.replaceAll("\\..*", "").replace('/', '.'), name + '/' + path, map);
+        }
+      }
+    }
+    // add web applications: archives in the RESTXQ directory with a web descriptor
+    final IOFile restxq = context.soptions.restxqPath();
+    if(restxq.exists()) {
+      for(final String path : restxq.descendants(IOFile.NO_HIDDEN)) {
+        final IOFile file = new IOFile(restxq, path);
+        final Pkg pkg = file.isArchive() ? webPkg(file) : null;
+        if(pkg != null) add(pkg.path(path, PkgType.WEB), map);
+      }
+    }
+
+    // detect combined modules where names have different case
+    for(final Pkg xqm : new ArrayList<>(map.values())) {
+      if(xqm.type == PkgType.XQUERY) {
+        final String jarName = Strings.uriToClasspath(xqm.name);
+        final Pkg jar = map.get(jarName);
+        if(jar != null && xqm.merge(jar).type == PkgType.COMBINED) map.remove(jarName);
+      }
+    }
+    return new ArrayList<>(map.values());
+  }
+
+  // PRIVATE METHODS ==============================================================================
+
+  /**
+   * Adds a package to the specified map.
+   * @param name package name
+   * @param path path to the package
+   * @param map map
+   */
+  private static void add(final String name, final String path, final TreeMap<String, Pkg> map) {
+    add(new Pkg(name).path(path), map);
+  }
+
+  /**
+   * Adds a package to the specified map.
+   * @param pkg package
+   * @param map map
+   */
+  private static void add(final Pkg pkg, final TreeMap<String, Pkg> map) {
+    map.compute(pkg.id(), (k, v) -> v == null ? pkg : v.merge(pkg));
+  }
+
+  /**
+   * Installs an XQuery module.
+   * @param content package content
+   * @param path package path
+   * @return {@code true} if existing package was replaced
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private boolean installXQ(final byte[] content, final String path)
+      throws QueryException, IOException {
+
+    // parse module to find namespace URI, write file to rewritten URI file path
+    try(QueryContext qc = new QueryContext(context)) {
+      final byte[] uri = qc.parseLibrary(string(content), path).sc.module.uri();
+      return write(xqTarget(string(uri)), content);
+    }
+  }
+
+  /**
+   * Installs a JAR package.
+   * @param content package content
+   * @param path package path
+   * @return {@code true} if existing package was replaced
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private boolean installJAR(final byte[] content, final String path)
+      throws QueryException, IOException {
+
+    final byte[] manifest = new RepoArchive(content).read(MANIFEST_MF);
+    try(NewlineInput nli = new NewlineInput(new IOContent(manifest))) {
+      for(String s; (s = nli.readLine()) != null;) {
+        // write file to rewritten file path, extract bundled files
+        final Matcher main = MAIN_CLASS.matcher(s);
+        if(main.find()) {
+          final String mainClass = main.group(1);
+          final IOFile target = jarTarget(mainClass);
+          final boolean exists = write(target, content);
+          extractJar(target, Strings.uri2path(mainClass));
+          return exists;
+        }
+      }
+    }
+    throw REPO_PARSE_X_X.get(info, path, MANIFEST);
+  }
+
+  /**
+   * Returns the package of a web application archive.
+   * @param file archive file
+   * @return package, or {@code null} if the archive contains no web descriptor
+   */
+  private static Pkg webPkg(final IOFile file) {
+    try {
+      final byte[] desc = RepoArchive.entry(file, WEBDESCRIPTOR);
+      return desc == null ? null : webPkg(desc, file.name());
+    } catch(final IOException ex) {
+      Util.debug(ex);
+      return null;
+    }
+  }
+
+  /**
+   * Returns the package of a web application descriptor. Name and version are adopted from the
+   * descriptor; the name defaults to the file name, truncated at the first dot.
+   * @param desc descriptor contents
+   * @param file name of the archive file
+   * @return package
+   * @throws IOException I/O exception
+   */
+  private static Pkg webPkg(final byte[] desc, final String file) throws IOException {
+    final XNode node = (XNode) XMLAccess.children(new DBNode(new IOContent(desc))).next();
+    final byte[] name = node == null ? null : node.attribute(Q_NAME);
+    final byte[] version = node == null ? null : node.attribute(Q_VERSION);
+
+    final Pkg pkg = new Pkg(name != null ? string(name) : file.replaceAll("\\..*", ""));
+    if(version != null) pkg.version = string(version);
+    return pkg;
+  }
+
+  /**
+   * Returns the absolute path to a package.
+   * @param pkg package
+   * @return file reference
+   */
+  public IOFile path(final Pkg pkg) {
+    final IOFile root = pkg.type() == PkgType.WEB ? context.soptions.restxqPath() : repo();
+    return new IOFile(root, pkg.path());
+  }
+
+  /**
+   * Returns the repository root.
+   * @return repository directory
+   */
+  private IOFile repo() {
+    return new IOFile(context.soptions.get(StaticOptions.REPOPATH));
+  }
+
+  /**
+   * Returns the target file of an XQuery module in the repository.
+   * @param uri module namespace URI
+   * @return target file
+   */
+  private IOFile xqTarget(final String uri) {
+    return new IOFile(repo(), Strings.uri2path(uri) + IO.XQMSUFFIX);
+  }
+
+  /**
+   * Returns the target file of a JAR package in the repository.
+   * @param mainClass main class from the JAR manifest
+   * @return target file
+   */
+  private IOFile jarTarget(final String mainClass) {
+    return new IOFile(repo(), Strings.uri2path(Strings.uriToClasspath(mainClass)) + IO.JARSUFFIX);
+  }
+
+  /**
+   * Writes content to a repository file, creating parent directories.
+   * @param target target file
+   * @param content package content
+   * @return {@code true} if an existing file was replaced
+   * @throws IOException I/O exception
+   */
+  private static boolean write(final IOFile target, final byte[] content) throws IOException {
+    final boolean exists = target.exists();
+    if(!target.parent().md()) throw new BaseXException("Could not create %.", target);
+    target.write(content);
+    return exists;
+  }
+
+  /**
+   * Extracts bundled libraries and the combined XQuery module from an installed JAR.
+   * @param target installed JAR file
+   * @param pkgPath rewritten package path (used to locate the embedded module)
+   * @throws IOException I/O exception
+   */
+  private void extractJar(final IOFile target, final String pkgPath) throws IOException {
+    final IOFile repo = repo();
+    final String pkgName = target.name().replaceAll(IO.JARSUFFIX + '$', "");
+    try(JarFile jarFile = new JarFile(target.file())) {
+      for(final JarEntry entry : Collections.list(jarFile.entries())) {
+        final String name = entry.getName();
+        IOFile trg = null;
+        if(name.matches("^lib/[^/]+\\.jar")) {
+          // extract JARs from a zipped lib/ directory to the repository
+          trg = new IOFile(target.parent().resolve('.' + pkgName), name.replaceAll("^.*?/", ""));
+        } else if(name.equals(pkgPath + IO.XQMSUFFIX)) {
+          // extract XQM file
+          trg = new IOFile(repo, name);
+        }
+        if(trg != null) {
+          if(!trg.parent().md()) throw new BaseXException("Could not create %.", trg);
+          trg.write(jarFile.getInputStream(entry));
+        }
+      }
+    }
+  }
+
+  /**
+   * Installs a web application archive in the RESTXQ directory. An application with the same
+   * name is replaced, even if it is stored under a different file name.
+   * @param content archive contents
+   * @param file name of the archive file
+   * @param pkg package of the archive
+   * @return {@code true} if an existing application was replaced
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private boolean installWeb(final byte[] content, final String file, final Pkg pkg)
+      throws QueryException, IOException {
+
+    boolean exists = false;
+    for(final Pkg old : packages()) {
+      if(old.type() == PkgType.WEB && old.name().equals(pkg.name())) {
+        delete(path(old).path());
+        exists = true;
+      }
+    }
+    write(new IOFile(context.soptions.restxqPath(), file), content);
+    return exists;
+  }
+
+  /**
+   * Installs a XAR package.
+   * @param content package content
+   * @return {@code true} if existing package was replaced
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private boolean installXAR(final byte[] content) throws QueryException, IOException {
+    final RepoArchive repoArchive = new RepoArchive(content);
+    // parse and validate descriptor file
+    final IOContent dsc = new IOContent(repoArchive.read(DESCRIPTOR));
+    final Pkg pkg = new PkgParser(info).parse(dsc);
+
+    // remove existing package
+    final String id = pkg.id();
+    final EXPathRepo repo = context.repo;
+    final boolean exists = repo.pkgDict().get(id) != null;
+    if(exists) delete(id);
+    new PkgValidator(repo, info).check(pkg);
+
+    // choose unique directory, unzip files and register repository
+    final IOFile file = uniqueDir(id.replaceAll("[^\\w.-]+", "-"));
+    repoArchive.unzip(file);
+
+    // adds package to the repository after assigning its path
+    repo.add(pkg.path(file.name()));
+    return exists;
+  }
+
+  /**
+   * Returns a unique directory for the specified package.
+   * @param name name
+   * @return unique directory
+   */
+  private IOFile uniqueDir(final String name) {
+    String nm = name;
+    int c = 0;
+    while(true) {
+      final IOFile io = context.repo.path(nm);
+      if(!io.exists()) return io;
+      nm = name + '-' + ++c;
+    }
+  }
+
+  /**
+   * Checks if a package participates in a dependency.
+   * @param pkg package
+   * @return package (that depends on the current one) or {@code null}
+   * @throws QueryException query exception
+   */
+  private String dependency(final Pkg pkg) throws QueryException {
+    final String id = pkg.id();
+    final EXPathRepo repo = context.repo;
+    final HashMap<String, Pkg> dict = repo.pkgDict();
+    for(final Pkg pkgDep : dict.values()) {
+      if(!pkgDep.id().equals(id)) {
+        // check only packages different from the current one
+        final IOFile desc = new IOFile(repo.path(pkgDep.path()), DESCRIPTOR);
+        final String name = pkg.name();
+        for(final PkgDep dep : new PkgParser(info).parse(desc).dep) {
+          // check only package dependencies
+          if(name.equals(dep.name)) return pkgDep.name();
+        }
+      }
+    }
+    return null;
+  }
+}

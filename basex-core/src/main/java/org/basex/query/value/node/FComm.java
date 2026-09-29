@@ -1,0 +1,78 @@
+package org.basex.query.value.node;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+
+import java.util.function.*;
+
+import org.basex.data.*;
+import org.basex.query.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.w3c.dom.*;
+
+/**
+ * Comment node fragment.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FComm extends FNode {
+  /** Two dashes, marking the start/end of a comment. */
+  private static final byte[] DASHES = { '-', '-' };
+
+  /** String value. */
+  private final byte[] value;
+
+  /**
+   * Constructor.
+   * @param value text value
+   */
+  public FComm(final byte[] value) {
+    super(NodeType.COMMENT);
+    this.value = value;
+  }
+
+  /**
+   * Constructor for creating a comment from a DOM node.
+   * Originally provided by Erdal Karaca.
+   * @param comment DOM node
+   */
+  public FComm(final Comment comment) {
+    this(token(comment.getData()));
+  }
+
+  @Override
+  public byte[] string() {
+    return value;
+  }
+
+  @Override
+  public FComm materialize(final Predicate<Data> test, final boolean funcs, final InputInfo ii,
+      final QueryContext qc) {
+    return materialized(test, funcs, ii) ? this : new FComm(value);
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final FComm fcomm && Token.eq(value, fcomm.value) &&
+        super.equals(obj);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.concat("<!--", QueryString.toValue(value), "-->");
+  }
+
+  /**
+   * Checks the specified token for validity.
+   * @param str token to be checked
+   * @param info input info (can be {@code null})
+   * @return token
+   * @throws QueryException query exception
+   */
+  public static byte[] parse(final byte[] str, final InputInfo info) throws QueryException {
+    if(contains(str, DASHES) || endsWith(str, '-')) throw COMINVALID.get(info);
+    return str;
+  }
+}

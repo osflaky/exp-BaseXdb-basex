@@ -1,0 +1,200 @@
+package org.basex.core.cmd;
+
+import static org.basex.core.Text.*;
+
+import java.io.*;
+import java.util.*;
+
+import org.basex.core.*;
+import org.basex.core.users.*;
+import org.basex.data.*;
+import org.basex.index.*;
+import org.basex.index.stats.*;
+import org.basex.index.value.*;
+import org.basex.util.list.*;
+
+/**
+ * Evaluates the 'optimize' command and optimizes the data structures of
+ * the currently opened database. Indexes and statistics are refreshed,
+ * which is especially helpful after updates.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Optimize extends ACreate {
+  /** Current PRE value. */
+  private int pre;
+  /** Data size. */
+  private int size;
+
+  /**
+   * Default constructor.
+   */
+  public Optimize() {
+    super(Perm.WRITE, true);
+  }
+
+  @Override
+  protected boolean run() {
+    final Data data = context.data();
+    final MetaData meta = data.meta;
+    size = data.nodes();
+
+    return update(data, () -> {
+      // reassign autooptimize flag
+      final boolean autooptimize = options.get(MainOptions.AUTOOPTIMIZE);
+      if(autooptimize != data.meta.autooptimize) {
+        data.meta.autooptimize = autooptimize;
+        data.meta.dirty = true;
+      }
+      optimize(data, this);
+      return info(DB_OPTIMIZED_X, meta.name, jc().performance);
+    });
+  }
+
+  @Override
+  public double progressInfo() {
+    return (double) pre / size;
+  }
+
+  @Override
+  public boolean stoppable() {
+    return false;
+  }
+
+  @Override
+  public String detailedInfo() {
+    return CREATE_STATS_D;
+  }
+
+  /**
+   * Optimizes a database after updates.
+   * @param data data
+   * @throws IOException I/O exception
+   */
+  public static void finish(final Data data) throws IOException {
+    // do nothing if database has been closed
+    if(data.closed()) return;
+    // GH-676: optimize database and rebuild index structures if ID has turned negative
+    if(data.lastid < data.nodes() - 1) optimizeIds(data);
+    // GH-1035: auto-optimize database
+    if(data.meta.autooptimize) optimize(data, null);
+  }
+
+  /**
+   * Optimizes the structures of a database.
+   * @param data data
+   * @param cmd calling command instance (can be {@code null})
+   * @throws IOException I/O exception
+   */
+  public static void optimize(final Data data, final Optimize cmd) throws IOException {
+    optimize(data, EnumSet.noneOf(IndexType.class), cmd);
+  }
+
+  /**
+   * Optimizes the structures of a database.
+   * @param data data
+   * @param enforce indexes to be created or dropped, regardless of their current state
+   * @param cmd calling command instance (can be {@code null})
+   * @throws IOException I/O exception
+   */
+  public static void optimize(final Data data, final EnumSet<IndexType> enforce,
+      final Optimize cmd) throws IOException {
+
+    // write the ID-PRE map completely, so that older versions can read it
+    final MetaData meta = data.meta;
+    if(data.idmap != null) {
+      data.idmap.enforceWrite();
+      meta.dirty = true;
+    }
+
+    // initialize structural indexes
+    if(!meta.uptodate) {
+      data.paths().init();
+      data.elemNames.init();
+      data.attrNames.init();
+      meta.dirty = true;
+
+      final IntList pars = new IntList(), elemStack = new IntList();
+      int n = 0;
+
+      for(int pre = 0; pre < data.nodes(); pre++) {
+        final byte kind = (byte) data.kind(pre);
+        final int par = data.parent(pre, kind);
+        while(!pars.isEmpty() && pars.peek() > par) {
+          pars.pop();
+          elemStack.pop();
+        }
+
+        final int level = pars.size();
+        if(kind == Data.DOC) {
+          data.paths().index(0, Data.DOC, level);
+          pars.push(pre);
+          elemStack.push(0);
+          ++n;
+        } else if(kind == Data.ELEM) {
+          final int id = data.nameId(pre);
+          data.elemNames.store(data.elemNames.key(id));
+          data.paths().index(id, Data.ELEM, level);
+          // set leaf node information in index
+          if(level > 1) data.elemNames.stats(elemStack.peek()).setLeaf(false);
+          pars.push(pre);
+          elemStack.push(id);
+        } else if(kind == Data.ATTR) {
+          final int id = data.nameId(pre);
+          final byte[] value = data.text(pre, false);
+          data.attrNames.store(data.attrNames.key(id), value);
+          data.paths().index(id, Data.ATTR, level, value, meta);
+        } else {
+          final byte[] value = data.text(pre, true);
+          if(level > 1) {
+            final Stats stats = data.elemNames.stats(elemStack.peek());
+            if(kind == Data.TEXT) stats.add(value, meta);
+            else stats.setLeaf(false);
+          }
+          data.paths().index(0, kind, level, value, meta);
+        }
+        if(cmd != null) cmd.pre = pre;
+      }
+      data.paths().finish(meta, data.elemNames);
+      meta.ndocs = n;
+      meta.uptodate = true;
+      meta.counts = true;
+      meta.complete = true;
+    }
+
+    // create or drop value indexes whose flags have changed, optimize changed indexes
+    for(final IndexType type : IndexType.VALUE_INDEXES) {
+      final boolean create = meta.create(type);
+      if(enforce.contains(type) || create != meta.index(type)) {
+        if(create) CreateIndex.create(type, data, cmd);
+        else DropIndex.drop(type, data);
+      } else if(create && !meta.optimized.contains(type) &&
+          data.index(type) instanceof final ValueIndex index) {
+        index.optimize();
+        meta.optimized.add(type);
+        meta.dirty = true;
+      }
+    }
+  }
+
+  /**
+   * Creates new node IDs and recreates updatable index structures.
+   * @param data data
+   * @throws IOException I/O exception
+   */
+  private static void optimizeIds(final Data data) throws IOException {
+    final MetaData md = data.meta;
+    final int size = md.size;
+    for(int pre = 0; pre < size; pre++) data.id(pre, pre);
+    md.lastid = size - 1;
+    md.dirty = true;
+
+    if(data.meta.updindex) {
+      data.idmap = new IdPreMap(md.lastid);
+      for(final IndexType type : IndexType.VALUE_INDEXES) {
+        if(md.index(type)) CreateIndex.create(type, data, null);
+      }
+    }
+  }
+}

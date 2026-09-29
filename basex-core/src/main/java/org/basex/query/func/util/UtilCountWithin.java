@@ -1,0 +1,142 @@
+package org.basex.query.func.util;
+
+import static org.basex.query.func.Function.*;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class UtilCountWithin extends StandardFunc {
+  /** Nondeterministic input. */
+  private boolean ndt;
+
+  @Override
+  public Bln value(final QueryContext qc) throws QueryException {
+    return Bln.get(ebv(qc));
+  }
+
+  @Override
+  protected boolean ebv(final QueryContext qc) throws QueryException {
+    final long[] minMax = minMax(qc);
+    final long min = minMax[0], max = minMax[1];
+
+    // value-based input: result size is known
+    final Expr input = arg(0);
+    final Value value = input.eagerValue(qc);
+    if(value != null) {
+      final long size = value.size();
+      return size >= min && size <= max;
+    }
+
+    // iterative through the results if an iterator is nondeterministic or its size is unknown
+    final Iter iter = input.iter(qc);
+    long size = ndt ? -1 : iter.size();
+    if(size == -1) {
+      if(ndt) {
+        do ++size; while(qc.next(iter) != null);
+      } else if(max == Long.MAX_VALUE) {
+        // >= min: skip if minimum is reached
+        do ++size; while(size < min && qc.next(iter) != null);
+      } else {
+        // min - max: skip if maximum is reached
+        do ++size; while(size <= max && qc.next(iter) != null);
+      }
+    }
+    return size >= min && size <= max;
+  }
+
+  @Override
+  protected void simplifyArgs(final CompileContext cc) throws QueryException {
+    arg(0, arg -> arg.has(Flag.NDT) ? arg : arg.simplifyFor(Simplify.COUNT, cc));
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = arg(0);
+    ndt = input.has(Flag.NDT);
+
+    // skip rewrites for nondeterministic input, which must be fully evaluated for its side effects
+    final long[] minMax = minMaxValues(cc.qc);
+    if(minMax != null && !ndt) {
+      final long min = minMax[0], max = minMax[1];
+      if(min > max) return Bln.FALSE;
+      if(min <= 0 && max == Long.MAX_VALUE) return Bln.TRUE;
+
+      // evaluate static result size
+      final long size = input.size();
+      if(size >= 0) return Bln.get(size >= min && size <= max);
+
+      // util:count-within($seq, 0, 0) → empty($seq)
+      if(max == 0) return cc.function(EMPTY, info, input);
+      // util:count-within($seq, 1) → exists($seq)
+      if(min == 1 && max == Long.MAX_VALUE) return cc.function(EXISTS, info, input);
+
+      if(input.seqType().zeroOrOne()) {
+        if(min < 1 && max <= 1) return Bln.TRUE;
+        if(min >= 2) return Bln.FALSE;
+      }
+    }
+    return embed(cc, true);
+  }
+
+  @Override
+  public Expr mergeEbv(final Expr expr, final boolean or, final CompileContext cc)
+      throws QueryException {
+
+    final long[] mm = minMaxValues(cc.qc);
+    long[] cmm = null;
+    if(mm != null) {
+      if(_UTIL_COUNT_WITHIN.is(expr)) cmm = ((UtilCountWithin) expr).minMaxValues(cc.qc);
+      else if(EXISTS.is(expr))  cmm = new long[] { 1, Long.MAX_VALUE };
+      else if(EMPTY.is(expr))   cmm = new long[] { 0, 0 };
+    }
+    if(cmm != null && arg(0).equals(expr.arg(0)) && (!or || mm[1] >= cmm[0] && mm[0] <= cmm[1])) {
+      final long mn = or ? Math.min(mm[0], cmm[0]) : Math.max(mm[0], cmm[0]);
+      final long mx = or ? Math.max(mm[1], cmm[1]) : Math.min(mm[1], cmm[1]);
+      final ExprList args = new ExprList(3).add(arg(0)).add(Itr.get(mn));
+      if(mx < Long.MAX_VALUE) args.add(Itr.get(mx));
+      return cc.function(_UTIL_COUNT_WITHIN, info, args.finish());
+    }
+    return null;
+  }
+
+  /**
+   * Returns the minimum and maximum values.
+   * @param qc query context
+   * @return min/max values or {@code null}
+   * @throws QueryException query exception
+   */
+  private long[] minMaxValues(final QueryContext qc) throws QueryException {
+    return arg(1) instanceof Value && (!defined(2) || arg(2) instanceof Value) ?
+      minMax(qc) : null;
+  }
+
+  /**
+   * Returns the minimum and maximum values.
+   * @param qc query context
+   * @return min/max values
+   * @throws QueryException query exception
+   */
+  private long[] minMax(final QueryContext qc) throws QueryException {
+    final long min = toLong(arg(1), qc), max;
+    if(arg(1) == arg(2)) {
+      max = min;
+    } else {
+      final Long mx = toLongOrNull(arg(2), qc);
+      max = mx != null ? mx : Long.MAX_VALUE;
+    }
+    return new long[] { min, max };
+  }
+}

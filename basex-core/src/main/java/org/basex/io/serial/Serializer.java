@@ -1,0 +1,689 @@
+package org.basex.io.serial;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+import static org.basex.util.XMLToken.*;
+
+import java.io.*;
+import java.util.*;
+
+import org.basex.data.*;
+import org.basex.io.serial.csv.*;
+import org.basex.io.serial.json.*;
+import org.basex.query.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.ft.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.basex.util.list.*;
+
+/**
+ * This is an interface for serializing XQuery values.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class Serializer implements Closeable {
+  /** Version: 1.0. */
+  protected static final String V10 = "1.0";
+  /** Version: 1.1. */
+  protected static final String V11 = "1.1";
+  /** Version: 4.0. */
+  protected static final String V40 = "4.0";
+  /** Version: 4.01. */
+  protected static final String V401 = "4.01";
+  /** Version: 5.0. */
+  protected static final String V50 = "5.0";
+
+  /** Stack with names of opened elements. */
+  protected final Stack<QNm> opened = new Stack<>();
+  /** Current level. */
+  protected int level;
+  /** Current element name. */
+  protected QNm elem;
+  /** Most recent tag, in case it was a closing tag. */
+  protected QNm closed = QNm.EMPTY;
+  /** Indentation flag. */
+  protected boolean indent;
+  /** Canonical serialization flag. */
+  protected boolean canonical;
+
+  /** Stack with currently available namespaces. */
+  private final Atts nspaces = new Atts(2).add(XML, QueryText.XML_URI).add(EMPTY, EMPTY);
+  /** Stack with namespace size pointers. */
+  private final IntList nstack = new IntList();
+
+  /**
+   * Attribute/namespace.
+   * @param name attribute name or namespace prefix
+   * @param value attribute value (can be {@code null})
+   * @param uri URI (can be {@code null})
+   */
+  protected record Att(byte[] name, byte[] value, byte[] uri) { }
+  /** Attribute collector. */
+  protected final ArrayList<Att> attributes = new ArrayList<>();
+  /** Namespace collector. */
+  protected final ArrayList<Att> namespaces = new ArrayList<>();
+
+  /** Dynamic context. */
+  protected QueryContext qc;
+  /** Static context. */
+  protected StaticContext sc;
+  /** Indicates if at least one item was already serialized. */
+  protected boolean more;
+  /** Flag for skipping elements. */
+  protected int skip;
+  /** Indicates if an element is currently being opened. */
+  protected boolean opening;
+
+  /**
+   * Returns a default serializer.
+   * @param os output stream reference
+   * @return serializer
+   * @throws IOException I/O exception
+   */
+  public static Serializer get(final OutputStream os) throws IOException {
+    return get(os, null);
+  }
+
+  /**
+   * Returns a specific serializer.
+   * @param os output stream reference
+   * @param sopts serialization parameters (can be {@code null})
+   * @return serializer
+   * @throws IOException I/O exception
+   */
+  public static Serializer get(final OutputStream os, final SerializerOptions sopts)
+      throws IOException {
+
+    // choose serializer
+    final SerializerOptions so = sopts == null ? SerializerMode.DEFAULT.get() : sopts.finish();
+    return switch(so.get(SerializerOptions.METHOD)) {
+      case XHTML    -> new XHTMLSerializer(os, so);
+      case HTML     -> new HTMLSerializer(os, so);
+      case TEXT     -> new TextSerializer(os, so);
+      case CSV      -> CsvSerializer.get(os, so);
+      case JSON     -> JsonSerializer.get(os, so);
+      case XML      -> new XMLSerializer(os, so);
+      case ADAPTIVE -> new AdaptiveSerializer(os, so);
+      default       -> new BaseXSerializer(os, so);
+    };
+  }
+
+  // PUBLIC METHODS ===============================================================================
+
+  /**
+   * Serializes the specified item, which may be a node or an atomic item.
+   * @param item item to be serialized
+   * @throws IOException I/O exception
+   */
+  public void serialize(final Item item) throws IOException {
+    if(item instanceof final JNode node) {
+      jnode(node);
+    } else if(item instanceof final XNode node) {
+      node(node);
+    } else if(item instanceof final FItem fitem) {
+      function(fitem);
+    } else {
+      atomic(item);
+    }
+    more = true;
+  }
+
+  /**
+   * Closes the serializer.
+   * @throws IOException I/O exception
+   */
+  @Override
+  public void close() throws IOException { }
+
+  /**
+   * Tests if the serialization was interrupted.
+   * @return result of check
+   */
+  public boolean finished() {
+    return false;
+  }
+
+  /**
+   * Resets the serializer (indentation, etc.).
+   */
+  public void reset() { }
+
+  /**
+   * Assigns the dynamic context.
+   * @param qctx query context
+   * @return self-reference
+   */
+  public Serializer qc(final QueryContext qctx) {
+    qc = qctx;
+    return this;
+  }
+
+  /**
+   * Assigns the static context.
+   * @param sctx static context
+   * @return self-reference
+   */
+  public Serializer sc(final StaticContext sctx) {
+    sc = sctx;
+    return this;
+  }
+
+  // PROTECTED METHODS ============================================================================
+
+  /**
+   * Serializes the specified JNode.
+   * @param jnode JNode to be serialized
+   * @throws IOException I/O exception
+   */
+  protected void jnode(final JNode jnode) throws IOException {
+    for(final Item item : jnode.value) serialize(item);
+  }
+
+  /**
+   * Serializes the specified node.
+   * @param node node to be serialized
+   * @throws IOException I/O exception
+   */
+  protected void node(final XNode node) throws IOException {
+    if(node instanceof final DBNode dbnode) {
+      node(dbnode);
+    } else {
+      node((FNode) node);
+    }
+  }
+
+  /**
+   * Opens an element.
+   * @param name element name
+   * @throws IOException I/O exception
+   */
+  protected final void openElement(final QNm name) throws IOException {
+    prepare();
+    opening = true;
+    elem = name;
+    startOpen(name);
+    closed = QNm.EMPTY;
+    nstack.push(nspaces.size());
+  }
+
+  /**
+   * Closes an element.
+   * @throws IOException I/O exception
+   */
+  protected final void closeElement() throws IOException {
+    nspaces.size(nstack.pop());
+    if(opening) {
+      finishEmpty();
+      opening = false;
+      closed = elem;
+    } else {
+      elem = opened.peek();
+      level--;
+      finishClose();
+      closed = opened.pop();
+    }
+  }
+
+  /**
+   * Opens a document.
+   * @param name name
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void openDoc(final byte[] name) throws IOException { }
+
+  /**
+   * Closes a document.
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void closeDoc() throws IOException { }
+
+  /**
+   * Serializes a namespace.
+   * @param prefix prefix
+   * @param uri namespace URI
+   * @param standalone standalone flag
+   * @throws IOException I/O exception
+   */
+  protected void namespace(final byte[] prefix, final byte[] uri, final boolean standalone)
+      throws IOException {
+
+    final byte[] ancUri = nsUri(prefix);
+    if(ancUri == null || !eq(ancUri, uri)) {
+      if(canonical && uri.length > 0 && !Uri.get(uri).isAbsolute()) throw SERCANONURI_X.getIO(uri);
+      attribute(prefix.length == 0 ? XMLNS : concat(XMLNS_COLON, prefix), uri, standalone);
+      nspaces.add(prefix, uri);
+    }
+  }
+
+  /**
+   * Returns the namespace URI currently bound by the given prefix.
+   * @param prefix namespace prefix
+   * @return URI if found, {@code null} otherwise
+   */
+  protected final byte[] nsUri(final byte[] prefix) {
+    for(int n = nspaces.size() - 1; n >= 0; n--) {
+      if(eq(nspaces.name(n), prefix)) return nspaces.value(n);
+    }
+    return null;
+  }
+
+  /**
+   * Checks if an element should be skipped.
+   * @param node node to be serialized
+   * @return result of check
+   */
+  @SuppressWarnings("unused")
+  protected boolean skipElement(final XNode node) {
+    return false;
+  }
+
+  /**
+   * Serializes an attribute.
+   * @param name name
+   * @param value value
+   * @param standalone standalone flag
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void attribute(final byte[] name, final byte[] value, final boolean standalone)
+      throws IOException { }
+
+  /**
+   * Returns the element name (may be overridden to modify names).
+   * @param name original name
+   * @return modified name
+   */
+  protected QNm elementName(final QNm name) {
+    return name;
+  }
+
+  /**
+   * Starts an element.
+   * @param name element name
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void startOpen(final QNm name) throws IOException { }
+
+  /**
+   * Adjusts namespaces before serializing namespaces and attributes.
+   * @param name original element name
+   */
+  @SuppressWarnings("unused")
+  protected void adjustNamespaces(final QNm name) { }
+
+  /**
+   * Finishes an opening element node.
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void finishOpen() throws IOException { }
+
+  /**
+   * Closes an empty element.
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void finishEmpty() throws IOException { }
+
+  /**
+   * Closes an element.
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void finishClose() throws IOException { }
+
+  /**
+   * Serializes a text.
+   * @param value value
+   * @param ftp full-text positions, used for visualization highlighting (can be {@code null})
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void text(final byte[] value, final FTPos ftp) throws IOException { }
+
+  /**
+   * Serializes a comment.
+   * @param value value
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void comment(final byte[] value) throws IOException { }
+
+  /**
+   * Serializes a processing instruction.
+   * @param name name
+   * @param value value
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void pi(final byte[] name, final byte[] value) throws IOException { }
+
+  /**
+   * Serializes an atomic item.
+   * @param item item
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void atomic(final Item item) throws IOException { }
+
+  /**
+   * Serializes a function item.
+   * @param item item
+   * @throws IOException I/O exception
+   */
+  @SuppressWarnings("unused")
+  protected void function(final FItem item) throws IOException { }
+
+  // PRIVATE METHODS ==============================================================================
+
+  /**
+   * Adds an attribute to be serialized.
+   * @param name attribute name including prefix, if any
+   * @param value attribute value (can be null)
+   * @param uri namespace uri (can be {@code null})
+   */
+  private void addAttribute(final byte[] name, final byte[] value, final byte[] uri) {
+    attributes.add(new Att(name, value, uri != null ? uri : EMPTY));
+  }
+
+  /**
+   * Adds a namespace to be serialized.
+   * @param prefix prefix
+   * @param uri URI
+   */
+  protected void addNamespace(final byte[] prefix, final byte[] uri) {
+    namespaces.add(new Att(prefix, null, uri));
+  }
+
+  /**
+   * Emits attributes in canonical sorting order and clears the attributes.
+   * @throws IOException I/O exception
+   */
+  private void emitAttributes() throws IOException {
+    if(canonical) {
+      attributes.sort((a, b) -> {
+        final int d = compare(a.uri, b.uri);
+        return d != 0 ? d : compare(a.name, indexOf(a.name, ':') + 1, a.name.length,
+            b.name, indexOf(b.name, ':') + 1, b.name.length);
+      });
+    }
+    for(final Att att : attributes) attribute(att.name, att.value, false);
+    attributes.clear();
+  }
+
+  /**
+   * Emits attributes in canonical sorting order and clears the attributes.
+   * @throws IOException I/O exception
+   */
+  private void emitNamespaces() throws IOException {
+    if(canonical) {
+      namespaces.sort((a, b) -> compare(a.name, b.name));
+    }
+    for(final Att att : namespaces) namespace(att.name, att.uri, false);
+    namespaces.clear();
+  }
+
+  /**
+   * Serializes a node of the specified data reference.
+   * @param node database node
+   * @throws IOException I/O exception
+   */
+  private void node(final DBNode node) throws IOException {
+    final Data data = node.data();
+    int pre = node.pre(), kind = data.kind(pre);
+
+    // document node: output all children
+    final int size = pre + data.size(pre, kind);
+    if(kind == Data.DOC) {
+      openDoc(data.text(pre++, true));
+      int roots = 0;
+      while(pre < size && !finished()) {
+        node((XNode) new DBNode(data, pre));
+        final int k = data.kind(pre);
+        if(canonical) {
+          if(k == Data.ELEM && ++roots > 1) throw SERCANONROOTS_X.getIO(node);
+          indent = true;
+        }
+        pre += data.size(pre, k);
+      }
+      closeDoc();
+      return;
+    }
+
+    final FTPosData ftData = node instanceof final FTPosNode ft ? ft.ftpos : null;
+    final boolean nsExist = !data.nspaces.isEmpty();
+    final TokenSet nsSet = nsExist ? new TokenSet() : null;
+    final IntList parentStack = new IntList();
+    final BoolList indentStack = new BoolList();
+
+    // loop through all table entries
+    while(pre < size && !finished()) {
+      kind = data.kind(pre);
+      final int par = data.parent(pre, kind);
+
+      // close opened elements...
+      while(!parentStack.isEmpty() && parentStack.peek() >= par) {
+        closeElement();
+        indent = indentStack.pop();
+        parentStack.pop();
+      }
+
+      if(kind == Data.TEXT) {
+        prepareText(data.text(pre, true), ftData != null ? ftData.get(data, pre) : null);
+        pre++;
+      } else if(kind == Data.COMM) {
+        prepareComment(data.text(pre++, true));
+      } else if(kind == Data.PI) {
+        preparePi(data.name(pre, Data.PI), data.atom(pre++));
+      } else if(skip > 0 && skipElement(new DBNode(data, pre, kind))) {
+        // ignore specific elements
+        pre += data.size(pre, kind);
+      } else {
+        // element node:
+        final byte[] name = data.name(pre, kind);
+        byte[] nsPrefix = EMPTY, nsUri = null;
+        if(nsExist) {
+          nsPrefix = prefix(name);
+          nsUri = data.nspaces.uri(data.uriId(pre, kind));
+        }
+        // open element, serialize namespace declaration if it's new
+        final QNm originalName = new QNm(name, nsUri);
+        openElement(elementName(originalName));
+        if(nsUri == null) nsUri = EMPTY;
+        addNamespace(nsPrefix, nsUri);
+
+        // database contains namespaces: add declarations
+        if(nsExist) {
+          nsSet.add(nsUri);
+          int p = pre;
+          do {
+            final Atts ns = data.namespaces(p);
+            final int nl = ns.size();
+            for(int n = 0; n < nl; n++) {
+              nsPrefix = ns.name(n);
+              if(nsSet.add(nsPrefix)) addNamespace(nsPrefix, ns.value(n));
+            }
+            // check ancestors only on top level
+            if(level != 0) break;
+
+            p = data.parent(p, data.kind(p));
+          } while(p >= 0 && data.kind(p) == Data.ELEM);
+
+          // reset namespace cache
+          nsSet.clear();
+        }
+
+        // serialize attributes
+        indentStack.push(indent);
+        final int as = pre + data.attSize(pre, kind);
+        while(++pre != as) {
+          final byte[] n = data.name(pre, Data.ATTR), v = data.text(pre, false);
+          addAttribute(n, v, canonical ? data.nspaces.uri(data.uriId(pre, Data.ATTR)) : null);
+          if(eq(n, XML_SPACE) && indent) indent = !eq(v, PRESERVE);
+        }
+        adjustNamespaces(originalName);
+        emitNamespaces();
+        emitAttributes();
+        parentStack.push(par);
+      }
+    }
+
+    // process remaining elements...
+    while(!parentStack.isEmpty()) {
+      closeElement();
+      indent = indentStack.pop();
+      parentStack.pop();
+    }
+  }
+
+  /**
+   * Serializes a node fragment.
+   * @param node database node
+   * @throws IOException I/O exception
+   */
+  private void node(final FNode node) throws IOException {
+    final Kind kind = node.kind();
+    if(kind == Kind.COMMENT) {
+      prepareComment(node.string());
+    } else if(kind == Kind.TEXT) {
+      prepareText(node.string(), null);
+    } else if(kind == Kind.PROCESSING_INSTRUCTION) {
+      preparePi(node.name(), node.string());
+    } else if(kind == Kind.ATTRIBUTE) {
+      attribute(node.name(), node.string(), true);
+    } else if(kind == Kind.NAMESPACE) {
+      namespace(node.name(), node.string(), true);
+    } else if(kind == Kind.DOCUMENT) {
+      openDoc(node.baseURI());
+      int roots = 0;
+      for(final GNode nd : node.childIter()) {
+        node((XNode) nd);
+        if(canonical) {
+          if(nd.kind() == Kind.ELEMENT && ++roots > 1) throw SERCANONROOTS_X.getIO(node);
+          indent = true;
+        }
+      }
+      closeDoc();
+    } else if(skip == 0 || !skipElement(node)) {
+      // serialize elements (code will never be called for attributes)
+      final QNm originalName = node.qname();
+      final QNm name = elementName(originalName);
+      openElement(name);
+
+      // serialize declared namespaces
+      final Atts nsp = node.namespaces();
+      final int ps = nsp.size();
+      for(int p = 0; p < ps; p++) addNamespace(nsp.name(p), nsp.value(p));
+      // add new or updated namespace
+      addNamespace(name.prefix(), name.uri());
+
+      // serialize attributes
+      final boolean i = indent;
+      final BasicNodeIter iter = node.attributeIter();
+      for(GNode nd; (nd = iter.next()) != null;) {
+        final byte[] n = nd.name(), v = nd.string();
+        addAttribute(n, v, canonical ? nsUri(prefix(n)) : null);
+        if(eq(n, XML_SPACE) && indent) indent = !eq(v, PRESERVE);
+      }
+      adjustNamespaces(originalName);
+      emitNamespaces();
+      emitAttributes();
+
+      // serialize children (a single text child is emitted without materializing a node)
+      final byte[] text = node.textValue();
+      if(text != null) {
+        prepareText(text, null);
+      } else {
+        for(final GNode n : node.childIter()) node((XNode) n);
+      }
+      closeElement();
+      indent = i;
+    }
+  }
+
+  /**
+   * Serializes a comment.
+   * @param value value
+   * @throws IOException I/O exception
+   */
+  private void prepareComment(final byte[] value) throws IOException {
+    prepare();
+    comment(value);
+  }
+
+  /**
+   * Serializes a text.
+   * @param value text bytes
+   * @param ftp full-text positions, used for visualization highlighting
+   * @throws IOException I/O exception
+   */
+  private void prepareText(final byte[] value, final FTPos ftp) throws IOException {
+    prepare();
+    text(value, ftp);
+  }
+
+  /**
+   * Serializes a processing instruction.
+   * @param name name
+   * @param value value
+   * @throws IOException I/O exception
+   */
+  private void preparePi(final byte[] name, final byte[] value) throws IOException {
+    prepare();
+    pi(name, value);
+  }
+
+  /**
+   * Finishes an opening element node if necessary.
+   * @throws IOException I/O exception
+   */
+  private void prepare() throws IOException {
+    if(!opening) return;
+    opening = false;
+    finishOpen();
+    opened.push(elem);
+    level++;
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Serializes the specified value.
+   * @param value value
+   * @param quote quote strings
+   * @param xml serialize as XML string value
+   * @param chop chop large tokens
+   * @return value
+   */
+  public static byte[] value(final byte[] value, final boolean quote, final boolean xml,
+      final boolean chop) {
+    final TokenBuilder tb = new TokenBuilder();
+    if(quote) tb.add('"');
+
+    int c = 0;
+    for(final TokenParser tp = new TokenParser(value); tp.more(); c++) {
+      if(chop && c == 200) {
+        tb.add(QueryText.DOTS);
+        break;
+      }
+      final int cp = tp.next();
+      if(cp == '&') tb.add(E_AMP);
+      else if(cp == '\r') tb.add(E_CR);
+      else if(cp == '\n') tb.add(E_NL);
+      else if(xml && cp == '<') tb.add(E_LT);
+      else if(quote && cp == '"') tb.add('"').add('"');
+      else tb.add(cp);
+    }
+
+    if(quote) tb.add('"');
+    return tb.finish();
+  }
+}

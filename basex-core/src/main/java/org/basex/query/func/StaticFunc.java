@@ -1,0 +1,263 @@
+package org.basex.query.func;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.core.locks.*;
+import org.basex.query.*;
+import org.basex.query.ann.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.fn.*;
+import org.basex.query.scope.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.util.parse.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+
+/**
+ * A static user-defined function.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public final class StaticFunc extends StaticDecl implements XQFunction {
+  /** Parameters. */
+  public final Var[] params;
+  /** Default expressions (entries can be {@code null} references). */
+  final Expr[] defaults;
+  /** Minimum number of arguments. */
+  final int min;
+  /** Updating flag. */
+  final boolean updating;
+
+  /** Indicates if the function is currently being compiled. */
+  private boolean dontEnter;
+  /** Indicates if the query focus is accessed or modified. */
+  private boolean simple;
+
+  /**
+   * Function constructor.
+   * @param name function name
+   * @param params parameters
+   * @param expr function body (can be {@code null})
+   * @param anns annotations
+   * @param vs variable scope
+   * @param info input info (can be {@code null})
+   * @param doc xqdoc string
+   */
+  StaticFunc(final QNm name, final Params params, final Expr expr, final AnnList anns,
+      final VarScope vs, final InputInfo info, final String doc) {
+    super(name, params.seqType(), anns, vs, info, doc);
+
+    this.params = params.vars();
+    defaults = params.defaults();
+    this.expr = expr;
+    updating = anns.contains(Annotation.UPDATING);
+
+    int mn = defaults.length;
+    for(final Expr dflt : defaults) {
+      if(dflt != null) mn--;
+    }
+    min = mn;
+  }
+
+  @Override
+  public Expr compile(final CompileContext cc) {
+    if(!compiled && expr != null) {
+      compiled = true;
+      simple = !expr.has(Flag.CTX);
+
+      // dynamic compilation: refine parameter types to arguments types of function call
+      final SeqType[] callTypes = cc.dynamic ? cc.qc.functions.seqTypes(this) : null;
+      final int pl = params.length;
+      if(callTypes != null) {
+        boolean refined = false;
+        for(int p = 0; p < pl; p++) {
+          final Var param = params[p];
+          final SeqType cst = callTypes[p], pst = param.seqType();
+          if(!cst.eq(pst) && cst.instanceOf(pst, true)) {
+            param.declType = cst;
+            refined = true;
+          }
+        }
+        if(refined) cc.info(OPTREFINED_X, funcLabel());
+      }
+
+      // compile function body, handle return type
+      dontEnter = true;
+      cc.pushFocus(null, false);
+      cc.pushScope(vs);
+      try {
+        expr = expr.compile(cc);
+        if(declType != null) expr = new TypeCheck(info, expr, declType).optimize(cc);
+      } catch(final QueryException ex) {
+        expr = FnError.get(ex);
+      } finally {
+        cc.removeScope(this);
+        cc.removeFocus();
+      }
+      // convert all function calls in tail position to proper tail calls
+      expr.markTailCalls(cc);
+      dontEnter = false;
+
+      // dynamic compilation: remove redundant type declarations
+      if(callTypes != null) {
+        for(int p = 0; p < pl; p++) {
+          final Var param = params[p];
+          if(callTypes[p].instanceOf(param.seqType(), true)) param.declType = null;
+        }
+      }
+      if(!cc.dynamic) declType = null;
+    }
+    return null;
+  }
+
+  /**
+   * Returns the minimum arity.
+   * @return minimum arity
+   */
+  public int minArity() {
+    return min;
+  }
+
+  /**
+   * Returns the maximum arity.
+   */
+  @Override
+  public int arity() {
+    return params.length;
+  }
+
+  @Override
+  public QNm funcName() {
+    return name;
+  }
+
+  @Override
+  public QNm paramName(final int pos) {
+    return params[pos].name;
+  }
+
+  @Override
+  public FuncType funcType() {
+    // refined return type: the body type (via seqType), consistent with call-result typing
+    return FuncType.get(anns, declType, params).withRefinedType(seqType());
+  }
+
+  @Override
+  public int stackFrameSize() {
+    return vs.stackSize();
+  }
+
+  @Override
+  public AnnList annotations() {
+    return anns;
+  }
+
+  @Override
+  public Value invokeInternal(final QueryContext qc, final InputInfo ii, final Value[] args)
+      throws QueryException {
+    return qc.invoke(params, args, expr, simple, null);
+  }
+
+  /**
+   * Checks if the updating semantics are satisfied.
+   * @throws QueryException query exception
+   */
+  void checkUp() throws QueryException {
+    // skip already compiled functions
+    if(compiled) return;
+
+    final boolean exprUpdating = expr.has(Flag.UPD);
+    if(exprUpdating) expr.checkUp();
+    final InputInfo ii = expr.info(info);
+    if(updating) {
+      // updating function
+      if(!(exprUpdating || expr.vacuous())) throw UPEXPECTF.get(ii);
+      if(declType != null && !declType.zero()) throw UUPFUNCTYPE.get(ii);
+    } else if(exprUpdating) {
+      // uses updates, but is not declared as such
+      throw UPNOT_X.get(ii, description());
+    }
+  }
+
+  @Override
+  public boolean vacuousBody() {
+    return declType != null && declType.zero() && !has(Flag.UPD);
+  }
+
+  /**
+   * Indicates if an expression has one of the specified compiler properties.
+   * @param flags flags
+   * @return result of check
+   * @see Expr#has(Flag...)
+   */
+  boolean has(final Flag... flags) {
+    // function itself does not perform any updates
+    final Flag[] flgs = Flag.remove(flags, Flag.UPD);
+    return flgs.length != 0 && check(flgs);
+  }
+
+  /**
+   * Checks if the function body is updating.
+   * @return result of check
+   * @see Expr#has(Flag...)
+   */
+  public boolean updating() {
+    return updating;
+  }
+
+  @Override
+  public boolean visit(final ASTVisitor visitor) {
+    visitor.queryLock(() -> {
+      final ArrayList<String> list = new ArrayList<>(1);
+      for(final Ann ann : anns) {
+        if(ann.definition == Annotation._BASEX_LOCK) {
+          for(final Item arg : ann.value()) {
+            Collections.addAll(list, Locking.queryLocks(((Str) arg).string()));
+          }
+        }
+      }
+      return list;
+    });
+
+    return visitor.declared(params) && (expr == null || expr.accept(visitor));
+  }
+
+  /**
+   * Only called by {@link StaticFuncCall#compile(CompileContext)}.
+   * {@inheritDoc}
+   */
+  @Override
+  public Expr inline(final Expr[] exprs, final CompileContext cc) throws QueryException {
+    if(!cc.inlineable(anns, expr) || has(Flag.CTX) || dontEnter) return null;
+    cc.info(OPTINLINE_X, (Supplier<?>) this::funcLabel);
+    return cc.inline(params, exprs, null, expr, null, info);
+  }
+
+  @Override
+  public String description() {
+    return "function declaration";
+  }
+
+  @Override
+  public void toXml(final QueryPlan plan) {
+    plan.add(plan.create(this, NAME, name.string()), params, expr);
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.token(DECLARE).token(anns).token(FUNCTION).token(name.prefixId()).params(params);
+    if(declType != null) qs.token(AS).token(declType);
+    if(expr != null) qs.brace(expr);
+    else qs.token(EXTERNAL);
+    qs.token(';');
+  }
+}

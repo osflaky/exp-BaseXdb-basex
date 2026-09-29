@@ -1,0 +1,175 @@
+package org.basex.io.serial;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+import static org.basex.util.XMLToken.*;
+
+import java.io.*;
+import java.util.function.*;
+
+import org.basex.query.value.item.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * This class serializes items as HTML.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+final class HTMLSerializer extends XhtmlHtmlSerializer {
+  /** HTML: script elements. */
+  private static final TokenSet SCRIPTS = new TokenSet("script", "style");
+  /** HTML: boolean attributes. */
+  private static final TokenSet BOOLEAN = new TokenSet("area@nohref", "audio@autoplay",
+      "audio@controls", "audio@loop", "audio@muted", "button@disabled", "button@autofocus",
+      "button@formnovalidate", "details@open", "dialog@open", "dir@compact", "dl@compact",
+      "fieldset@disabled", "form@novalidate", "frame@noresize", "hr@noshade", "img@ismap",
+      "input@checked", "input@disabled", "input@multiple", "input@readonly", "input@required",
+      "input@autofocus", "input@formnovalidate", "iframe@seamless", "keygen@autofocus",
+      "keygen@disabled", "menu@compact", "object@declare", "object@typemustmatch", "ol@compact",
+      "ol@reversed", "optgroup@disabled", "option@selected", "option@disabled", "script@defer",
+      "script@async", "select@multiple", "select@disabled", "select@autofocus", "select@required",
+      "style@scoped", "td@nowrap", "textarea@disabled", "textarea@readonly", "textarea@autofocus",
+      "textarea@required", "th@nowrap", "track@default", "ul@compact", "video@autoplay",
+      "video@controls", "video@loop", "video@muted");
+
+  /**
+   * Constructor, specifying serialization options.
+   * @param os output stream
+   * @param sopts serialization parameters
+   * @throws IOException I/O exception
+   */
+  HTMLSerializer(final OutputStream os, final SerializerOptions sopts) throws IOException {
+    super(os, sopts, true, V50, V401, V40);
+  }
+
+  @Override
+  byte[] htmlName(final QNm name) {
+    final byte[] uri = name.uri();
+    return uri.length == 0 || html5 && eq(uri, XHTML_URI) ? localName(name) : null;
+  }
+
+  @Override
+  boolean cdataElement(final QNm name) {
+    return htmlName(name) == null;
+  }
+
+  @Override
+  protected void attribute(final byte[] name, final byte[] value, final boolean standalone)
+      throws IOException {
+
+    if(!standalone) delimitAttribute();
+    out.print(name);
+
+    byte[] val = value;
+    final byte[] key = attributeKey(name);
+    if(key != null) {
+      // don't append value for boolean attributes
+      if(BOOLEAN.contains(key) && eq(lc(name), lc(val))) return;
+      // escape URI attributes
+      if(escape && URIS.contains(key)) val = encodeUri(val, UriEncoder.ESCAPE);
+    }
+    val = normalize(val, form);
+
+    out.print(ATT1);
+    final int vl = val.length;
+    for(int v = 0; v < vl; v += cl(val, v)) {
+      final int ch = cp(val, v);
+      if(ch == '<' || ch == '&' && val[Math.min(v + 1, vl - 1)] == '{') {
+        out.print(ch);
+      } else if(ch == '"') {
+        out.print(E_QUOT);
+      } else if(ch == 0x9 || ch == 0xA) {
+        printHex(ch);
+      } else {
+        printChar(ch);
+      }
+    }
+    out.print(ATT2);
+  }
+
+  @Override
+  protected void comment(final byte[] value) throws IOException {
+    if(sep) indent();
+    out.print(COMM_O);
+    out.print(value);
+    out.print(COMM_C);
+  }
+
+  @Override
+  protected void pi(final byte[] name, final byte[] value) throws IOException {
+    if(html5) {
+      // output PIs as comments; properly escape multiple dashes (----)
+      final Function<byte[], String> esc = v -> string(v).replace("--", "- -").replace("--", "- -");
+      final TokenBuilder tb = new TokenBuilder().add('?').add(esc.apply(name));
+      if(value.length > 0) tb.add(' ').add(esc.apply(value));
+      comment(tb.add('?').finish());
+    } else {
+      if(sep) indent();
+      if(contains(value, '>')) throw SERPI.getIO();
+      out.print(PI_O);
+      out.print(name);
+      out.print(' ');
+      out.print(value);
+      out.print(ELEM_C);
+    }
+  }
+
+  @Override
+  protected void print(final int cp) throws IOException {
+    if(script > 0) out.print(cp);
+    else if(!html5 && (cp < 0x20 ? cp != 0x9 && cp != 0xA && cp != 0xD : cp > 0x7F && cp < 0xA0))
+      throw SERILL_X.getIO(Integer.toHexString(cp));
+    else if(cp == 0xA0) out.print(E_NBSP);
+    else super.print(cp);
+  }
+
+  @Override
+  protected void startOpen(final QNm name) throws IOException {
+    if(opened.isEmpty()) checkRoot(name);
+    if(sep) indent();
+    out.print(ELEM_O);
+    out.print(name.string());
+    indAttrLength = out.lineLength();
+    sep = indent;
+    checkHead();
+  }
+
+  @Override
+  protected void finishOpen() throws IOException {
+    super.finishOpen();
+    printCT(false);
+    if(SCRIPTS.contains(lc(elem.local()))) script++;
+  }
+
+  @Override
+  protected void finishEmpty() throws IOException {
+    final byte[] local = htmlName(elem);
+    if(local == null) {
+      super.finishEmpty();
+    } else {
+      if(printCT(true)) return;
+      out.print(ELEM_C);
+      // no end tag if the element is expected to be empty
+      if(rules.empties().contains(local)) return;
+      sep = false;
+      super.finishClose();
+    }
+  }
+
+  @Override
+  protected void finishClose() throws IOException {
+    super.finishClose();
+    if(SCRIPTS.contains(lc(elem.local()))) script--;
+  }
+
+  @Override
+  protected void doctype(final QNm name) throws IOException {
+    if(docpub != null || docsys != null) {
+      printDoctype(name.local(), docpub, docsys);
+    } else if(html5 && eq(htmlName(name), HTML)) {
+      printDoctype(uc(HTML), null, null);
+    }
+  }
+}

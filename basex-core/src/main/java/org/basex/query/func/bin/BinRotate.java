@@ -1,0 +1,38 @@
+package org.basex.query.func.bin;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class BinRotate extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Bin value = toBinOrNull(arg(0), qc);
+    final long by = toLong(arg(1), qc);
+    if(value == null) return Empty.VALUE;
+
+    final byte[] bytes = value.binary(info);
+    final int bl = bytes.length;
+    final long bits = bl * 8L;
+    // normalized left rotation amount
+    final long r = bits == 0 ? 0 : Math.floorMod(by, bits);
+    if(r == 0) return value instanceof final B64 b64 ? b64 : B64.get(bytes);
+
+    final byte[] tmp = new byte[bl];
+    for(long i = 0; i < bits; i++) {
+      final long s = (i + r) % bits;
+      if((bytes[(int) (s >>> 3)] & 0x80 >>> (s & 7)) != 0) {
+        tmp[(int) (i >>> 3)] |= 0x80 >>> (i & 7);
+      }
+    }
+    return B64.get(tmp);
+  }
+}

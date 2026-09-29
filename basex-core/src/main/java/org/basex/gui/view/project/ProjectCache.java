@@ -1,0 +1,118 @@
+package org.basex.gui.view.project;
+
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.io.*;
+import org.basex.util.*;
+import org.basex.util.list.*;
+
+/**
+ * Project files cache.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+final class ProjectCache implements Iterable<String> {
+  /** Cached file paths (all with forward-slashes). */
+  private final StringList cache = new StringList();
+  /** Show hidden files. */
+  private final boolean showHidden;
+  /** Maximum number of paths to be cached. */
+  private final int max;
+  /** Valid flag. */
+  private boolean valid;
+
+  /**
+   * Constructor.
+   * @param showHidden show hidden files
+   * @param max maximum number of paths to be cached
+   */
+  ProjectCache(final boolean showHidden, final int max) {
+    this.showHidden = showHidden;
+    this.max = max;
+  }
+
+  /**
+   * Indicates if the cache is valid.
+   * @return flag
+   */
+  boolean valid() {
+    return valid;
+  }
+
+  /**
+   * Returns the number of cached files.
+   * @return number of files
+   */
+  int size() {
+    return cache.size();
+  }
+
+  /**
+   * Recursively populates the cache.
+   * @param root root directory
+   * @param stop stop function
+   * @throws InterruptedException interrupted exception
+   */
+  void scan(final Path root, final Predicate<ProjectCache> stop) throws InterruptedException {
+    add(root, stop, new HashSet<>());
+    valid = true;
+  }
+
+  /**
+   * Recursively populates the cache.
+   * @param root root directory
+   * @param stop stop function
+   * @param links symbolic links
+   * @throws InterruptedException interrupted exception
+   */
+  private void add(final Path root, final Predicate<ProjectCache> stop,
+      final HashSet<String> links) throws InterruptedException {
+
+    // check if file cache was replaced or invalidated
+    if(stop.test(this)) throw new InterruptedException();
+
+    try {
+      // follow symbolic links only once
+      if(Files.isSymbolicLink(root) && !links.add(root.toRealPath().toString())) return;
+
+      final ArrayList<Path> dirs = new ArrayList<>();
+      final ArrayList<IOFile> files = new ArrayList<>();
+      try(DirectoryStream<Path> paths = Files.newDirectoryStream(root)) {
+        for(final Path path : paths) {
+          // skip hidden files, cancel parsing if directory contains .ignore file
+          final IOFile io = new IOFile(path);
+          if(io.ignore()) return;
+          if(showHidden || !io.isHidden()) {
+            if(Files.isDirectory(path)) {
+              dirs.add(path);
+            } else {
+              files.add(io);
+            }
+          }
+        }
+      }
+
+      // traverse directories
+      for(final Path dir : dirs) {
+        add(dir, stop, links);
+      }
+
+      // add files; stop traversal if maximum has been exceeded
+      for(final IOFile file : files) {
+        if(cache.size() == max) return;
+        cache.add(file.path());
+      }
+    } catch(final IOException ex) {
+      Util.debug(ex);
+    }
+  }
+
+  @Override
+  public Iterator<String> iterator() {
+    return cache.iterator();
+  }
+}

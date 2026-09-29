@@ -1,0 +1,44 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.build.json.*;
+import org.basex.build.json.JsonOptions.*;
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.func.json.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.options.Options.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnXmlToJson extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final XNode node = toNodeOrNull(arg(0), qc);
+    final JsonSerialOptions options = toOptions(arg(1), new JsonSerialOptions(), qc);
+    if(node == null) return Empty.VALUE;
+
+    options.set(JsonOptions.FORMAT, JsonFormat.W3_XML);
+    final Boolean indent = options.get(JsonSerialOptions.INDENT);
+    // no indentation specified: adopt module indentation
+    if(indent == null) options.set(JsonSerialOptions.INDENT,
+        qc.parameters().get(SerializerOptions.INDENT) == YesNo.YES);
+
+    return Str.get(serialize(node.iter(), JsonSerialize.options(options), INVALIDOPTION_X, qc));
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) {
+    return optFirst();
+  }
+}

@@ -1,0 +1,74 @@
+package org.basex.query.expr;
+
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Filter expression, caching all results.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class CachedFilter extends Filter {
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param root root expression
+   * @param preds predicate expressions
+   */
+  public CachedFilter(final InputInfo info, final Expr root, final Expr... preds) {
+    super(info, root, preds);
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    Value value = root.value(qc);
+    if(value.isEmpty()) return Empty.VALUE;
+
+    final QueryFocus focus = qc.focus, qf = new QueryFocus();
+    qc.focus = qf;
+    try {
+      for(final Expr expr : exprs) {
+        value = eval(value, expr, qc, qf);
+        if(value.isEmpty()) break;
+      }
+      return value;
+    } finally {
+      qc.focus = focus;
+    }
+  }
+
+  /**
+   * Filters a value by testing each of its items against a predicate.
+   * @param value items to filter
+   * @param expr predicate expression
+   * @param qc query context
+   * @param qf query focus
+   * @return filtered value
+   * @throws QueryException query exception
+   */
+  final Value eval(final Value value, final Expr expr, final QueryContext qc, final QueryFocus qf)
+      throws QueryException {
+    final long vs = value.size();
+    qf.size = vs;
+    final ValueBuilder vb = new ValueBuilder(qc);
+    for(int p = 1; p <= vs; p++) {
+      qc.checkStop();
+      final Item item = value.itemAt(p - 1);
+      qf.value = item;
+      qf.pos = p;
+      if(expr.predicate(qc, info, p)) vb.add(item);
+    }
+    return vb.value();
+  }
+
+  @Override
+  public Filter copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new CachedFilter(info, root.copy(cc, vm), copyAll(cc, vm, exprs)));
+  }
+}

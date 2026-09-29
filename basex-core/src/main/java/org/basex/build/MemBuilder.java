@@ -1,0 +1,167 @@
+package org.basex.build;
+
+import java.io.*;
+
+import org.basex.core.*;
+import org.basex.data.*;
+import org.basex.io.*;
+import org.basex.util.*;
+
+/**
+ * This class creates a database instance in main memory.
+ * The storage layout is described in the {@link Data} class.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class MemBuilder extends Builder {
+  /** Data reference. */
+  private MemData data;
+  /** Debug counter. */
+  private int c;
+
+  /**
+   * Constructor.
+   * @param parser parser
+   */
+  public MemBuilder(final Parser parser) {
+    this("", parser);
+  }
+
+  /**
+   * Constructor.
+   * @param name name of database
+   * @param parser parser
+   */
+  public MemBuilder(final String name, final Parser parser) {
+    super(name, parser);
+  }
+
+  /**
+   * Builds a main memory database instance.
+   * @param input input
+   * @return data database instance
+   * @throws IOException I/O exception
+   */
+  public static MemData build(final IO input) throws IOException {
+    return build(Parser.xmlParser(input));
+  }
+
+  /**
+   * Builds a main memory database instance.
+   * @param parser parser
+   * @return data database instance
+   * @throws IOException I/O exception
+   */
+  public static MemData build(final Parser parser) throws IOException {
+    return build(parser.source.dbName(), parser);
+  }
+
+  /**
+   * Builds a main memory database instance with the specified name.
+   * @param name name of database
+   * @param parser parser
+   * @return data database instance
+   * @throws IOException I/O exception
+   */
+  public static MemData build(final String name, final Parser parser) throws IOException {
+    return new MemBuilder(name, parser).build();
+  }
+
+  @Override
+  public MemData build() throws IOException {
+    init();
+    meta.assign(parser);
+    try {
+      parse();
+    } finally {
+      data.lastid = data.nodes() - 1;
+      if(data.meta.updindex) data.idmap.finish(data.lastid);
+    }
+    finishLocations();
+    return data;
+  }
+
+  @Override
+  int size() {
+    return data.nodes();
+  }
+
+  /**
+   * Initializes the builder.
+   * @return self reference
+   */
+  public MemBuilder init() {
+    data = new MemData(path, nspaces, parser.options);
+    if(parser.options.get(MainOptions.RETAINLOCATION)) locations = new Locations();
+    meta = data.meta;
+    meta.name = dbName;
+    elemNames = data.elemNames;
+    attrNames = data.attrNames;
+    path.data(data);
+    return this;
+  }
+
+  /**
+   * Finalizes a database that was built without calling {@link #build()},
+   * i.e., by feeding the builder with events.
+   * @return data reference
+   */
+  public MemData finish() {
+    data.lastid = data.nodes() - 1;
+    if(meta.updindex) data.idmap.finish(data.lastid);
+    path.finish(meta, elemNames);
+    finishLocations();
+    return data;
+  }
+
+  /**
+   * Trims the collected locations and assigns them to the database.
+   */
+  private void finishLocations() {
+    if(locations != null) {
+      locations.finish();
+      data.locations = locations;
+    }
+  }
+
+  /**
+   * Returns the data reference.
+   * @return data reference
+   */
+  public Data data() {
+    return data;
+  }
+
+  @Override
+  protected void addDoc(final byte[] value) {
+    data.doc(0, value);
+    data.insert(data.nodes());
+  }
+
+  @Override
+  protected void addElem(final int dist, final int nameId, final int asize, final int uriId,
+      final boolean ne) {
+    data.elem(dist, nameId, asize, asize, uriId, ne);
+    data.insert(data.nodes());
+
+    if(Prop.debug && (c++ & 0x7FFFF) == 0) Util.err(".");
+  }
+
+  @Override
+  protected void addAttr(final int nameId, final byte[] value, final int dist, final int uriId) {
+    data.attr(dist, nameId, value, uriId);
+    data.insert(data.nodes());
+  }
+
+  @Override
+  protected void addText(final byte[] value, final int dist, final byte kind) {
+    data.text(dist, value, kind);
+    data.insert(data.nodes());
+  }
+
+  @Override
+  protected void setSize(final int pre, final int size) {
+    data.size(pre, Data.ELEM, size);
+  }
+}

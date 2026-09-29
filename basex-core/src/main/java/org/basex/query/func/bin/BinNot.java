@@ -1,0 +1,29 @@
+package org.basex.query.func.bin;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class BinNot extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Bin value = toBinOrNull(arg(0), qc);
+    if(value == null) return Empty.VALUE;
+
+    final byte[] bytes = value.binary(info);
+    final int bl = bytes.length;
+    if(bl == 1) return B64.get((byte) ~bytes[0]);
+
+    final byte[] tmp = new byte[bl];
+    for(int b = 0; b < bl; b++) tmp[b] = (byte) ~bytes[b];
+    return B64.get(tmp);
+  }
+}

@@ -1,0 +1,67 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnOneOrMore extends StandardFunc {
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    final Iter input = arg(0).iter(qc);
+    final long size = input.size();
+    if(size == 0) throw ONEORMORE.get(info);
+    if(size > 0) return input;
+
+    return new Iter() {
+      private boolean first = true;
+
+      @Override
+      public Item next() throws QueryException {
+        final Item item = qc.next(input);
+        if(first) {
+          if(item == null) throw ONEORMORE.get(info);
+          first = false;
+        }
+        return item;
+      }
+    };
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Value input = arg(0).value(qc);
+    if(input == Empty.VALUE) throw ONEORMORE.get(info);
+    return input;
+  }
+
+  @Override
+  public boolean eager() {
+    return arg(0).eager();
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr input = arg(0);
+    final SeqType st = input.seqType();
+    // one-or-more($nonempty) → $nonempty
+    if(st.oneOrMore()) return input;
+    if(st.zero() && !input.has(Flag.NDT)) throw ONEORMORE.get(info);
+
+    exprType.assign(st.with(Occ.ONE_OR_MORE)).data(input);
+    return this;
+  }
+}

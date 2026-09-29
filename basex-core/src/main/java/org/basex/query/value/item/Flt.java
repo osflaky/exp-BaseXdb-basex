@@ -1,0 +1,167 @@
+package org.basex.query.value.item;
+
+import static org.basex.query.QueryError.*;
+
+import java.math.*;
+
+import org.basex.query.*;
+import org.basex.query.func.fn.FnRound.*;
+import org.basex.query.util.collation.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Float item ({@code xs:float}).
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Flt extends ANum {
+  /** Value "NaN". */
+  public static final Flt NAN = new Flt(Float.NaN);
+  /** Value "0". */
+  public static final Flt ZERO = new Flt(0);
+  /** Value "-0". */
+  public static final Flt NEGATIVE_ZERO = new Flt(-0e0f);
+  /** Value "1". */
+  public static final Flt ONE = new Flt(1);
+  /** Data. */
+  private final float value;
+
+  /**
+   * Constructor.
+   * @param value value
+   */
+  private Flt(final float value) {
+    super(BasicType.FLOAT);
+    this.value = value;
+  }
+
+  /**
+   * Returns an instance of this class.
+   * @param value value
+   * @return instance
+   */
+  public static Flt get(final float value) {
+    return value == 0 && Float.floatToRawIntBits(value) == 0 ? ZERO : value == 1 ? ONE :
+      Float.isNaN(value) ? NAN : new Flt(value);
+  }
+
+  @Override
+  public byte[] string() {
+    return Token.token(value);
+  }
+
+  @Override
+  public boolean bool(final InputInfo ii) {
+    return !Float.isNaN(value) && value != 0;
+  }
+
+  @Override
+  public byte[] jsonString() {
+    return Float.isFinite(value) ? string(value) : string();
+  }
+
+  @Override
+  public long itr() {
+    return (long) value;
+  }
+
+  @Override
+  public float flt() {
+    return value;
+  }
+
+  @Override
+  public double dbl() {
+    return value;
+  }
+
+  @Override
+  public BigDecimal dec(final InputInfo ii) throws QueryException {
+    if(!Double.isFinite(value)) throw valueError(BasicType.DECIMAL, string(), ii);
+    return new BigDecimal(value);
+  }
+
+  @Override
+  public Flt abs() {
+    return value > 0.0d || 1 / value > 0 ? this : get(-value);
+  }
+
+  @Override
+  public Flt ceiling() {
+    final float v = (float) Math.ceil(value);
+    return v == value ? this : get(v);
+  }
+
+  @Override
+  public Flt floor() {
+    final float f = (float) Math.floor(value);
+    return f == value ? this : get(f);
+  }
+
+  @Override
+  public Flt round(final int prec, final RoundMode mode) {
+    if(value == 0 || Float.isNaN(value) || Float.isInfinite(value)) return this;
+    final float f = Dec.round(BigDecimal.valueOf(value), prec, mode).floatValue();
+    return f == 0 && Float.floatToRawIntBits(value) < 0 ? NEGATIVE_ZERO :
+      f == value ? this : Flt.get(f);
+  }
+
+  @Override
+  public int compare(final Item item, final Collation coll, final boolean transitive,
+      final QueryContext qc, final InputInfo ii) throws QueryException {
+    final float f = item.flt(ii);
+    return item.type.instanceOf(BasicType.DECIMAL) || item instanceof Dbl ?
+      -item.compare(this, coll, transitive, qc, ii) :
+      Dbl.compare(value, Float.isInfinite(f) ? item.dbl(ii) : f, transitive);
+  }
+
+  @Override
+  public Float toJava() {
+    return value;
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final Flt flt && Float.compare(value, flt.value) == 0;
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Converts the given item to a float value.
+   * @param value value to be converted
+   * @param info input info (can be {@code null})
+   * @return float value
+   * @throws QueryException query exception
+   */
+  public static float parse(final byte[] value, final InputInfo info) throws QueryException {
+    final byte[] v = Token.trim(value);
+    if(Token.eq(v, Token.NAN)) return Float.NaN;
+    if(Token.eq(v, Token.POSITIVE_INF, Token.POSITIVE_INF_PLUS)) return Float.POSITIVE_INFINITY;
+    if(Token.eq(v, Token.NEGATIVE_INF)) return Float.NEGATIVE_INFINITY;
+    if(!Token.eq(v, Token.POSITIVE_INFINITY, Token.NEGATIVE_INFINITY)) {
+      try {
+        return Float.parseFloat(Token.string(v));
+      } catch(final NumberFormatException ex) {
+        throw BasicType.FLOAT.castError(value, info).cause(ex);
+      }
+    }
+    throw BasicType.FLOAT.castError(value, info);
+  }
+
+  /**
+   * Returns a string representation of the specified value in JavaScript notation.
+   * @param value value to be converted
+   * @return string representation
+   */
+  public static byte[] string(final float value) {
+    if(value == 0) return 1 / value > 0 ? Token.token(0) : Token.NEGATIVE_ZERO;
+
+    final BigDecimal bd = new BigDecimal(Float.toString(value)).stripTrailingZeros();
+    final float abs = Math.abs(value);
+    return abs >= 1e-6f && abs < 1e21f ? Token.token(bd.toPlainString()) :
+      Token.token(bd.toString().replace('E', 'e'));
+  }
+}

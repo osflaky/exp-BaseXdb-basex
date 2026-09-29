@@ -1,0 +1,35 @@
+package org.basex.query.func.fn;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnSiblings extends ContextFn {
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    final GNode node = toGNodeOrNull(context(qc), qc);
+    if(node == null) return Empty.ITER;
+
+    final GNode parent = node.parent();
+    return parent == null || node.kind().oneOf(Kind.ATTRIBUTE, Kind.NAMESPACE) ? node.iter() :
+      parent.childIter();
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) {
+    final Value value = cc.qc.focus.value;
+    final Expr expr = defined(0) ? arg(0) : value;
+    exprType.data(expr);
+    return optFirst(false, false, value);
+  }
+}

@@ -1,0 +1,271 @@
+package org.basex.http;
+
+import static org.basex.util.http.Method.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.io.*;
+import java.net.*;
+import java.net.http.*;
+import java.net.http.HttpRequest.*;
+import java.nio.charset.*;
+import java.util.*;
+
+import org.basex.*;
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.io.in.*;
+import org.basex.util.http.*;
+import org.basex.util.http.MediaType;
+import org.basex.util.list.*;
+import org.junit.jupiter.api.*;
+
+/**
+ * This class contains common methods for the HTTP services.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class HTTPTest extends SandboxTest {
+  /** HTTP server. */
+  private static BaseXHTTP http;
+  /** Root path. */
+  private static String rootUrl;
+  /** Headers of the last response. */
+  private static HttpHeaders responseHeaders;
+
+  // INITIALIZATION ===============================================================================
+
+  /**
+   * Initializes the test.
+   * @param url root path
+   * @param local local flag
+   * @throws Exception exception
+   */
+  protected static void init(final String url, final boolean local) throws Exception {
+    init(url, local, false);
+  }
+
+  /**
+   * Initializes the test.
+   * @param url root path
+   * @param local local flag (without database server instance)
+   * @param auth enforce authentication
+   * @throws Exception exception
+   */
+  protected static void init(final String url, final boolean local, final boolean auth)
+      throws Exception {
+
+    final StringList sl = new StringList("-p" + DB_PORT, "-h" + HTTP_PORT, "-s" + STOP_PORT,
+        "-c", "password " + NAME, "-z", "-q");
+    if(!local) sl.add("-L");
+    if(!auth) sl.add("-Uadmin");
+    http = new BaseXHTTP(sl.finish());
+    rootUrl = url;
+
+    final StaticOptions sopts = HTTPContext.get().context().soptions;
+    assertTrue(new IOFile(sopts.get(StaticOptions.WEBPATH)).md());
+  }
+
+  /**
+   * Finishes the test.
+   * @throws IOException I/O exception
+   */
+  @AfterAll public static void stop() throws IOException {
+    http.stop();
+  }
+
+  // PROTECTED METHODS ============================================================================
+
+  /**
+   * Executes the specified GET request and returns the result.
+   * @param expected expected result
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @throws IOException I/O exception
+   */
+  protected static void get(final String expected, final String path, final Object... params)
+      throws IOException {
+    assertEquals(expected, get(200, path, params));
+  }
+
+  /**
+   * Executes the specified GET request and returns the result.
+   * @param status status code to check
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @return string result, or {@code null} for a failure
+   * @throws IOException I/O exception
+   */
+  protected static String get(final int status, final String path, final Object... params)
+      throws IOException {
+    return send(status, GET.name(), null, null, path, params).replaceAll("\\r", "");
+  }
+
+  /**
+   * Executes the specified DELETE request.
+   * @param status status code to check
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @return response code
+   * @throws IOException I/O exception
+   */
+  protected static String delete(final int status, final String path, final Object... params)
+      throws IOException {
+    return send(status, DELETE.name(), null, null, path, params);
+  }
+
+  /**
+   * Executes the specified HEAD request and returns the result.
+   * @param status status code to check
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @return string result, or {@code null} for a failure
+   * @throws IOException I/O exception
+   */
+  protected static String head(final int status, final String path, final Object... params)
+      throws IOException {
+    return send(status, HEAD.name(), null, null, path, params);
+  }
+
+  /**
+   * Executes the specified OPTIONS request and returns the result.
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @return string result, or {@code null} for a failure
+   * @throws IOException I/O exception
+   */
+  protected static String options(final String path, final Object... params)
+      throws IOException {
+    return send(200, OPTIONS.name(), null, null, path, params);
+  }
+
+  /**
+   * Executes the specified POST request.
+   * @param payload payload
+   * @param type media type
+   * @param request path
+   * @return string result
+   * @throws IOException I/O exception
+   */
+  protected static String post(final String payload, final MediaType type, final String request)
+      throws IOException {
+    return post(200, payload, type, request);
+  }
+
+  /**
+   * Executes the specified POST request.
+   * @param status status code to check
+   * @param payload payload
+   * @param type media type
+   * @param request path
+   * @param params query parameters (keys and values)
+   * @return string result
+   * @throws IOException I/O exception
+   */
+  protected static String post(final int status, final String payload, final MediaType type,
+      final String request, final Object... params) throws IOException {
+    return send(status, Method.POST.name(), new ArrayInput(payload), type, request, params);
+  }
+
+  /**
+   * Executes the specified PUT request.
+   * @param is input stream (can be {@code null})
+   * @param request query
+   * @throws IOException I/O exception
+   */
+  protected static void put(final InputStream is, final String request) throws IOException {
+    put(201, is, request);
+  }
+
+  /**
+   * Executes the specified PUT request.
+   * @param status status code to check
+   * @param is input stream (can be {@code null})
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @throws IOException I/O exception
+   */
+  protected static void put(final int status, final InputStream is, final String path,
+      final Object... params) throws IOException {
+    send(status, Method.PUT.name(), is, null, path, params);
+  }
+
+  /**
+   * Executes the specified PUT request.
+   * @param status status code to check
+   * @param method HTTP method
+   * @param is input stream (can be {@code null})
+   * @param type media type (optional, may be {@code null})
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @return string result
+   * @throws IOException I/O exception
+   */
+  protected static String send(final int status, final String method, final InputStream is,
+      final MediaType type, final String path, final Object... params) throws IOException {
+    return send(status, method, is, type, Map.of(), path, params);
+  }
+
+  /**
+   * Executes the specified request with additional request headers.
+   * @param status status code to check
+   * @param method HTTP method
+   * @param is input stream (can be {@code null})
+   * @param type media type (optional, may be {@code null})
+   * @param headers request headers
+   * @param path path of request
+   * @param params query parameters (keys and values)
+   * @return string result
+   * @throws IOException I/O exception
+   */
+  protected static String send(final int status, final String method, final InputStream is,
+      final MediaType type, final Map<String, String> headers, final String path,
+      final Object... params) throws IOException {
+
+    // buffer payload: requests with content length can be rejected without closing the connection
+    final BodyPublisher pub = is != null ?
+      HttpRequest.BodyPublishers.ofByteArray(is.readAllBytes()) :
+      HttpRequest.BodyPublishers.noBody();
+
+    final StringBuilder sb = new StringBuilder(rootUrl + path);
+    final int pl = params.length;
+    for(int p = 0; p < pl; p += 2) {
+      sb.append(p == 0 ? '?' : '&').append(params[p]).append('=').
+        append(URLEncoder.encode(params[p + 1].toString(), StandardCharsets.UTF_8));
+    }
+    final URI uri = URI.create(sb.toString());
+    final HttpRequest.Builder builder = HttpRequest.newBuilder(uri).method(method, pub);
+    if(type != null) builder.setHeader("Content-Type", type.toString());
+    headers.forEach(builder::setHeader);
+
+    try {
+      final HttpClient client = IOUrl.client(true);
+      final HttpResponse<String> response = client.send(builder.build(),
+          HttpResponse.BodyHandlers.ofString());
+      responseHeaders = response.headers();
+      final String body = response.body();
+      assertEquals(status, response.statusCode(), method + ' ' + path + "\nResponse: " + body);
+      return body;
+    } catch(final InterruptedException ex) {
+      throw new IOException(ex);
+    }
+  }
+
+  /**
+   * Returns a header of the last response.
+   * @param name name of header
+   * @return value, or {@code null} if the header does not exist
+   */
+  protected static String header(final String name) {
+    return responseHeaders.firstValue(name).orElse(null);
+  }
+
+  /**
+   * Checks if a string is contained in another string.
+   * @param str string
+   * @param sub sub string
+   */
+  protected static void assertContains(final String str, final String sub) {
+    if(!str.contains(sub)) fail('\'' + sub + "' not contained in '" + str + "'.");
+  }
+}

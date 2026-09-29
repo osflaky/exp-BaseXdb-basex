@@ -1,0 +1,52 @@
+package org.basex.query.func.db;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.up.primitives.name.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class DbCopy extends DbAccessFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    copy(qc, true);
+    return Empty.VALUE;
+  }
+
+  /**
+   * Performs the copy function.
+   * @param qc query context
+   * @param keep keep copied database
+   * @throws QueryException query exception
+   */
+  final void copy(final QueryContext qc, final boolean keep) throws QueryException {
+    final String name = toName(arg(0), qc), newname = toName(arg(1), qc);
+    if(name.equals(newname)) throw DB_CONFLICT4_X.get(info, name);
+
+    // source database does not exist
+    checkCreate(name, qc);
+    if(!qc.context.soptions.dbExists(name)) throw DB_GET1_X.get(info, name);
+
+    qc.updates().add(keep ? new DBCopy(name, newname, qc, info) :
+      new DBAlter(name, newname, qc, info), qc);
+  }
+
+  @Override
+  public final boolean accept(final ASTVisitor visitor) {
+    return dataLock(arg(1), false, true, visitor) && super.accept(visitor);
+  }
+
+  @Override
+  protected boolean writeLock() {
+    // the source database is only read
+    return false;
+  }
+}

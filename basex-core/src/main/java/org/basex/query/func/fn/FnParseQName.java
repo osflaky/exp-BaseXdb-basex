@@ -1,0 +1,35 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnParseQName extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final byte[] value = toTokenOrNull(arg(0), qc);
+    if(value == null) return Empty.VALUE;
+
+    final QNm qnm = qc.shared.parseQName(value, true, qc, sc());
+    if(qnm == null) throw valueError(BasicType.QNAME, value, info);
+    if(!qnm.hasURI() && qnm.hasPrefix()) throw NSDECL_X.get(info, qnm.prefix());
+    return qnm;
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) {
+    return optFirst();
+  }
+}

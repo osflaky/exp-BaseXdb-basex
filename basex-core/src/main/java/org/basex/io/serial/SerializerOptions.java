@@ -1,0 +1,455 @@
+package org.basex.io.serial;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.query.QueryText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.build.csv.*;
+import org.basex.build.json.*;
+import org.basex.core.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.expr.path.*;
+import org.basex.query.util.hash.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.basex.util.http.*;
+import org.basex.util.options.*;
+
+/**
+ * This class defines all available serialization parameters.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class SerializerOptions extends Options {
+  /** Required type of a parameter that is defined as yes/no in the serialization spec. */
+  private static final SeqType YES_NO = Types.BOOLEAN_ZO;
+  /** Required type of a parameter that denotes a serialization method. */
+  private static final SeqType METHOD_TYPE =
+      ChoiceItemType.get(BasicType.STRING, BasicType.QNAME).seqType(Occ.ZERO_OR_ONE);
+  /** Required type of the character map. */
+  private static final SeqType CHARACTER_MAPS =
+      MapType.get(BasicType.STRING, Types.STRING_O).seqType(Occ.ZERO_OR_ONE);
+
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> BYTE_ORDER_MARK =
+      new EnumOption<>("byte-order-mark", YesNo.NO, YES_NO);
+  /** Serialization parameter: list of QNames. */
+  public static final StringOption CDATA_SECTION_ELEMENTS =
+      new StringOption("cdata-section-elements", "", Types.QNAME_ZM);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> CSV_HEADER =
+      new EnumOption<>("csv-header", YesNo.NO, YES_NO);
+  /** Serialization parameter: single character. */
+  public static final StringOption CSV_QUOTE_CHARACTER =
+      new StringOption("csv-quote-character", null, Types.STRING_ZO);
+  /** Serialization parameter: single character. */
+  public static final StringOption CSV_SEPARATOR =
+      new StringOption("csv-separator", null, Types.STRING_ZO);
+  /** Serialization parameter. */
+  public static final StringOption DOCTYPE_PUBLIC =
+      new StringOption("doctype-public", "", Types.STRING_ZO);
+  /** Serialization parameter. */
+  public static final StringOption DOCTYPE_SYSTEM =
+      new StringOption("doctype-system", "", Types.STRING_ZO);
+  /** Serialization parameter: valid encoding. */
+  public static final StringOption ENCODING =
+      new StringOption("encoding", Strings.UTF8, Types.STRING_ZO);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> ESCAPE_SOLIDUS =
+      new EnumOption<>("escape-solidus", YesNo.YES, YES_NO);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> ESCAPE_URI_ATTRIBUTES =
+      new EnumOption<>("escape-uri-attributes", YesNo.YES, YES_NO);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> INCLUDE_CONTENT_TYPE =
+      new EnumOption<>("include-content-type", YesNo.YES, YES_NO);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> INDENT = new EnumOption<>("indent", YesNo.NO, YES_NO);
+  /** Serialization parameter. */
+  public static final StringOption SUPPRESS_INDENTATION =
+      new StringOption("suppress-indentation", "", Types.QNAME_ZM);
+  /** Serialization parameter. */
+  public static final StringOption MEDIA_TYPE = new StringOption("media-type", "", Types.STRING_ZO);
+  /** Serialization parameter: xml/xhtml/html/text/json/csv/raw/adaptive. */
+  public static final EnumOption<SerialMethod> METHOD =
+      new EnumOption<>("method", SerialMethod.BASEX, METHOD_TYPE);
+  /** Serialization parameter: NFC/NFD/NFKC/NKFD/fully-normalized/none. */
+  public static final StringOption NORMALIZATION_FORM =
+      new StringOption("normalization-form", "none", Types.STRING_ZO);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> OMIT_XML_DECLARATION =
+      new EnumOption<>("omit-xml-declaration", YesNo.YES, YES_NO);
+  /** Serialization parameter: yes/no/omit. */
+  public static final EnumOption<YesNoOmit> STANDALONE =
+      new EnumOption<>("standalone", YesNoOmit.OMIT, YES_NO);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> UNDECLARE_PREFIXES =
+      new EnumOption<>("undeclare-prefixes", YesNo.NO, YES_NO);
+  /** Serialization parameter. */
+  public static final StringOption USE_CHARACTER_MAPS =
+      new StringOption("use-character-maps", "", CHARACTER_MAPS);
+  /** Serialization parameter. */
+  public static final StringOption ITEM_SEPARATOR =
+      new StringOption("item-separator", null, Types.STRING_ZO);
+  /** Serialization parameter (supported values depend on method). */
+  public static final StringOption VERSION = new StringOption("version", "", Types.STRING_ZO);
+  /** Serialization parameter: 4.0/4.01/5.0. */
+  public static final StringOption HTML_VERSION =
+      new StringOption("html-version", "", Types.DECIMAL_ZO);
+  /** Parameter document. */
+  public static final StringOption PARAMETER_DOCUMENT =
+      new StringOption("parameter-document", "", Types.STRING_ZO);
+  /** Serialization parameter: xml/xhtml/html/text. */
+  public static final EnumOption<YesNo> ALLOW_DUPLICATE_NAMES =
+      new EnumOption<>("allow-duplicate-names", YesNo.NO, YES_NO);
+  /** Serialization parameter: xml/xhtml/html/text. */
+  public static final EnumOption<SerialMethod> JSON_NODE_OUTPUT_METHOD =
+      new EnumOption<>("json-node-output-method", SerialMethod.XML, METHOD_TYPE);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> JSON_LINES =
+      new EnumOption<>("json-lines", YesNo.NO, YES_NO);
+  /** Serialization parameter: yes/no. */
+  public static final EnumOption<YesNo> CANONICAL = new EnumOption<>("canonical", YesNo.NO, YES_NO);
+
+  /** Specific serialization parameter. */
+  public static final OptionsOption<CsvOptions> CSV =
+      new OptionsOption<>("csv", new CsvOptions());
+  /** Specific serialization parameter. */
+  public static final OptionsOption<JsonSerialOptions> JSON =
+      new OptionsOption<>("json", new JsonSerialOptions());
+  /** Serialization parameter: line ending (takes precedence over 'newline' if assigned). */
+  public static final StringOption LINE_ENDING =
+      new StringOption("line-ending", null, Types.STRING_ZO);
+  /** Specific serialization parameter: newline. */
+  public static final EnumOption<Newline> NEWLINE =
+      new EnumOption<>("newline",
+        "\r".equals(Prop.NL) ? Newline.CR : "\n".equals(Prop.NL) ? Newline.NL : Newline.CRNL,
+        Types.STRING_ZO);
+  /** Serialization parameter: indentation unit (takes precedence over 'tabulator'/'indents'). */
+  public static final StringOption INDENT_UNIT =
+      new StringOption("indent-unit", null, Types.STRING_ZO);
+  /** Specific serialization parameter: indent with spaces or tabs. */
+  public static final EnumOption<YesNo> TABULATOR = new EnumOption<>("tabulator", YesNo.NO, YES_NO);
+  /** Specific serialization parameter: number of spaces to indent. */
+  public static final NumberOption INDENTS = new NumberOption("indents", 2);
+  /** Specific serialization parameter: maximum number of bytes to serialize. */
+  public static final NumberOption LIMIT = new NumberOption("limit", -1);
+  /** Specific serialization parameter: binary serialization. */
+  public static final EnumOption<YesNo> BINARY = new EnumOption<>("binary", YesNo.YES, YES_NO);
+  /** Specific serialization parameter: serialize values as XQuery expressions. */
+  public static final EnumOption<YesNo> EXPRESSION =
+      new EnumOption<>("expression", YesNo.NO, YES_NO);
+  /** Specific serialization parameter: attribute indentation. */
+  public static final EnumOption<YesNo> INDENT_ATTRIBUTES =
+      new EnumOption<>("indent-attributes", YesNo.NO, YES_NO);
+
+  /** QName. */
+  public static final QNm Q_ROOT = new QNm(OUTPUT_PREFIX, "serialization-parameters", OUTPUT_URI);
+  /** Name test. */
+  public static final Test T_ROOT = NameTest.get(Q_ROOT);
+  /** Value. */
+  private static final QNm Q_VALUE = new QNm("value");
+
+  /** Options to consider for canonical serialization. */
+  private static final Set<Option<?>> CANONICAL_OPTIONS = Set.of(
+    METHOD, CANONICAL, NORMALIZATION_FORM, MEDIA_TYPE, HTML_VERSION, INCLUDE_CONTENT_TYPE,
+    JSON_LINES, JSON_NODE_OUTPUT_METHOD
+  );
+
+  /** Newlines. */
+  public enum Newline {
+    /** NL.   */ NL("\\n", "\n"),
+    /** CR.   */ CR("\\r", "\r"),
+    /** CRNL. */ CRNL("\\r\\n", "\r\n");
+
+    /** Name. */
+    private final String name;
+    /** Newline. */
+    private final String newline;
+
+    /**
+     * Constructor.
+     * @param name name
+     * @param newline newline string
+     */
+    Newline(final String name, final String newline) {
+      this.name = name;
+      this.newline = newline;
+    }
+
+    /**
+     * Returns the newline string.
+     * @return newline string
+     */
+    String newline() {
+      return newline;
+    }
+
+    @Override
+    public String toString() {
+      return name;
+    }
+  }
+
+  /**
+   * Checks if the specified option is true.
+   * @param option option
+   * @return value
+   */
+  public boolean yes(final EnumOption<YesNo> option) {
+    return get(option) == YesNo.YES;
+  }
+
+  /**
+   * Default constructor.
+   */
+  public SerializerOptions() {
+  }
+
+  /**
+   * Constructor with options to be copied.
+   * @param opts options
+   */
+  public SerializerOptions(final SerializerOptions opts) {
+    super(opts);
+  }
+
+  /**
+   * Converts the specified output parameter item to serializer options.
+   * @param item node with serialization parameters
+   * @param info input info (can be {@code null})
+   * @throws QueryException query exception
+   */
+  public void assign(final Item item, final InputInfo info) throws QueryException {
+    if(!(item instanceof final XNode node) || !T_ROOT.matches(node))
+      throw ELMMAP_X_X_X.get(info, Q_ROOT.prefixId(XML), item.type, item);
+    try {
+      assign(toString(node, new QNmSet(), info));
+    } catch(final BaseXException ex) {
+      throw SERDOC_X.get(info, ex);
+    }
+  }
+
+  /**
+   * Parses options.
+   * @param name name of option
+   * @param value value
+   * @param info input info (can be {@code null})
+   * @throws QueryException query exception
+   */
+  public void parse(final String name, final String value, final InputInfo info)
+      throws QueryException {
+
+    final Option<?> option = option(name);
+    if(option == PARAMETER_DOCUMENT) {
+      // parse parameters and character map
+      Uri uri = Uri.get(value);
+      if(!uri.isValid()) throw INVURI_X.get(info, value);
+      if(!uri.isAbsolute()) uri = info.sc().baseURI().resolve(uri);
+      final IO io = IO.get(string(uri.string()));
+      final GNode root;
+      try {
+        root = new DBNode(io).childIter().next();
+      } catch(final IOException ex) {
+        throw PARAMDOC_X.get(info, ex);
+      }
+      if(root != null) assign(root, info);
+
+      for(final GNode child : root.childIter()) {
+        if(child.kind() != Kind.ELEMENT) continue;
+        if(option(string(child.qname().local())) == USE_CHARACTER_MAPS) {
+          set(USE_CHARACTER_MAPS, characterMap(child, info));
+        }
+      }
+    } else {
+      // parse remaining parameters
+      try {
+        assign(name, value);
+      } catch(final BaseXException ex) {
+        throw (option != null ? SERPARAM_X : OUTPUT_X).get(info, ex);
+      }
+    }
+  }
+
+  /**
+   * Finalizes the serialization options.
+   * @return self reference
+   */
+  public SerializerOptions finish() {
+    // reset options that are to be ignored for canonicalization
+    if(yes(CANONICAL)) {
+      final SerialMethod m = get(METHOD);
+      if(m.oneOf(SerialMethod.XML, SerialMethod.XHTML, SerialMethod.JSON)) {
+        for(final Option<?> option : this) {
+          if(!CANONICAL_OPTIONS.contains(option)) put(option, option.value());
+        }
+        set(NEWLINE, Newline.NL);
+      } else {
+        set(CANONICAL, YesNo.NO);
+      }
+    }
+    return this;
+  }
+
+  /**
+   * Returns the media type defined by these serialization parameters.
+   * @return media type
+   */
+  public MediaType mediaType() {
+    // return specified content type
+    final String type = get(MEDIA_TYPE);
+    if(!type.isEmpty()) return new MediaType(type);
+
+    // determine content type via output method
+    final SerialMethod sm = get(METHOD);
+    if(sm.oneOf(SerialMethod.BASEX, SerialMethod.ADAPTIVE, SerialMethod.XML))
+      return MediaType.APPLICATION_XML;
+    if(sm.oneOf(SerialMethod.XHTML, SerialMethod.HTML)) return MediaType.TEXT_HTML;
+    if(sm == SerialMethod.JSON) return MediaType.APPLICATION_JSON;
+    if(sm == SerialMethod.CSV) return MediaType.TEXT_CSV;
+    return MediaType.TEXT_PLAIN;
+  }
+
+  /**
+   * Extracts a character map.
+   * @param elem child node
+   * @param info input info (can be {@code null})
+   * @return character map or {@code null} if map is invalid
+   * @throws QueryException query exception
+   */
+  public static String characterMap(final GNode elem, final InputInfo info) throws QueryException {
+    final Supplier<QueryException> error = () -> SERDOC_X.get(info,
+        Util.info("Serialization parameter '%' is invalid.", USE_CHARACTER_MAPS.name()));
+    if(elem.attributeIter().next() != null) throw error.get();
+
+    final TokenObjectMap<byte[]> map = new TokenObjectMap<>();
+    for(final GNode child : elem.childIter()) {
+      if(child.kind() != Kind.ELEMENT) continue;
+      final byte[] name = child.qname().local();
+      if(eq(name, CHARACTER_MAP)) {
+        byte[] key = null, val = null;
+        for(final GNode attr : child.attributeIter()) {
+          final byte[] att = attr.name();
+          if(eq(att, CHARACTER)) key = attr.string();
+          else if(eq(att, MAP_STRING)) val = attr.string();
+          else throw error.get();
+        }
+        if(key == null || val == null) throw error.get();
+        if(map.get(key) != null) throw SERCHARDUP_X.get(info, key);
+        if(length(key) != 1) throw SERDOC_X.get(info,
+            Util.info("Key in character map is not a single character: %.", key));
+        map.put(key, val);
+      } else {
+        throw error.get();
+      }
+    }
+
+    // return string representation
+    final TokenBuilder tb = new TokenBuilder();
+    for(final byte[] key : map) {
+      if(!tb.isEmpty()) tb.add(',');
+      tb.add(Options.escape(string(key))).add('=').add(string(map.get(key)).replace(",", ",,"));
+    }
+    return tb.toString();
+  }
+
+  /**
+   * Builds a string representation of the specified node.
+   * @param node node
+   * @param cache name cache
+   * @param info input info
+   * @return string
+   * @throws QueryException query exception
+   */
+  private String toString(final XNode node, final QNmSet cache, final InputInfo info)
+      throws QueryException {
+
+    final GNode att = node.attributeIter().next();
+    if(att != null) throw SERDOC_X.get(info, Util.info("Invalid attribute: '%'", att.name()));
+
+    final StringBuilder sb = new StringBuilder();
+    // interpret options
+    for(final GNode gchild : node.childIter()) {
+      final XNode child = (XNode) gchild;
+      if(child.kind() != Kind.ELEMENT) continue;
+
+      // ignore elements in other namespace
+      final QNm qname = child.qname();
+      if(!cache.add(qname)) throw SERDUP_X.get(info, qname);
+
+      if(!eq(qname.uri(), Q_ROOT.uri())) {
+        if(qname.uri().length != 0) continue;
+        throw SERDOC_X.get(info, Util.info("Element has no namespace: '%'", qname));
+      }
+      // retrieve key from element name and value from "value" attribute or text node
+      final String name = string(qname.local());
+      final Option<?> option = option(name);
+      String value = null;
+      if(option == USE_CHARACTER_MAPS) {
+        value = characterMap(child, info);
+      } else if(hasElements(child)) {
+        value = toString(child, cache, info);
+      } else {
+        for(final GNode attr : child.attributeIter()) {
+          if(attr.qname().eq(Q_VALUE)) {
+            value = string(attr.string());
+            if(option == CDATA_SECTION_ELEMENTS || option == SUPPRESS_INDENTATION) {
+              value = resolveQNames(child, value);
+            }
+          } else {
+            throw SERDOC_X.get(info, Util.info("Invalid attribute: '%'", attr.name()));
+          }
+        }
+        if(value == null) throw SERDOC_X.get(info, "Missing 'value' attribute.");
+      }
+      // whitespace in character maps is significant
+      if(option != USE_CHARACTER_MAPS) value = value.trim();
+      sb.append(name).append('=').append(value.replace(",", ",,")).append(',');
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Converts lexical QNames to the EQName notation.
+   * @param elem root element
+   * @param value value
+   * @return name with resolved QNames
+   */
+  private static String resolveQNames(final XNode elem, final String value) {
+    final TokenBuilder tb = new TokenBuilder();
+    for(final byte[] name : distinctTokens(token(value))) {
+      byte[] qname = name;
+      // skip names in EQName notation
+      if(indexOf(name, '{') == -1) {
+        final int i = indexOf(name, ':');
+        final byte[] uri = elem.nsScope(null).value(i == -1 ? EMPTY : substring(name, 0, i));
+        // unprefixed names: default namespace applies (empty if undeclared)
+        if(uri != null) qname = QNm.eqName(uri, substring(name, i + 1));
+        else if(i == -1) qname = QNm.eqName(EMPTY, name);
+      }
+      tb.add(qname).add(' ');
+    }
+    return tb.toString();
+  }
+
+  /**
+   * Checks if the specified node has elements as children.
+   * @param node node
+   * @return result of check
+   */
+  private static boolean hasElements(final GNode node) {
+    for(final GNode nd : node.childIter()) {
+      if(nd.kind() == Kind.ELEMENT) return true;
+    }
+    return false;
+  }
+}

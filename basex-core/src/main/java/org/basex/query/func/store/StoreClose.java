@@ -1,0 +1,20 @@
+package org.basex.query.func.store;
+
+import org.basex.query.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class StoreClose extends StoreFn {
+  @Override
+  public Empty value(final QueryContext qc) throws QueryException {
+    final String name = toName(arg(0), qc);
+
+    stores(qc).close(name, info);
+    return Empty.VALUE;
+  }
+}

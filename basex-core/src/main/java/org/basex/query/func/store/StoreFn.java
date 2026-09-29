@@ -1,0 +1,61 @@
+package org.basex.query.func.store;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.core.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+
+/**
+ * Store function.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+abstract class StoreFn extends StandardFunc {
+  /**
+   * Evaluates an expression to a store name.
+   * @param expr expression
+   * @param qc query context
+   * @return store name
+   * @throws QueryException query exception
+   */
+  final String toName(final Expr expr, final QueryContext qc) throws QueryException {
+    return toName(expr, true, STORE_NAME_X, qc);
+  }
+
+  /**
+   * Returns the store.
+   * @param qc query context
+   * @return store
+   */
+  static Stores stores(final QueryContext qc) {
+    return qc.context.stores;
+  }
+
+  /**
+   * Stores a materialized, compact version of the specified value in the store.
+   * @param key key
+   * @param value value
+   * @param name name of store
+   * @param qc query context
+   * @throws QueryException query exception
+   */
+  void store(final String key, final Value value, final String name, final QueryContext qc)
+      throws QueryException {
+    stores(qc).put(key, compact(value, qc), name, info, qc);
+  }
+
+  /**
+   * Returns a materialized, compact version of the specified value.
+   * @param value value
+   * @param qc query context
+   * @return compacted value
+   * @throws QueryException query exception
+   */
+  final Value compact(final Value value, final QueryContext qc) throws QueryException {
+    return value.materialize(n -> false, info, qc).shrink(qc);
+  }
+}

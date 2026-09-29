@@ -1,0 +1,52 @@
+package org.basex.query.func.convert;
+
+import org.basex.query.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.util.list.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class ConvertIntegersToBase64 extends ConvertFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return bytesToB64(qc);
+  }
+
+  /**
+   * Converts the first argument from a byte sequence to a byte array.
+   * @param qc query context
+   * @return resulting value
+   * @throws QueryException query exception
+   */
+  final B64 bytesToB64(final QueryContext qc) throws QueryException {
+    final Value input = arg(0).atomValue(qc, info);
+
+    // return internal byte array
+    if(input instanceof final BytSeq bs && bs.type == BasicType.BYTE) return B64.get(bs.values());
+
+    // single integer
+    final long size = input.size();
+    if(size == 1 && input instanceof final Itr itr) return B64.get((byte) itr.itr());
+
+    final ByteList bl = new ByteList(Seq.initialCapacity(size));
+    if(input instanceof final ItrSeq seq) {
+      // integer sequence, stored in a native representation
+      for(int i = 0, s = (int) size; i < s; i++) bl.add((byte) seq.itrAt(i));
+    } else {
+      // other types
+      final Iter iter = input.iter();
+      for(Item item; (item = qc.next(iter)) != null;) {
+        bl.add((int) toLong(item));
+      }
+    }
+    return B64.get(bl.finish());
+  }
+}

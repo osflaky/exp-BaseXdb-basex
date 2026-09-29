@@ -1,0 +1,203 @@
+package org.basex.query.value.item;
+
+import static org.basex.util.Token.*;
+
+import java.math.*;
+import java.util.function.*;
+
+import org.basex.query.*;
+import org.basex.query.func.fn.FnRound.*;
+import org.basex.query.util.collation.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Decimal item ({@code xs:decimal}).
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Dec extends ANum {
+  /** Maximum long value. */
+  public static final BigDecimal BD_MINLONG = BigDecimal.valueOf(Long.MIN_VALUE);
+ /** Maximum long value. */
+  public static final BigDecimal BD_MAXLONG = BigDecimal.valueOf(Long.MAX_VALUE);
+  /** Decimal representing a million. */
+  public static final BigDecimal BD_1000000 = BigDecimal.valueOf(1000000);
+  /** Seconds per day. */
+  public static final BigDecimal BD_864000 = BigDecimal.valueOf(86400);
+  /** BigDecimal: 3600. */
+  public static final BigDecimal BD_3600 = BigDecimal.valueOf(3600);
+  /** BigDecimal: 1000. */
+  public static final BigDecimal BD_1000 = BigDecimal.valueOf(1000);
+  /** BigDecimal: 60. */
+  public static final BigDecimal BD_60 = BigDecimal.valueOf(60);
+  /** BigDecimal: 2. */
+  public static final BigDecimal BD_2 = BigDecimal.valueOf(2);
+
+  /** Value 0. */
+  public static final Dec ZERO = new Dec(BigDecimal.ZERO);
+  /** Value 1. */
+  public static final Dec ONE = new Dec(BigDecimal.ONE);
+  /** Decimal value. */
+  private final BigDecimal value;
+
+  /**
+   * Constructor.
+   * @param value decimal value
+   */
+  private Dec(final BigDecimal value) {
+    super(BasicType.DECIMAL);
+    this.value = value;
+  }
+
+  /**
+   * Constructor.
+   * @param value big decimal value
+   * @return value
+   */
+  public static Dec get(final BigDecimal value) {
+    return value.signum() == 0 ? ZERO : new Dec(value);
+  }
+
+  @Override
+  public byte[] string() {
+    return chopNumber(token(value.toPlainString()));
+  }
+
+  @Override
+  public boolean bool(final InputInfo ii) {
+    return value.signum() != 0;
+  }
+
+  @Override
+  public long itr() {
+    return value.longValue();
+  }
+
+  @Override
+  public float flt() {
+    return value.floatValue();
+  }
+
+  @Override
+  public double dbl() {
+    return value.doubleValue();
+  }
+
+  @Override
+  public BigDecimal dec(final InputInfo ii) {
+    return value;
+  }
+
+  @Override
+  public Dec abs() {
+    return value.signum() == -1 ? get(value.negate()) : this;
+  }
+
+  @Override
+  public Dec ceiling() {
+    return get(value.setScale(0, RoundingMode.CEILING));
+  }
+
+  @Override
+  public Dec floor() {
+    return get(value.setScale(0, RoundingMode.FLOOR));
+  }
+
+  @Override
+  public Dec round(final int prec, final RoundMode mode) {
+    if(value.signum() == 0) return this;
+    final BigDecimal v = round(value, prec, mode);
+    return v.equals(value) ? this : get(v);
+  }
+
+  /**
+   * Returns a rounded value.
+   * @param value decimal value
+   * @param prec precision
+   * @param mode rounding mode
+   * @return rounded value
+   */
+  static BigDecimal round(final BigDecimal value, final int prec, final RoundMode mode) {
+    if(prec >= value.scale()) return value;
+
+    final BigDecimal l = value.setScale(prec, RoundingMode.FLOOR);
+    final BigDecimal u = value.setScale(prec, RoundingMode.CEILING);
+    final boolean pos = value.signum() >= 0;
+    final BooleanSupplier mw = () -> l.add(u).divide(BigDecimal.valueOf(2)).compareTo(value) == 0;
+    final Supplier<BigDecimal> n = () -> value.setScale(prec, RoundingMode.HALF_UP);
+    return switch(mode) {
+      case FLOOR -> l;
+      case CEILING -> u;
+      case TOWARD_ZERO -> pos ? l : u;
+      case AWAY_FROM_ZERO -> pos ? u : l;
+      case HALF_TO_FLOOR -> mw.getAsBoolean() ? l : n.get();
+      case HALF_TO_CEILING -> mw.getAsBoolean() ? u : n.get();
+      case HALF_TOWARD_ZERO -> mw.getAsBoolean() ? pos ? l : u : n.get();
+      case HALF_AWAY_FROM_ZERO -> mw.getAsBoolean() ? pos ? u : l : n.get();
+      default -> value.setScale(prec, RoundingMode.HALF_EVEN);
+    };
+  }
+
+  @Override
+  public int compare(final Item item, final Collation coll, final boolean transitive,
+      final QueryContext qc, final InputInfo ii) throws QueryException {
+    return item instanceof final Dec dec ? value.compareTo(dec.value) :
+      compare(item, transitive, ii);
+  }
+
+  @Override
+  public Object toJava() {
+    return value;
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof final Dec dec && value.compareTo(dec.value) == 0;
+  }
+
+  // STATIC METHODS ===============================================================================
+
+  /**
+   * Converts the given token into a decimal value.
+   * @param value value to be converted
+   * @param info input info (can be {@code null})
+   * @param error raise error for an invalid input
+   * @return decimal, or {@code null} value is invalid and no error is raised
+   * @throws QueryException query exception
+   */
+  public static BigDecimal parse(final byte[] value, final InputInfo info,
+      final boolean error) throws QueryException {
+
+    // check if conversion can be successful (reject exponential notation)
+    boolean valid = value.length != 0, dot = false;
+    if(valid) {
+      for(final byte v : value) {
+        if(v == '.') {
+          dot = true;
+        } else if(!(digit(v) || ws(v) || v == '+' || v == '-')) {
+          valid = false;
+          break;
+        }
+      }
+    }
+
+    if(valid) {
+      // shortcut for non-fractional values
+      if(!dot) {
+        final long l = toLong(value);
+        if(l != Long.MIN_VALUE) return BigDecimal.valueOf(l);
+      }
+      // decimal conversion
+      try {
+        return new BigDecimal(Token.string(value).trim());
+      } catch(final NumberFormatException ex) {
+        if(error) throw BasicType.DECIMAL.castError(value, info).cause(ex);
+      }
+    }
+
+    if(error) throw BasicType.DECIMAL.castError(value, info);
+    return null;
+  }
+}

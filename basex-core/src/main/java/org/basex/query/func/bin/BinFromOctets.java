@@ -1,0 +1,30 @@
+package org.basex.query.func.bin;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.list.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class BinFromOctets extends StandardFunc {
+  @Override
+  public B64 value(final QueryContext qc) throws QueryException {
+    final Iter values = arg(0).atomIter(qc, info);
+    final ByteList bl = new ByteList(Seq.initialCapacity(values.size()));
+    for(Item item; (item = qc.next(values)) != null;) {
+      final long l = toLong(item);
+      if(l < 0 || l > 255) throw BIN_OOR_X.get(info, l);
+      bl.add((int) l);
+    }
+    return B64.get(bl.finish());
+  }
+}

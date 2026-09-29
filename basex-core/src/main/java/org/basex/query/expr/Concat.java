@@ -1,0 +1,106 @@
+package org.basex.query.expr;
+
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.query.var.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+
+/**
+ * Concat expression.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class Concat extends Arr {
+  /**
+   * Constructor.
+   * @param info input info (can be {@code null})
+   * @param exprs expressions
+   */
+  public Concat(final InputInfo info, final Expr... exprs) {
+    super(info, Types.STRING_O, exprs);
+  }
+
+  @Override
+  public Str value(final QueryContext qc) throws QueryException {
+    final TokenBuilder tb = new TokenBuilder();
+    for(final Expr expr : exprs) {
+      final Iter iter = expr.atomIter(qc, info);
+      for(Item item; (item = qc.next(iter)) != null;) {
+        tb.add(item.string(info));
+      }
+    }
+    return Str.get(tb.finish());
+  }
+
+  @Override
+  protected boolean ebv(final QueryContext qc) throws QueryException {
+    for(final Expr expr : exprs) {
+      final Iter iter = expr.atomIter(qc, info);
+      for(Item item; (item = qc.next(iter)) != null;) {
+        if(item.string(info).length > 0) return true;
+      }
+    }
+    return false;
+  }
+
+  @Override
+  public Expr optimize(final CompileContext cc) throws QueryException {
+    // <a>{ $x }</a> || 'b' → xs:string($x) || 'b'
+    exprs = simplifyAll(Simplify.STRING, cc);
+
+    // merge adjacent values, ignore empty sequences
+    // 'a' || 'b' || $x → 'ab' || $x
+    final int el = exprs.length;
+    final ExprList list = new ExprList(el);
+    final TokenBuilder tb = new TokenBuilder();
+    for(final Expr expr : exprs) {
+      if(cc.values(true, expr)) {
+        for(final Item item : expr.atomValue(cc.qc, info)) {
+          tb.add(item.string(info));
+        }
+      } else {
+        if(!tb.isEmpty()) list.add(Str.get(tb.next()));
+        list.add(expr);
+      }
+    }
+    if(list.isEmpty()) return cc.replaceWith(this, Str.get(tb.finish()));
+    if(!tb.isEmpty()) list.add(Str.get(tb.finish()));
+
+    // single expression left: replace with string call
+    // $x || '' → string($x)
+    final int ls = list.size();
+    if(ls == 1) {
+      final Expr arg = list.peek();
+      if(arg.seqType().zeroOrOne()) {
+        return cc.replaceWith(this, cc.function(Function.STRING, info, arg));
+      }
+    }
+
+    // replace old with new expressions
+    if(ls != el) cc.info(QueryText.OPTMERGE_X, this);
+    exprs = list.finish();
+    return this;
+  }
+
+  @Override
+  public boolean equals(final Object obj) {
+    return this == obj || obj instanceof Concat && super.equals(obj);
+  }
+
+  @Override
+  public Expr copy(final CompileContext cc, final IntObjectMap<Var> vm) {
+    return copyType(new Concat(info, copyAll(cc, vm, exprs)));
+  }
+
+  @Override
+  public void toString(final QueryString qs) {
+    qs.tokens(exprs, " || ", true);
+  }
+}

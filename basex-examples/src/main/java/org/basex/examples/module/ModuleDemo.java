@@ -1,0 +1,88 @@
+package org.basex.examples.module;
+
+import org.basex.query.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+
+/**
+ * This is a simple XQuery demo module that demonstrates how XQuery items can be
+ * processed from Java. It is derived from the {@link QueryModule} class.
+ *
+ * If the class is in the classpath of the executed BaseX instance, it can be addressed
+ * as follows:
+ *
+ * <pre>
+ * import module namespace demo = 'http://basex.org/examples/module/module-demo';
+ * demo:name(demo:create()),
+ * ...
+ * </pre>
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class ModuleDemo extends QueryModule {
+  /**
+   * Creates a new example node.
+   * @return node
+   */
+  public FNode create() {
+    FBuilder doc = FDoc.build();
+    FBuilder elem = FElem.build(new QNm("root")).attr(new QNm("attr"), "value");
+    return doc.node(elem).finish();
+  }
+
+  /**
+   * Returns the QName of a node.
+   * @param node input node
+   * @return qname
+   */
+  public QNm name(final XNode node) {
+    return node.qname();
+  }
+
+  /**
+   * Creates a new node sequence.
+   * @return resulting value
+   */
+  public Value sequence() {
+    FBuilder elem1 = FElem.build(new QNm("root1"));
+    FBuilder elem2 = FElem.build(new QNm("root2"));
+    ValueBuilder vb = new ValueBuilder(queryContext);
+    vb.add(elem1.finish());
+    vb.add(elem2.finish());
+    return vb.value();
+  }
+
+  /**
+   * Creates a sequence with parts of the input.
+   * @param value value
+   * @return resulting value
+   */
+  public Value value(final Value value) {
+    ValueBuilder vb = new ValueBuilder(queryContext);
+    for(final Item item : value) {
+      if(item instanceof AStr) {
+        vb.add(item);
+      } else if(item instanceof final XNode node) {
+        vb.add(node.qname());
+      }
+    }
+    return vb.value();
+  }
+
+  /**
+   * Returns all ID values of the specified database nodes.
+   * @param value value
+   * @return resulting value
+   */
+  public Value dbnodes(final Value value) {
+    ValueBuilder vb = new ValueBuilder(queryContext);
+    for(final Item item : value) {
+      if(item instanceof final DBNode node) {
+        vb.add(Itr.get(node.data().id(node.pre())));
+      }
+    }
+    return vb.value();
+  }
+}

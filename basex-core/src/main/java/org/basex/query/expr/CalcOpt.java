@@ -1,0 +1,420 @@
+package org.basex.query.expr;
+
+import static org.basex.query.QueryError.*;
+
+import java.math.*;
+
+import org.basex.query.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Optimized calculation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+@FunctionalInterface
+interface CalcOpt {
+  /**
+   * Returns an optimized arithmetic calculation.
+   * @param st1 first sequence type
+   * @param st2 second sequence type
+   * @param calc calculation operator
+   * @return operator or {@code null}
+   */
+  static CalcOpt get(final SeqType st1, final SeqType st2, final Calc calc) {
+    final BasicType type = Calc.numType(st1.type, st2.type);
+    if(!type.isNumber()) return null;
+    return switch(calc) {
+      case ADD -> switch(type) {
+        case DOUBLE  -> CalcOpt::addDbl;
+        case FLOAT   -> CalcOpt::addFlt;
+        case INTEGER -> CalcOpt::addInt;
+        default      -> null;
+      };
+      case SUBTRACT -> switch(type) {
+        case DOUBLE  -> CalcOpt::subtractDbl;
+        case FLOAT   -> CalcOpt::subtractFlt;
+        case INTEGER -> CalcOpt::subtractInt;
+        default      -> null;
+      };
+      case MULTIPLY -> switch(type) {
+        case DOUBLE  -> CalcOpt::multiplyDbl;
+        case FLOAT   -> CalcOpt::multiplyFlt;
+        case INTEGER -> CalcOpt::multiplyInt;
+        default      -> null;
+      };
+      case DIVIDE -> switch(type) {
+        case DOUBLE  -> CalcOpt::divideDbl;
+        case FLOAT   -> CalcOpt::divideFlt;
+        case INTEGER -> CalcOpt::divideDec;
+        default      -> null;
+      };
+      case DIVIDEINT -> switch(type) {
+        case DOUBLE  -> CalcOpt::divideIntDbl;
+        case FLOAT   -> CalcOpt::divideIntFlt;
+        case INTEGER -> CalcOpt::divideIntInt;
+        default      -> null;
+      };
+      case MODULO -> switch(type) {
+        case DOUBLE  -> CalcOpt::moduloDbl;
+        case FLOAT   -> CalcOpt::moduloFlt;
+        case INTEGER -> CalcOpt::moduloInt;
+        default      -> null;
+      };
+    };
+  }
+
+  /**
+   * Performs the calculation.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info (can be {@code null})
+   * @return result type
+   * @throws QueryException query exception
+   */
+  Item eval(Item item1, Item item2, InputInfo info) throws QueryException;
+
+  /**
+   * Add, two doubles.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dbl addDbl(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dbl.get(item1.dbl(info) + item2.dbl(info));
+  }
+
+  /**
+   * Subtract, two doubles.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dbl subtractDbl(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dbl.get(item1.dbl(info) - item2.dbl(info));
+  }
+
+  /**
+   * Multiply, two doubles.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dbl multiplyDbl(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dbl.get(item1.dbl(info) * item2.dbl(info));
+  }
+
+  /**
+   * Divide, two doubles.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dbl divideDbl(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dbl.get(item1.dbl(info) / item2.dbl(info));
+  }
+
+  /**
+   * Integer-divide, two doubles.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr divideIntDbl(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final double n1 = item1.dbl(info), n2 = item2.dbl(info), n = n1 / n2;
+    if(n2 == 0) throw DIVZERO_X.get(info, item1);
+    if(!Double.isFinite(n)) throw INVIDIV_X.get(info, item1 + " idiv " + item2);
+    if(n < Long.MIN_VALUE || n > Long.MAX_VALUE) throw RANGE_X.get(info, item1 + " idiv " + item2);
+    return Itr.get((long) n);
+  }
+
+  /**
+   * Modulo, two doubles.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dbl moduloDbl(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dbl.get(item1.dbl(info) % item2.dbl(info));
+  }
+
+  /**
+   * Add, two floats.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Flt addFlt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Flt.get(item1.flt(info) + item2.flt(info));
+  }
+
+  /**
+   * Subtract, two floats.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Flt subtractFlt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Flt.get(item1.flt(info) - item2.flt(info));
+  }
+
+  /**
+   * Multiply, two floats.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Flt multiplyFlt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Flt.get(item1.flt(info) * item2.flt(info));
+  }
+
+  /**
+   * Divide, two floats.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Flt divideFlt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Flt.get(item1.flt(info) / item2.flt(info));
+  }
+
+  /**
+   * Integer-divide, two floats.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr divideIntFlt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final double n1 = item1.flt(info), n2 = item2.flt(info), n = n1 / n2;
+    if(n2 == 0) throw DIVZERO_X.get(info, item1);
+    if(!Double.isFinite(n)) throw INVIDIV_X.get(info, item1 + " idiv " + item2);
+    if(n < Long.MIN_VALUE || n > Long.MAX_VALUE) throw RANGE_X.get(info, item1 + " idiv " + item2);
+    return Itr.get((long) n);
+  }
+
+  /**
+   * Modulo, two doubles.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Flt moduloFlt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Flt.get(item1.flt(info) % item2.flt(info));
+  }
+
+  /**
+   * Add, two decimals.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dec addDec(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dec.get(item1.dec(info).add(item2.dec(info)));
+  }
+
+  /**
+   * Subtract, two decimals.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dec subtractDec(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dec.get(item1.dec(info).subtract(item2.dec(info)));
+  }
+
+  /**
+   * Multiply, two decimals.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dec multiplyDec(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    return Dec.get(item1.dec(info).multiply(item2.dec(info)));
+  }
+
+  /**
+   * Divide, two decimals.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dec divideDec(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final BigDecimal dec1 = item1.dec(info), dec2 = item2.dec(info);
+    if(dec2.signum() == 0) throw DIVZERO_X.get(info, item1);
+    final int scale = Math.max(18, Math.max(dec1.scale(), dec2.scale()));
+    return Dec.get(dec1.divide(dec2, scale, RoundingMode.HALF_EVEN));
+  }
+
+  /**
+   * Integer-divide, two decimals.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr divideIntDec(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final BigDecimal n1 = item1.dec(info), n2 = item2.dec(info);
+    if(n2.signum() == 0) throw DIVZERO_X.get(info, item1);
+    final BigDecimal n = n1.divideToIntegralValue(n2);
+    if(Dec.BD_MINLONG.compareTo(n) > 0 || n.compareTo(Dec.BD_MAXLONG) > 0)
+      throw RANGE_X.get(info, item1 + " idiv " + item2);
+    return Itr.get(n.longValueExact());
+  }
+
+  /**
+   * Modulo, two decimals.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Dec moduloDec(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final BigDecimal dec1 = item1.dec(info), dec2 = item2.dec(info);
+    if(dec2.signum() == 0) throw DIVZERO_X.get(info, item1);
+    final BigDecimal sub = dec1.divide(dec2, 0, RoundingMode.DOWN);
+    return Dec.get(dec1.subtract(sub.multiply(dec2)));
+  }
+
+  /**
+   * Add, two integers.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr addInt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final long itr1 = item1.itr(info), itr2 = item2.itr(info);
+    try {
+      return Itr.get(Math.addExact(itr1, itr2));
+    } catch(final ArithmeticException ex) {
+      throw RANGE_X.get(info, itr1 + " + " + itr2).cause(ex);
+    }
+  }
+
+  /**
+   * Subtract, two integers.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr subtractInt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final long itr1 = item1.itr(info), itr2 = item2.itr(info);
+    try {
+      return Itr.get(Math.subtractExact(itr1, itr2));
+    } catch(final ArithmeticException ex) {
+      throw RANGE_X.get(info, itr1 + " - " + itr2).cause(ex);
+    }
+  }
+
+  /**
+   * Multiply, two integers.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr multiplyInt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final long l1 = item1.itr(info), l2 = item2.itr(info);
+    try {
+      return Itr.get(Math.multiplyExact(l1, l2));
+    } catch(final ArithmeticException ex) {
+      throw RANGE_X.get(info, l1 + " * " + l2).cause(ex);
+    }
+  }
+
+  /**
+   * Integer-divide, two integers.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr divideIntInt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final long n1 = item1.itr(info), n2 = item2.itr(info);
+    if(n2 == 0) throw DIVZERO_X.get(info, item1);
+    try {
+      return Itr.get(Math.divideExact(n1, n2));
+    } catch(final ArithmeticException ex) {
+      throw RANGE_X.get(info, item1 + " idiv " + item2).cause(ex);
+    }
+  }
+
+  /**
+   * Modulo, two integers.
+   * @param item1 first item
+   * @param item2 second item
+   * @param info input info
+   * @return result
+   * @throws QueryException query exception
+   */
+  static Itr moduloInt(final Item item1, final Item item2, final InputInfo info)
+      throws QueryException {
+    final long itr1 = item1.itr(info), itr2 = item2.itr(info);
+    if(itr2 == 0) throw DIVZERO_X.get(info, item1);
+    return Itr.get(itr1 % itr2);
+  }
+}

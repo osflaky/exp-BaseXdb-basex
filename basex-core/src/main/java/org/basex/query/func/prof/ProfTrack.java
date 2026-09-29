@@ -1,0 +1,86 @@
+package org.basex.query.func.prof;
+
+import java.math.*;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.util.*;
+import org.basex.util.options.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ProfTrack extends StandardFunc {
+  /** Profile Options. */
+  public static final class TrackOptions extends Options {
+    /** Value. */
+    public static final BooleanOption VALUE = new BooleanOption("value", true);
+    /** Time. */
+    public static final BooleanOption TIME = new BooleanOption("time", true);
+    /** Memory. */
+    public static final BooleanOption MEMORY = new BooleanOption("memory", false);
+    /** Allocated memory. */
+    public static final BooleanOption ALLOCATED = new BooleanOption("allocated", true);
+  }
+
+  @Override
+  public XQMap value(final QueryContext qc) throws QueryException {
+    final TrackOptions options = toOptions(arg(1), new TrackOptions(), qc);
+    final Thread thread = Thread.currentThread();
+
+    // include memory consumption
+    long min = -1;
+    if(options.get(TrackOptions.MEMORY)) {
+      Performance.gc(4);
+      min = Performance.memory();
+    }
+    // include allocated memory (requires no garbage collection)
+    final boolean allocated = options.get(TrackOptions.ALLOCATED);
+    final long alloc = allocated ? Performance.allocated(thread) : 0;
+    // include execution time (called after garbage collection)
+    Performance perf = null;
+    if(options.get(TrackOptions.TIME)) {
+      perf = new Performance();
+    }
+    // include resulting value
+    Value input = null;
+    if(options.get(TrackOptions.VALUE)) {
+      // retrieve and assign value
+      input = arg(0).value(qc);
+    } else {
+      // iterate through results; skip iteration if iterator is based on a value
+      final Iter iter = arg(0).iter(qc);
+      if(iter.eagerValue() == null) {
+        while(qc.next(iter) != null);
+      }
+    }
+
+    final MapBuilder mb = new MapBuilder(4);
+    // execution time (called before garbage collection)
+    if(perf != null) {
+      final BigDecimal ms = BigDecimal.valueOf(perf.nanoRuntime()).divide(Dec.BD_1000000,
+          MathContext.DECIMAL64);
+      mb.put(TrackOptions.TIME.name(), Dec.get(ms));
+    }
+    // allocated memory (called before garbage collection)
+    if(allocated) {
+      mb.put(TrackOptions.ALLOCATED.name(),
+          Itr.get(Math.max(0, Performance.allocated(thread) - alloc)));
+    }
+    // memory consumption
+    if(min != -1) {
+      Performance.gc(2);
+      mb.put(TrackOptions.MEMORY.name(), Itr.get(Math.max(0, Performance.memory() - min)));
+    }
+    // evaluated value
+    if(input != null) mb.put(TrackOptions.VALUE.name(), input);
+    return mb.map();
+  }
+}

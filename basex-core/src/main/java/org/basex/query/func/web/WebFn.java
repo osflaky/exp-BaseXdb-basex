@@ -1,0 +1,130 @@
+package org.basex.query.func.web;
+
+import java.util.*;
+import java.util.concurrent.atomic.*;
+
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.node.*;
+import org.basex.util.*;
+import org.basex.util.Token.*;
+import org.basex.util.http.*;
+import org.basex.util.options.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public abstract class WebFn extends StandardFunc {
+  /** Response options. */
+  public static class ResponseOptions extends Options {
+    /** Status. */
+    public static final NumberOption STATUS = new NumberOption("status");
+    /** Message. */
+    public static final StringOption MESSAGE = new StringOption("message");
+  }
+
+  /**
+   * Creates a URL from the function arguments.
+   * @param qc query context
+   * @return generated url
+   * @throws QueryException query exception
+   */
+  final String createUrl(final QueryContext qc) throws QueryException {
+    final byte[] href = toToken(arg(0), qc);
+    final XQMap parameters = toEmptyMap(arg(1), qc);
+    final byte[] anchor = toZeroToken(arg(2), qc);
+
+    final TokenBuilder url = createUrl(href, parameters, '&', info);
+    if(anchor.length > 0) url.add('#').add(Token.encodeUri(anchor, UriEncoder.URI));
+    return url.toString();
+  }
+
+  /**
+   * Creates a URL from the function arguments.
+   * @param href host and path
+   * @param params query parameters
+   * @param sep separator for query parameters
+   * @param info input info
+   * @return supplied URL builder
+   * @throws QueryException query exception
+   */
+  public static TokenBuilder createUrl(final byte[] href, final XQMap params, final char sep,
+      final InputInfo info) throws QueryException {
+    final TokenBuilder url = new TokenBuilder().add(href);
+    final AtomicInteger c = new AtomicInteger();
+    params.forEach((key, value) -> {
+      final byte[] name = key.string(info);
+      for(final Item item : value) {
+        url.add(c.getAndIncrement() == 0 ? '?' : sep).add(Token.encodeUri(name, UriEncoder.URI));
+        url.add('=').add(Token.encodeUri(item.string(info), UriEncoder.URI));
+      }
+    });
+    return url;
+  }
+
+  /**
+   * Checks the range of a status code.
+   * @param status status code
+   * @param info input info
+   * @return status code
+   * @throws QueryException query exception
+   */
+  static int status(final long status, final InputInfo info) throws QueryException {
+    if(status <= 0 || status > 999) throw QueryError.WEB_STATUS_X.get(info, status);
+    return (int) status;
+  }
+
+  /**
+   * Creates a REST response.
+   * @param response status and message
+   * @param headers response headers
+   * @param attributes serialization parameters (can be {@code null})
+   * @return response
+   * @throws QueryException query exception
+   */
+  final FNode createResponse(final ResponseOptions response, final HashMap<String, String> headers,
+      final HashMap<String, String> attributes) throws QueryException {
+
+    final Integer status = response.get(ResponseOptions.STATUS);
+    if(status != null) status(status, info);
+
+    // root element
+    final FBuilder rrest = FElem.build(HTTPText.Q_REST_RESPONSE).ns();
+
+    // HTTP response
+    final FBuilder hresp = FElem.build(HTTPText.Q_HTTP_RESPONSE).ns();
+    for(final Option<?> o : response) {
+      if(response.contains(o)) hresp.attr(new QNm(o.name()), response.get(o));
+    }
+    headers.forEach((name, value) -> {
+      if(!value.isEmpty()) {
+        hresp.node(FElem.build(HTTPText.Q_HTTP_HEADER).attr(HTTPText.Q_NAME, name).
+            attr(HTTPText.Q_VALUE, value));
+      }
+    });
+    rrest.node(hresp);
+
+    // serialization parameters
+    if(attributes != null) {
+      final SerializerOptions sopts = SerializerMode.DEFAULT.get();
+      for(final String entry : attributes.keySet())
+        if(sopts.option(entry) == null) throw QueryError.UNKNOWNOPTION_X.get(info, entry);
+
+      final FBuilder param = FElem.build(SerializerOptions.Q_ROOT).ns();
+      attributes.forEach((name, value) -> {
+        if(!value.isEmpty()) {
+          final QNm qnm = new QNm(QueryText.OUTPUT_PREFIX, name, QueryText.OUTPUT_URI);
+          param.node(FElem.build(qnm).attr(HTTPText.Q_VALUE, value));
+        }
+      });
+      rrest.node(param);
+    }
+    return rrest.finish();
+  }
+}

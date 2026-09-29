@@ -1,0 +1,43 @@
+package org.basex.query.func.fn;
+
+import org.basex.core.locks.*;
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.util.*;
+import org.basex.query.value.item.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnPosition extends StandardFunc {
+  @Override
+  public Itr value(final QueryContext qc) throws QueryException {
+    ctxValue(qc);
+    return Itr.get(qc.focus.pos);
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return visitor.lock(Locking.CONTEXT, false) && super.accept(visitor);
+  }
+
+  @Override
+  public Expr simplifyFor(final Simplify mode, final CompileContext cc) throws QueryException {
+    Expr expr = this;
+    if(mode == Simplify.PREDICATE) {
+      // E[position()] → E[true()]
+      expr = Bln.TRUE;
+    }
+    return cc.simplify(this, expr, mode);
+  }
+
+  @Override
+  public Expr optimizePos(final CmpOp op, final CompileContext cc) {
+    return Bln.get(op.oneOf(CmpOp.EQ, CmpOp.GE, CmpOp.LE));
+  }
+}

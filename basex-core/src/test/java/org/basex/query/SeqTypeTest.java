@@ -1,0 +1,1173 @@
+package org.basex.query;
+
+import static org.basex.query.value.type.BasicType.*;
+import static org.basex.query.value.type.ListType.*;
+import static org.basex.query.value.type.NodeType.*;
+import static org.basex.query.value.type.Occ.*;
+import static org.basex.query.value.type.Types.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.util.function.*;
+
+import org.basex.query.expr.path.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Tests for the {@link SeqType} class.
+ *
+ * @author BaseX Team, BSD License
+ * @author Leo Woerteler
+ */
+public final class SeqTypeTest {
+  /** Occurrences. */
+  private static final Occ[] OCCS = { ZERO, ZERO_OR_ONE, EXACTLY_ONE, ZERO_OR_MORE, ONE_OR_MORE };
+  /** Error type (void category). */
+  private static final SeqType ERROR_O = ERROR.seqType();
+  /** Error type {@code xs:error?} (empty category). */
+  private static final SeqType ERROR_ZO = ERROR.seqType(ZERO_OR_ONE);
+  /** Error type {@code xs:error*} (empty category). */
+  private static final SeqType ERROR_ZM = ERROR.seqType(ZERO_OR_MORE);
+  /** Error type {@code xs:error+} (void category). */
+  private static final SeqType ERROR_OM = ERROR.seqType(ONE_OR_MORE);
+
+  /** Type node(). */
+  private static final SeqType NODE_O = NODE.seqType();
+  /** Type element(x). */
+  private static final SeqType ELEMENT_X_O = NodeType.get(NameTest.get(new QNm("X"))).seqType();
+  /** Type element(y). */
+  private static final SeqType ELEMENT_Y_O = NodeType.get(NameTest.get(new QNm("Y"))).seqType();
+  /** Type jnode(). */
+  private static final SeqType JNODE_XX_O = NodeType.get(JNodeTest.get(null, null)).seqType();
+  /** Type jnode(*, xs:integer). */
+  private static final SeqType JNODE_XI_O = NodeType.get(JNodeTest.get(null, INTEGER_O)).seqType();
+  /** Type jnode("V"). */
+  private static final SeqType JNODE_VX_O = NodeType.get(JNodeTest.get(Str.get("V"),
+      null)).seqType();
+  /** Type jnode("V", xs:integer). */
+  private static final SeqType JNODE_VI_O = NodeType.get(JNodeTest.get(Str.get("V"),
+      INTEGER_O)).seqType();
+  /** Type jnode("W", xs:string). */
+  private static final SeqType JNODE_WS_O = NodeType.get(JNodeTest.get(Str.get("W"),
+      STRING_O)).seqType();
+
+  /** Tests for {@link Occ#intersect(Occ)}. */
+  @Test public void occIntersect() {
+    final Occ[][] table = {
+      { ZERO, ZERO,        null,        ZERO,         null        },
+      { ZERO, ZERO_OR_ONE, EXACTLY_ONE, ZERO_OR_ONE,  EXACTLY_ONE },
+      { null, EXACTLY_ONE, EXACTLY_ONE, EXACTLY_ONE,  EXACTLY_ONE },
+      { ZERO, ZERO_OR_ONE, EXACTLY_ONE, ZERO_OR_MORE, ONE_OR_MORE },
+      { null, EXACTLY_ONE, EXACTLY_ONE, ONE_OR_MORE,  ONE_OR_MORE }
+    };
+    compute(table, Occ::intersect);
+  }
+
+  /** Tests for {@link Occ#union(Occ)}. */
+  @Test public void occUnion() {
+    final Occ[][] table = {
+      { ZERO,         ZERO_OR_ONE,  ZERO_OR_ONE,  ZERO_OR_MORE, ZERO_OR_MORE },
+      { ZERO_OR_ONE,  ZERO_OR_ONE,  ZERO_OR_ONE,  ZERO_OR_MORE, ZERO_OR_MORE },
+      { ZERO_OR_ONE,  ZERO_OR_ONE,  EXACTLY_ONE,  ZERO_OR_MORE, ONE_OR_MORE  },
+      { ZERO_OR_MORE, ZERO_OR_MORE, ZERO_OR_MORE, ZERO_OR_MORE, ZERO_OR_MORE },
+      { ZERO_OR_MORE, ZERO_OR_MORE, ONE_OR_MORE,  ZERO_OR_MORE, ONE_OR_MORE  }
+    };
+    compute(table, Occ::union);
+  }
+
+  /** Tests for {@link Occ#add(Occ)}. */
+  @Test public void occAdd() {
+    final Occ[][] table = {
+      { ZERO,         ZERO_OR_ONE,  EXACTLY_ONE,  ZERO_OR_MORE, ONE_OR_MORE },
+      { ZERO_OR_ONE,  ZERO_OR_MORE, ONE_OR_MORE,  ZERO_OR_MORE, ONE_OR_MORE },
+      { EXACTLY_ONE,  ONE_OR_MORE,  ONE_OR_MORE,  ONE_OR_MORE,  ONE_OR_MORE },
+      { ZERO_OR_MORE, ZERO_OR_MORE, ONE_OR_MORE,  ZERO_OR_MORE, ONE_OR_MORE },
+      { ONE_OR_MORE,  ONE_OR_MORE,  ONE_OR_MORE,  ONE_OR_MORE,  ONE_OR_MORE }
+    };
+    compute(table, Occ::add);
+  }
+
+  /** Tests for {@link Occ#multiply(Occ)}. */
+  @Test public void occMultiply() {
+    final Occ[][] table = {
+      { ZERO, ZERO,         ZERO,         ZERO,         ZERO         },
+      { ZERO, ZERO_OR_ONE,  ZERO_OR_ONE,  ZERO_OR_MORE, ZERO_OR_MORE },
+      { ZERO, ZERO_OR_ONE,  EXACTLY_ONE,  ZERO_OR_MORE, ONE_OR_MORE  },
+      { ZERO, ZERO_OR_MORE, ZERO_OR_MORE, ZERO_OR_MORE, ZERO_OR_MORE },
+      { ZERO, ZERO_OR_MORE, ONE_OR_MORE,  ZERO_OR_MORE, ONE_OR_MORE  }
+    };
+    compute(table, Occ::multiply);
+  }
+
+  /**
+   * Computes occurrences.
+   * @param table result table
+   * @param func function for computing the result
+   */
+  private static void compute(final Occ[][] table, final BiFunction<Occ, Occ, Occ> func) {
+    final int ol = OCCS.length;
+    for(int o = 0; o < ol; o++) {
+      for(int p = 0; p < ol; p++) {
+        final Occ occ = func.apply(OCCS[o], OCCS[p]);
+        final String exp = table[o][p] == null ? "null" : table[o][p].name();
+        final String res = occ == null ? "null" : occ.name();
+        assertEquals(exp, res, "(" + o + ": " + OCCS[o].name() + ", " + p + ": " +
+            OCCS[p].name() + ')');
+      }
+    }
+  }
+
+  /** Tests for {@link Occ#instanceOf(Occ)}. */
+  @Test public void occInstanceOf() {
+    assertTrue(EXACTLY_ONE.instanceOf(ZERO_OR_MORE));
+    assertFalse(ZERO_OR_MORE.instanceOf(EXACTLY_ONE));
+    final int bits = 0x014F90E1;
+
+    final int ol = OCCS.length;
+    for(int o = 0; o < ol; o++) {
+      for(int p = 0; p < ol; p++) {
+        final boolean inst = (bits >>> 5 * p + o & 1) != 0;
+        assertEquals(inst, OCCS[o].instanceOf(OCCS[p]), "(" + o + ", " + p + ')');
+      }
+    }
+  }
+
+  /**
+   * Tests for {@link SeqType#eq(SeqType)}.
+   */
+  @Test public void eq() {
+    final TokenObjectMap<ShapeField> fld1 = new TokenObjectMap<>(),
+        fld2 = new TokenObjectMap<>();
+    final QNm r1Name = new QNm(Token.token("r1")),
+      r2Name = new QNm(Token.token("r2"));
+    final InputInfo ii = new InputInfo(getClass().getName(), 1, 1);
+    final SeqType
+      // r1 record(next? as r1, x)
+      r1 = new TypeRef(r1Name, ii).seqType(),
+      // r2 record(next? as r2, x)
+      r2 = new TypeRef(r2Name, ii).seqType();
+
+    fld1.put(Token.token("next"), new ShapeField(r1.union(ZERO)));
+    fld1.put(Token.token("x"), new ShapeField(ITEM_ZM));
+
+    fld2.put(Token.token("next"), new ShapeField(r2.union(ZERO)));
+    fld2.put(Token.token("x"), new ShapeField(ITEM_ZM));
+
+    ((TypeRef) r1.type).resolve(new ShapeType(fld1));
+    ((TypeRef) r2.type).resolve(new ShapeType(fld2));
+
+    assertTrue(r1.eq(r2));
+    assertTrue(r2.eq(r1));
+    assertFalse(DATE_TIME_O.eq(DATE_TIME_STAMP_O));
+    assertFalse(DATE_TIME_STAMP_O.eq(DATE_TIME_O));
+  }
+
+  /**
+   * Tests that a void type ({@code xs:error}) reports an unknown result size: it has no instances
+   * and never returns a value, so size-based optimizations must not treat it as a single item (e.g.
+   * {@code count(local:f())} for a recursive {@code local:f() as xs:error} must not fold to 1).
+   */
+  @Test public void voidSize() {
+    assertEquals(-1, new ExprType(ERROR_O).size());
+    assertEquals(-1, new ExprType(ERROR.seqType(ONE_OR_MORE)).size());
+    // ordinary occurrences still derive the size from the occurrence indicator
+    assertEquals(1, new ExprType(STRING_O).size());
+    assertEquals(0, new ExprType(EMPTY_SEQUENCE_Z).size());
+  }
+
+  /**
+   * Tests for {@link SeqType#instanceOf(SeqType)}.
+   */
+  @Test public void instanceOf() {
+    // atomic items
+    assertTrue(BOOLEAN_O.instanceOf(ANY_ATOMIC_TYPE_ZM));
+    assertFalse(ANY_ATOMIC_TYPE_ZM.instanceOf(BOOLEAN_O));
+    assertTrue(DOUBLE_O.instanceOf(DOUBLE_ZM));
+    assertFalse(DOUBLE_ZM.instanceOf(DOUBLE_O));
+    assertFalse(DATE_TIME_O.instanceOf(DATE_TIME_STAMP_O));
+    assertTrue(DATE_TIME_STAMP_O.instanceOf(DATE_TIME_O));
+
+    assertTrue(ERROR_O.instanceOf(ANY_ATOMIC_TYPE_O));
+    assertTrue(ERROR.instanceOf(STRING));
+    assertTrue(ERROR.instanceOf(NUMERIC));
+    assertTrue(ERROR.instanceOf(XNODE));
+    assertTrue(ERROR.instanceOf(FUNCTION));
+    assertTrue(ERROR.instanceOf(MAP));
+    assertTrue(ERROR.instanceOf(ARRAY));
+    assertTrue(ERROR.instanceOf(RECORD));
+    assertTrue(ERROR.instanceOf(ChoiceItemType.get(STRING, ELEMENT)));
+
+    assertFalse(STRING.instanceOf(ERROR));
+    assertFalse(XNODE.instanceOf(ERROR));
+
+    assertTrue(ERROR_ZO.instanceOf(EMPTY_SEQUENCE_Z));
+    assertTrue(ERROR_ZO.instanceOf(STRING_ZO));
+    assertTrue(ERROR_ZO.instanceOf(STRING_ZM));
+    assertFalse(ERROR_ZO.instanceOf(STRING_O));
+    assertFalse(ERROR_ZO.instanceOf(STRING_OM));
+    assertFalse(ERROR_ZO.instanceOf(ERROR_O));
+    assertTrue(ERROR_ZM.instanceOf(EMPTY_SEQUENCE_Z));
+    assertTrue(ERROR_ZM.instanceOf(STRING_ZM));
+    assertFalse(ERROR_ZM.instanceOf(STRING_O));
+    assertTrue(ERROR_O.instanceOf(ERROR_ZO));
+    assertTrue(ERROR_O.instanceOf(ERROR_OM));
+    assertTrue(ERROR_OM.instanceOf(ERROR_O));
+    assertFalse(ERROR_ZO.instanceOf(ERROR_O));
+    assertTrue(EMPTY_SEQUENCE_Z.instanceOf(ERROR_ZO));
+    assertFalse(STRING_ZO.instanceOf(ERROR_ZO));
+    assertFalse(STRING_O.instanceOf(ERROR_ZO));
+
+    // functions
+    final SeqType f = FuncType.get(DECIMAL_ZO, BOOLEAN_O).seqType();
+    assertFalse(f.instanceOf(INTEGER_O));
+    assertTrue(f.instanceOf(ITEM_O));
+    assertTrue(f.instanceOf(FUNCTION_O));
+    assertTrue(f.instanceOf(f));
+    assertTrue(f.instanceOf(FUNCTION_ZO));
+    assertFalse(FUNCTION_O.instanceOf(f));
+    assertFalse(f.instanceOf(FuncType.get(DECIMAL_ZO, BOOLEAN_O, INTEGER_O).seqType()));
+    assertFalse(f.instanceOf(FuncType.get(DECIMAL_ZO, ANY_ATOMIC_TYPE_O).seqType()));
+    assertFalse(f.instanceOf(FuncType.get(BOOLEAN_O, BOOLEAN_O).seqType()));
+
+    // maps
+    final MapType m = MapType.get(STRING, INTEGER_O);
+    assertTrue(m.instanceOf(m));
+    assertTrue(m.instanceOf(ITEM));
+    assertTrue(m.instanceOf(FUNCTION));
+    assertTrue(m.instanceOf(MAP));
+    assertTrue(m.instanceOf(MapType.get(ANY_ATOMIC_TYPE, INTEGER_O)));
+    assertTrue(m.instanceOf(MapType.get(STRING, INTEGER_O)));
+    assertTrue(m.instanceOf(MapType.get(STRING, INTEGER_ZO)));
+    assertFalse(m.instanceOf(MapType.get(INTEGER, ITEM_ZM)));
+    assertFalse(m.instanceOf(ARRAY));
+    assertFalse(m.instanceOf(MapType.get(STRING, BOOLEAN_O)));
+
+    // arrays
+    final ArrayType a = ArrayType.get(INTEGER_O);
+    assertTrue(a.instanceOf(a));
+    assertTrue(a.instanceOf(ITEM));
+    assertTrue(a.instanceOf(FUNCTION));
+    assertTrue(a.instanceOf(ARRAY));
+    assertTrue(a.instanceOf(ArrayType.get(INTEGER_O)));
+    assertTrue(a.instanceOf(ArrayType.get(INTEGER_O)));
+    assertTrue(a.instanceOf(ArrayType.get(INTEGER_ZO)));
+    assertFalse(a.instanceOf(MAP));
+    assertFalse(a.instanceOf(ArrayType.get(BOOLEAN_O)));
+
+    // nodes
+
+    assertTrue(JNODE_O.instanceOf(NODE_O));
+    assertTrue(XNODE_O.instanceOf(NODE_O));
+    assertTrue(ELEMENT_O.instanceOf(ITEM_O));
+    assertTrue(ELEMENT_O.instanceOf(ELEMENT_O));
+    assertTrue(ATTRIBUTE_O.instanceOf(XNODE_O));
+    assertTrue(ATTRIBUTE_O.instanceOf(ATTRIBUTE_O));
+    assertTrue(ELEMENT_X_O.instanceOf(XNODE_O));
+    assertTrue(ELEMENT_X_O.instanceOf(ELEMENT_O));
+    assertTrue(ELEMENT_X_O.instanceOf(ELEMENT_X_O));
+
+    assertFalse(NODE_O.instanceOf(JNODE_O));
+    assertFalse(NODE_O.instanceOf(XNODE_O));
+    assertFalse(ITEM_O.instanceOf(ELEMENT_O));
+    assertFalse(JNODE_O.instanceOf(XNODE_O));
+    assertFalse(JNODE_O.instanceOf(ELEMENT_O));
+    assertFalse(XNODE_O.instanceOf(ELEMENT_O));
+    assertFalse(XNODE_O.instanceOf(JNODE_O));
+    assertFalse(ATTRIBUTE_O.instanceOf(ELEMENT_O));
+    assertFalse(ELEMENT_O.instanceOf(f));
+    assertFalse(ELEMENT_O.instanceOf(JNODE_O));
+    assertFalse(ELEMENT_X_O.instanceOf(ATTRIBUTE_O));
+    assertFalse(ELEMENT_X_O.instanceOf(ELEMENT_Y_O));
+
+    assertTrue(JNODE_XX_O.instanceOf(JNODE_XX_O));
+    assertFalse(JNODE_XX_O.instanceOf(JNODE_XI_O));
+    assertFalse(JNODE_XX_O.instanceOf(JNODE_VX_O));
+    assertFalse(JNODE_XX_O.instanceOf(JNODE_VI_O));
+
+    assertTrue(JNODE_XI_O.instanceOf(JNODE_XX_O));
+    assertTrue(JNODE_XI_O.instanceOf(JNODE_XI_O));
+    assertFalse(JNODE_XI_O.instanceOf(JNODE_VX_O));
+    assertFalse(JNODE_XI_O.instanceOf(JNODE_VI_O));
+
+    assertTrue(JNODE_VX_O.instanceOf(JNODE_XX_O));
+    assertFalse(JNODE_VX_O.instanceOf(JNODE_XI_O));
+    assertTrue(JNODE_VX_O.instanceOf(JNODE_VX_O));
+    assertFalse(JNODE_VX_O.instanceOf(JNODE_VI_O));
+
+    assertTrue(JNODE_VI_O.instanceOf(JNODE_XX_O));
+    assertTrue(JNODE_VI_O.instanceOf(JNODE_XI_O));
+    assertTrue(JNODE_VI_O.instanceOf(JNODE_VX_O));
+    assertTrue(JNODE_VI_O.instanceOf(JNODE_VI_O));
+
+    assertFalse(JNODE_VI_O.instanceOf(JNODE_WS_O));
+    assertFalse(JNODE_WS_O.instanceOf(JNODE_VI_O));
+
+    // enums
+    final SeqType
+      // enum('a')
+      e1 = new EnumType(new TokenSet("a")).seqType(),
+      // enum('b')
+      e2 = new EnumType(new TokenSet("b")).seqType(),
+      // enum('a', 'b')
+      e3 = new EnumType(new TokenSet("a", "b")).seqType();
+    assertTrue(e1.instanceOf(e3));
+    assertFalse(e1.instanceOf(e2));
+    assertFalse(e3.instanceOf(e1));
+    assertTrue(e3.instanceOf(e3));
+    assertTrue(e1.instanceOf(STRING_O));
+    assertFalse(STRING_O.instanceOf(e3));
+    assertFalse(e1.instanceOf(LANGUAGE_O));
+    assertFalse(LANGUAGE_O.instanceOf(e3));
+
+    final SeqType
+      // (xs:date | xs:string)
+      c1 = ChoiceItemType.get(DATE, STRING).seqType(),
+      // (element() | xs:string)
+      c2 = ChoiceItemType.get(ELEMENT, STRING).seqType(),
+      // (xs:NMTOKENS | xs:string)
+      c3 = ChoiceItemType.get(NMTOKENS, STRING).seqType(),
+      // (array(*) | xs:string)
+      c4 = ChoiceItemType.get(ARRAY, STRING).seqType(),
+      // (map(*) | xs:string)
+      c5 = ChoiceItemType.get(MAP, STRING).seqType(),
+      // (function(*) | xs:string)
+      c6 = ChoiceItemType.get(FUNCTION, STRING).seqType(),
+      // (xnode() | jnode())
+      c7 = ChoiceItemType.get(XNODE, JNODE).seqType();
+
+    assertTrue(c1.instanceOf(c1));
+    assertFalse(c1.instanceOf(c2));
+    assertFalse(c1.instanceOf(c3));
+    assertFalse(c1.instanceOf(c4));
+    assertFalse(c1.instanceOf(c5));
+    assertFalse(c1.instanceOf(c6));
+    assertFalse(c1.instanceOf(DATE_O));
+    assertTrue(DATE_O.instanceOf(c1));
+    assertFalse(c1.instanceOf(STRING_O));
+    assertTrue(STRING_O.instanceOf(c1));
+    assertFalse(c2.instanceOf(c1));
+    assertTrue(c2.instanceOf(c2));
+    assertFalse(c2.instanceOf(c3));
+    assertFalse(c2.instanceOf(c4));
+    assertFalse(c2.instanceOf(c5));
+    assertFalse(c2.instanceOf(c6));
+    assertFalse(c2.instanceOf(ELEMENT_O));
+    assertTrue(ELEMENT_O.instanceOf(c2));
+    assertFalse(c2.instanceOf(STRING_O));
+    assertTrue(STRING_O.instanceOf(c2));
+    assertFalse(c3.instanceOf(c1));
+    assertFalse(c3.instanceOf(c2));
+    assertTrue(c3.instanceOf(c3));
+    assertFalse(c3.instanceOf(c4));
+    assertFalse(c3.instanceOf(c5));
+    assertFalse(c3.instanceOf(c6));
+    assertFalse(c3.instanceOf(NMTOKENS_O));
+    assertTrue(NMTOKENS_O.instanceOf(c3));
+    assertFalse(c3.instanceOf(STRING_O));
+    assertTrue(STRING_O.instanceOf(c3));
+    assertFalse(c4.instanceOf(c1));
+    assertFalse(c4.instanceOf(c2));
+    assertFalse(c4.instanceOf(c3));
+    assertTrue(c4.instanceOf(c4));
+    assertFalse(c4.instanceOf(c5));
+    assertTrue(c4.instanceOf(c6));
+    assertFalse(c4.instanceOf(ARRAY_O));
+    assertTrue(ARRAY_O.instanceOf(c4));
+    assertFalse(c4.instanceOf(STRING_O));
+    assertTrue(STRING_O.instanceOf(c4));
+    assertFalse(c5.instanceOf(c1));
+    assertFalse(c5.instanceOf(c2));
+    assertFalse(c5.instanceOf(c3));
+    assertFalse(c5.instanceOf(c4));
+    assertTrue(c5.instanceOf(c5));
+    assertTrue(c5.instanceOf(c6));
+    assertFalse(c5.instanceOf(MAP_O));
+    assertTrue(MAP_O.instanceOf(c5));
+    assertFalse(c5.instanceOf(STRING_O));
+    assertTrue(STRING_O.instanceOf(c5));
+    assertFalse(c6.instanceOf(c1));
+    assertFalse(c6.instanceOf(c2));
+    assertFalse(c6.instanceOf(c3));
+    assertFalse(c6.instanceOf(c4));
+    assertFalse(c6.instanceOf(c5));
+    assertTrue(c6.instanceOf(c6));
+    assertFalse(c6.instanceOf(FUNCTION_O));
+    assertTrue(FUNCTION_O.instanceOf(c6));
+    assertFalse(c6.instanceOf(STRING_O));
+    assertTrue(STRING_O.instanceOf(c6));
+    assertTrue(Types.NUMERIC_EXPANSION.seqType().instanceOf(NUMERIC_O));
+    assertTrue(NUMERIC_O.instanceOf(Types.NUMERIC_EXPANSION.seqType()));
+    assertTrue(Types.ANY_ATOMIC_TYPE_EXPANSION.seqType().instanceOf(ANY_ATOMIC_TYPE_O));
+    assertTrue(ANY_ATOMIC_TYPE_O.instanceOf(Types.ANY_ATOMIC_TYPE_EXPANSION.seqType()));
+    assertTrue(Types.ITEM_EXPANSION.seqType().instanceOf(ITEM_O));
+    assertTrue(ITEM_O.instanceOf(Types.ITEM_EXPANSION.seqType()));
+    assertTrue(c7.instanceOf(NODE_O));
+    assertTrue(NODE_O.instanceOf(c7));
+
+    final TokenObjectMap<ShapeField> fld1 = new TokenObjectMap<>(), fld2 = new TokenObjectMap<>();
+    final QNm r1Name = new QNm(Token.token("r1")), r2Name = new QNm(Token.token("r2"));
+    final InputInfo ii = new InputInfo(getClass().getName(), 1, 1);
+    final SeqType
+      // r1 record(next? as r1, x)
+      r1 = new TypeRef(r1Name, ii).seqType(),
+      // r2 record(next? as r2, x)
+      r2 = new TypeRef(r2Name, ii).seqType();
+
+    fld1.put(Token.token("next"), new ShapeField(r1.union(ZERO)));
+    fld1.put(Token.token("x"), new ShapeField(ITEM_ZM));
+
+    fld2.put(Token.token("next"), new ShapeField(r2.union(ZERO)));
+    fld2.put(Token.token("x"), new ShapeField(ITEM_ZM));
+
+    ((TypeRef) r1.type).resolve(new ShapeType(fld1));
+    ((TypeRef) r2.type).resolve(new ShapeType(fld2));
+
+    assertTrue(RECORD_O.instanceOf(FUNCTION_O));
+    assertFalse(MAP_O.instanceOf(RECORD_O));
+    assertTrue(RECORD_O.instanceOf(MAP_O));
+    assertTrue(r1.instanceOf(r2));
+    assertTrue(r2.instanceOf(r1));
+  }
+
+  /**
+   * Tests for {@link SeqType#union(SeqType)}.
+   */
+  @Test public void union() {
+    final BiFunction<SeqType, SeqType, SeqType> op = SeqType::union;
+
+    combine(EMPTY_SEQUENCE_Z, op);
+    combine(STRING_O, op);
+    combine(INTEGER_O, op);
+    combine(ATTRIBUTE_O, op);
+    combine(ITEM_O, op);
+    combine(NORMALIZED_STRING.seqType(), op);
+    combine(ATTRIBUTE_O, op);
+    combine(ELEMENT_O, op);
+    combine(XNODE_O, op);
+    combine(DATE_TIME_O, op);
+    combine(DATE_TIME_STAMP_O, op);
+
+    combine(STRING_O, INTEGER_O, ANY_ATOMIC_TYPE_O, op);
+    combine(STRING_O, STRING_O, STRING_O, op);
+    combine(STRING_O, ATTRIBUTE_O, ITEM_O, op);
+    combine(NORMALIZED_STRING.seqType(), STRING_O, STRING_O, op);
+    combine(STRING_O, NORMALIZED_STRING.seqType(), STRING_O, op);
+    combine(DATE_TIME_STAMP_O, DATE_TIME_O, DATE_TIME_O, op);
+    combine(DATE_TIME_O, DATE_TIME_STAMP_O, DATE_TIME_O, op);
+
+    combine(ERROR_O, op);
+    combine(ERROR_O, STRING_O, STRING_O, op);
+    combine(ERROR_O, STRING_ZO, STRING_ZO, op);
+    combine(ERROR_O, STRING_OM, STRING_OM, op);
+    combine(ERROR_O, STRING_ZM, STRING_ZM, op);
+    combine(ERROR_O, EMPTY_SEQUENCE_Z, ERROR_ZO, op);
+    combine(ERROR_OM, STRING_O, STRING_OM, op);
+    combine(ERROR_OM, STRING_ZO, STRING_ZM, op);
+    combine(ERROR_OM, STRING_OM, STRING_OM, op);
+    combine(ERROR_OM, STRING_ZM, STRING_ZM, op);
+    combine(ERROR_OM, EMPTY_SEQUENCE_Z, ERROR_ZM, op);
+    combine(ERROR_ZO, STRING_O, STRING_ZO, op);
+    combine(ERROR_ZO, STRING_ZO, STRING_ZO, op);
+    combine(ERROR_ZO, STRING_OM, STRING_ZM, op);
+    combine(ERROR_ZO, STRING_ZM, STRING_ZM, op);
+    combine(ERROR_ZO, EMPTY_SEQUENCE_Z, ERROR_ZO, op);
+    combine(ERROR_ZM, STRING_O, STRING_ZM, op);
+    combine(ERROR_ZM, STRING_ZO, STRING_ZM, op);
+    combine(ERROR_ZM, STRING_OM, STRING_ZM, op);
+    combine(ERROR_ZM, STRING_ZM, STRING_ZM, op);
+    combine(ERROR_ZM, EMPTY_SEQUENCE_Z, ERROR_ZM, op);
+    combine(ERROR_ZO, ERROR_O, ERROR_ZO, op);
+    combine(ERROR_O, POSITIVE_INTEGER_O, POSITIVE_INTEGER_O, op);
+    combine(ERROR_O, NMTOKENS.seqType(), NMTOKENS.seqType(), op);
+    combine(ERROR_O, ERROR_OM, ERROR_OM, op);
+
+    combine(ELEMENT_O, STRING_O, ITEM_O, op);
+    combine(JNODE_O, NODE_O, NODE_O, op);
+    combine(XNODE_O, NODE_O, NODE_O, op);
+    combine(ELEMENT_O, ITEM_O, ITEM_O, op);
+    combine(ELEMENT_O, ELEMENT_O, ELEMENT_O, op);
+    combine(ATTRIBUTE_O, XNODE_O, XNODE_O, op);
+    combine(ATTRIBUTE_O, ATTRIBUTE_O, ATTRIBUTE_O, op);
+    combine(ELEMENT_X_O, XNODE_O, XNODE_O, op);
+    combine(ELEMENT_X_O, ELEMENT_O, ELEMENT_O, op);
+    combine(ELEMENT_X_O, ELEMENT_X_O, ELEMENT_X_O, op);
+
+    combine(NODE_O, JNODE_O, NODE_O, op);
+    combine(NODE_O, XNODE_O, NODE_O, op);
+    combine(ITEM_O, ELEMENT_O, ITEM_O, op);
+    combine(JNODE_O, XNODE_O, NODE_O, op);
+    combine(JNODE_O, ELEMENT_O, NODE_O, op);
+    combine(XNODE_O, ELEMENT_O, XNODE_O, op);
+    combine(XNODE_O, JNODE_O, NODE_O, op);
+    combine(ATTRIBUTE_O, ELEMENT_O, XNODE_O, op);
+    combine(ELEMENT_O, JNODE_O, NODE_O, op);
+    combine(ELEMENT_X_O, ATTRIBUTE_O, XNODE_O, op);
+    combine(NODE_O, ERROR_O, NODE_O, op);
+
+    combine(JNODE_XX_O, JNODE_XX_O, JNODE_XX_O, op);
+    combine(JNODE_XX_O, JNODE_XI_O, JNODE_XX_O, op);
+    combine(JNODE_XX_O, JNODE_VX_O, JNODE_XX_O, op);
+    combine(JNODE_XX_O, JNODE_VI_O, JNODE_XX_O, op);
+    //combine(JNODE_VX_O, JNODE_XI_O, JNODE_XX_O, op); union test
+    combine(JNODE_VX_O, JNODE_VX_O, JNODE_VX_O, op);
+    combine(JNODE_VX_O, JNODE_VI_O, JNODE_VX_O, op);
+    combine(JNODE_XI_O, JNODE_XI_O, JNODE_XI_O, op);
+    combine(JNODE_XI_O, JNODE_VI_O, JNODE_XI_O, op);
+    combine(JNODE_VI_O, JNODE_VI_O, JNODE_VI_O, op);
+
+    combine(MAP_O, ITEM_O, ITEM_O, op);
+    combine(MAP_O, FUNCTION_O, FUNCTION_O, op);
+    combine(MAP_O, ARRAY_O, FUNCTION_O, op);
+    combine(MAP_O, ERROR_O, MAP_O, op);
+
+    // functions
+    final SeqType
+      // function(xs:boolean) as xs:decimal?
+      f1 = FuncType.get(DECIMAL_ZO, BOOLEAN_O).seqType(),
+      // function(xs:boolean) as xs:nonNegativeInteger
+      f2 = FuncType.get(NON_NEGATIVE_INTEGER.seqType(), BOOLEAN_O).seqType(),
+      // function(xs:boolean, xs:boolean) as xs:nonNegativeInteger
+      f3 = FuncType.get(NON_NEGATIVE_INTEGER.seqType(), BOOLEAN_O, BOOLEAN_O).seqType(),
+      // function(xs:integer) as xs:nonNegativeInteger
+      f4 = FuncType.get(NON_NEGATIVE_INTEGER.seqType(), INTEGER_O).seqType(),
+      // function(xs:boolean) as xs:integer
+      f5 = FuncType.get(INTEGER_O, BOOLEAN_O).seqType(),
+      // function(xs:boolean) as xs:integer?
+      f6 = FuncType.get(INTEGER_ZO, BOOLEAN_O).seqType();
+
+    combine(f1, op);
+    combine(f2, op);
+    combine(f3, op);
+    combine(f4, op);
+    combine(f5, op);
+
+    combine(f1, INTEGER_O, ITEM_O, op);
+    combine(f1, FUNCTION_O, FUNCTION_O, op);
+    combine(f1, ERROR_O, f1, op);
+    combine(f1, f2, f1, op);
+    combine(f1, f3, FUNCTION_O, op);
+    combine(f1, f4, FUNCTION_O, op);
+    combine(f1, f5, f1, op);
+    combine(f2, f3, FUNCTION_O, op);
+    combine(f2, f4, FUNCTION_O, op);
+    combine(f2, f5, f5, op);
+    combine(f3, f4, FUNCTION_O, op);
+    combine(f3, f5, FUNCTION_O, op);
+    combine(f4, f5, FUNCTION_O, op);
+
+    final SeqType
+      // map(xs:anyAtomicType, xs:integer)
+      m1 = MapType.get(ANY_ATOMIC_TYPE, INTEGER_O).seqType(),
+      // map(xs:boolean, xs:integer)
+      m2 = MapType.get(BOOLEAN, INTEGER_O).seqType(),
+      // map(xs:boolean, xs:nonNegativeInteger)
+      m3 = MapType.get(BOOLEAN, NON_NEGATIVE_INTEGER.seqType()).seqType(),
+      // map(xs:integer, xs:integer)
+      m4 = MapType.get(INTEGER, INTEGER_O).seqType();
+
+    combine(m1, op);
+    combine(m2, op);
+    combine(m3, op);
+    combine(m4, op);
+
+    combine(MAP_O, m1, MAP_O, op);
+    combine(MAP_O, ERROR_O, MAP_O, op);
+    combine(m1, INTEGER_O, ITEM_O, op);
+    combine(m1, ERROR_O, m1, op);
+    combine(m1, f1, f1, op);
+    combine(m1, f2, f6, op);
+    combine(m1, m2, m1, op);
+    combine(m1, m3, m1, op);
+    combine(m2, m4, m1, op);
+
+    final SeqType
+      // array(xs:integer)
+      a1 = ArrayType.get(INTEGER_O).seqType(),
+      // array(xs:integer)
+      a2 = ArrayType.get(ANY_ATOMIC_TYPE_O).seqType(),
+      // array(xs:nonNegativeInteger)
+      a3 = ArrayType.get(NON_NEGATIVE_INTEGER.seqType()).seqType(),
+      // array(xs:boolean)
+      a4 = ArrayType.get(BOOLEAN_O).seqType();
+
+    combine(a1, op);
+    combine(a2, op);
+    combine(a3, op);
+    combine(a4, op);
+
+    combine(ARRAY_O, a1, ARRAY_O, op);
+    combine(ARRAY_O, ERROR_O, ARRAY_O, op);
+    combine(a1, INTEGER_O, ITEM_O, op);
+    combine(a1, ERROR_O, a1, op);
+    combine(a1, a2, a2, op);
+    combine(a1, a3, a1, op);
+    combine(a1, f1, FUNCTION_O, op);
+    combine(a1, f2, FUNCTION_O, op);
+    combine(a2, a4, a2, op);
+
+    // enums
+    final SeqType
+      // enum('a')
+      e1 = new EnumType(new TokenSet("a")).seqType(),
+      // enum('b')
+      e2 = new EnumType(new TokenSet("b")).seqType(),
+      // enum('a', 'b')
+      e3 = new EnumType(new TokenSet("a", "b")).seqType();
+
+    combine(e1, e2, e3, op);
+    combine(e1, e3, e3, op);
+    combine(e3, op);
+    combine(e1, STRING_O, STRING_O, op);
+    combine(e1, LANGUAGE_O, STRING_O, op);
+    combine(e1, INTEGER_O, ANY_ATOMIC_TYPE_O, op);
+    combine(e1, ERROR_O, e1, op);
+
+    final SeqType
+      // (xs:date | xs:string)
+      c1 = ChoiceItemType.get(DATE, STRING).seqType(),
+      // (element() | xs:string)
+      c2 = ChoiceItemType.get(ELEMENT, STRING).seqType(),
+      // (xs:NMTOKENS | xs:string)
+      c3 = ChoiceItemType.get(NMTOKENS, STRING).seqType(),
+      // (array(*) | xs:string)
+      c4 = ChoiceItemType.get(ARRAY, STRING).seqType(),
+      // (map(*) | xs:string)
+      c5 = ChoiceItemType.get(MAP, STRING).seqType(),
+      // (function(*) | xs:string)
+      c6 = ChoiceItemType.get(FUNCTION, STRING).seqType();
+
+    combine(c1, op);
+    combine(c1, DATE_O, ANY_ATOMIC_TYPE_O, op);
+    combine(c1, STRING_O, ANY_ATOMIC_TYPE_O, op);
+    combine(c1, ERROR_O, c1, op);
+    combine(c2, op);
+    combine(c2, ELEMENT_O, ITEM_O, op);
+    combine(c2, STRING_O, ITEM_O, op);
+    combine(c3, op);
+    combine(c3, NMTOKENS_O, ITEM_O, op);
+    combine(c3, STRING_O, ITEM_O, op);
+    combine(c4, op);
+    combine(c4, ARRAY_O, ITEM_O, op);
+    combine(c4, STRING_O, ITEM_O, op);
+    combine(c5, op);
+    combine(c5, MAP_O, ITEM_O, op);
+    combine(c5, STRING_O, ITEM_O, op);
+    combine(c6, op);
+    combine(c6, FUNCTION_O, ITEM_O, op);
+    combine(c6, STRING_O, ITEM_O, op);
+
+    final TokenObjectMap<ShapeField> fld1 = new TokenObjectMap<>(),
+        fld2 = new TokenObjectMap<>(),
+        fld3 = new TokenObjectMap<>(),
+        fld5 = new TokenObjectMap<>(),
+        fld6 = new TokenObjectMap<>(),
+        fld8 = new TokenObjectMap<>(),
+        fld9 = new TokenObjectMap<>();
+    fld1.put(Token.token("a"), new ShapeField(INTEGER_O));
+    fld2.put(Token.token("a"), new ShapeField(STRING_O));
+    fld3.put(Token.token("a"), new ShapeField(ANY_ATOMIC_TYPE_O));
+    fld5.put(Token.token("a"), new ShapeField(INTEGER_O.union(ZERO)));
+    fld6.put(Token.token("b"), new ShapeField(INTEGER_O.union(ZERO)));
+    final QNm r8Name = new QNm(Token.token("r8")),
+      r9Name = new QNm(Token.token("r9"));
+    final InputInfo ii = new InputInfo(getClass().getName(), 1, 1);
+    final SeqType
+      // record(a as xs:integer)
+      r1 = new RecordType(fld1).seqType(),
+      // record(a as xs:string)
+      r2 = new RecordType(fld2).seqType(),
+      // record(a as xs:anyAtomicType)
+      r3 = new RecordType(fld3).seqType(),
+      // record(a as xs:integer?)
+      r5 = new RecordType(fld5).seqType(),
+      // record(b as xs:integer?)
+      r6 = new RecordType(fld6).seqType(),
+      // r8 record(next as r8?, x, y)
+      r8 = new TypeRef(r8Name, ii).seqType(),
+      // r9 record(next as r9?, x, z)
+      r9 = new TypeRef(r9Name, ii).seqType();
+
+    fld8.put(Token.token("next"), new ShapeField(r8.union(ZERO)));
+    fld8.put(Token.token("x"), new ShapeField(ITEM_ZM));
+    fld8.put(Token.token("y"), new ShapeField(ITEM_ZM));
+
+    fld9.put(Token.token("next"), new ShapeField(r9.union(ZERO)));
+    fld9.put(Token.token("x"), new ShapeField(ITEM_ZM));
+    fld9.put(Token.token("z"), new ShapeField(ITEM_ZM));
+
+    ((TypeRef) r8.type).resolve(new ShapeType(fld8));
+    ((TypeRef) r9.type).resolve(new ShapeType(fld9));
+
+    combine(RECORD_O, FUNCTION_O, FUNCTION_O, op);
+    combine(RECORD_O, MAP_O, MAP_O, op);
+    // a specific record type is a subtype of record(*)
+    combine(RECORD_O, r1, RECORD_O, op);
+    combine(RECORD_O, ERROR_O, RECORD_O, op);
+    combine(FUNCTION_O, r1, FUNCTION_O, op);
+    combine(FUNCTION_O, ERROR_O, FUNCTION_O, op);
+    combine(MAP_O, r1, MAP_O, op);
+    combine(MAP_O, ERROR_O, MAP_O, op);
+    // records with the same field names: field types are unioned
+    combine(r1, r2, r3, op);
+    combine(r1, r3, r3, op);
+    combine(r1, r1, r1, op);
+    combine(r1, ERROR_O, r1, op);
+    combine(r5, r1, r5, op);
+    // records with different field names: fall back to the map supertype
+    combine(r1, r6, MapType.get(STRING, INTEGER_ZO).seqType(), op);
+    combine(r2, r6, MapType.get(STRING, ANY_ATOMIC_TYPE_O.union(ZERO)).seqType(), op);
+    combine(r5, r6, MapType.get(STRING, INTEGER_ZO).seqType(), op);
+    combine(r8, r9, MapType.get(STRING, ITEM_ZM).seqType(), op);
+  }
+
+  /**
+   * Tests for {@link SeqType#intersect(SeqType)}.
+   */
+  @Test public void intersect() {
+    final BiFunction<SeqType, SeqType, SeqType> op = SeqType::intersect;
+
+    combine(EMPTY_SEQUENCE_Z, op);
+    combine(STRING_O, op);
+    combine(INTEGER_O, op);
+    combine(ATTRIBUTE_O, op);
+    combine(ITEM_O, op);
+    combine(NORMALIZED_STRING.seqType(), op);
+    combine(ATTRIBUTE_O, op);
+    combine(ELEMENT_O, op);
+    combine(XNODE_O, op);
+    combine(DATE_TIME_O, op);
+    combine(DATE_TIME_STAMP_O, op);
+
+    combine(ERROR_O, ITEM_O, ERROR_O, op);
+    combine(ERROR_O, POSITIVE_INTEGER_O, ERROR_O, op);
+    combine(ERROR_O, STRING_O, ERROR_O, op);
+    combine(ERROR_O, STRING_ZO, ERROR_O, op);
+    combine(ERROR_O, STRING_OM, ERROR_O, op);
+    combine(ERROR_O, STRING_ZM, ERROR_O, op);
+    combine(ERROR_O, EMPTY_SEQUENCE_Z, ERROR_O, op);
+    combine(ERROR_OM, STRING_O, ERROR_OM, op);
+    combine(ERROR_OM, STRING_ZO, ERROR_OM, op);
+    combine(ERROR_OM, STRING_OM, ERROR_OM, op);
+    combine(ERROR_OM, STRING_ZM, ERROR_OM, op);
+    combine(ERROR_OM, EMPTY_SEQUENCE_Z, ERROR_OM, op);
+    combine(ERROR_ZO, STRING_O, ERROR_O, op);
+    combine(ERROR_ZO, STRING_ZO, ERROR_ZO, op);
+    combine(ERROR_ZO, STRING_OM, ERROR_O, op);
+    combine(ERROR_ZO, STRING_ZM, ERROR_ZO, op);
+    combine(ERROR_ZO, EMPTY_SEQUENCE_Z, EMPTY_SEQUENCE_Z, op);
+    combine(ERROR_ZM, STRING_O, ERROR_O, op);
+    combine(ERROR_ZM, STRING_ZO, ERROR_ZO, op);
+    combine(ERROR_ZM, STRING_OM, ERROR_OM, op);
+    combine(ERROR_ZM, STRING_ZM, ERROR_ZM, op);
+    combine(ERROR_ZM, EMPTY_SEQUENCE_Z, EMPTY_SEQUENCE_Z, op);
+    combine(ERROR_ZO, ERROR_O, ERROR_O, op);
+    combine(ERROR_O, ARRAY_O, ERROR_O, op);
+    combine(ERROR_O, NMTOKENS.seqType(), ERROR_O, op);
+    combine(ERROR_O, ERROR_OM, ERROR_O, op);
+
+    combine(DATE_TIME_O, DATE_TIME_STAMP_O, DATE_TIME_STAMP_O, op);
+    combine(DATE_TIME_STAMP_O, DATE_TIME_O, DATE_TIME_STAMP_O, op);
+
+    combine(EMPTY_SEQUENCE_Z, ITEM_O, null, op);
+
+    combine(JNODE_O, NODE_O, JNODE_O, op);
+    combine(XNODE_O, NODE_O, XNODE_O, op);
+    combine(ELEMENT_O, ITEM_O, ELEMENT_O, op);
+    combine(ELEMENT_O, ELEMENT_O, ELEMENT_O, op);
+    combine(ATTRIBUTE_O, XNODE_O, ATTRIBUTE_O, op);
+    combine(ATTRIBUTE_O, ATTRIBUTE_O, ATTRIBUTE_O, op);
+    combine(ELEMENT_X_O, XNODE_O, ELEMENT_X_O, op);
+    combine(ELEMENT_X_O, ELEMENT_O, ELEMENT_X_O, op);
+    combine(ELEMENT_X_O, ELEMENT_X_O, ELEMENT_X_O, op);
+
+    combine(ELEMENT_O, STRING_O, null, op);
+    combine(NODE_O, JNODE_O, JNODE_O, op);
+    combine(NODE_O, XNODE_O, XNODE_O, op);
+    combine(ITEM_O, ELEMENT_O, ELEMENT_O, op);
+    combine(JNODE_O, XNODE_O, null, op);
+    combine(JNODE_O, ELEMENT_O, null, op);
+    combine(XNODE_O, ELEMENT_O, ELEMENT_O, op);
+    combine(XNODE_O, JNODE_O, null, op);
+    combine(ATTRIBUTE_O, ELEMENT_O, null, op);
+    combine(ELEMENT_O, JNODE_O, null, op);
+    combine(ELEMENT_X_O, ATTRIBUTE_O, null, op);
+    combine(NODE_O, ERROR_O, ERROR_O, op);
+
+    combine(JNODE_XX_O, JNODE_XX_O, JNODE_XX_O, op);
+    combine(JNODE_XX_O, JNODE_XI_O, JNODE_XI_O, op);
+    combine(JNODE_XX_O, JNODE_VX_O, JNODE_VX_O, op);
+    combine(JNODE_XX_O, JNODE_VI_O, JNODE_VI_O, op);
+    combine(JNODE_XI_O, JNODE_XI_O, JNODE_XI_O, op);
+    combine(JNODE_XI_O, JNODE_VX_O, JNODE_VI_O, op);
+    combine(JNODE_XI_O, JNODE_VI_O, JNODE_VI_O, op);
+    combine(JNODE_VX_O, JNODE_VX_O, JNODE_VX_O, op);
+    combine(JNODE_VX_O, JNODE_VI_O, JNODE_VI_O, op);
+    combine(JNODE_VI_O, JNODE_VI_O, JNODE_VI_O, op);
+    combine(JNODE_VI_O, JNODE_WS_O, null, op);
+
+    combine(MAP_O, ITEM_O, MAP_O, op);
+    combine(MAP_O, FUNCTION_O, MAP_O, op);
+    combine(MAP_O, ARRAY_O, null, op);
+
+    // functions
+    final SeqType
+      // function(xs:boolean) as xs:decimal?
+      f1 = FuncType.get(DECIMAL_ZO, BOOLEAN_O).seqType(),
+      // function(xs:boolean) as xs:nonNegativeInteger
+      f2 = FuncType.get(NON_NEGATIVE_INTEGER.seqType(), BOOLEAN_O).seqType(),
+      // function(xs:boolean, xs:boolean) as xs:nonNegativeInteger
+      f3 = FuncType.get(NON_NEGATIVE_INTEGER.seqType(), BOOLEAN_O, BOOLEAN_O).seqType(),
+      // function(xs:integer) as xs:nonNegativeInteger
+      f4 = FuncType.get(NON_NEGATIVE_INTEGER.seqType(), INTEGER_O).seqType(),
+      // function(xs:boolean) as xs:integer
+      f5 = FuncType.get(INTEGER_O, BOOLEAN_O).seqType(),
+      // function(xs:boolean) as xs:boolean
+      f6 = FuncType.get(BOOLEAN_O, BOOLEAN_O).seqType(),
+      // function(xs:boolean) as xs:integer?
+      f7 = FuncType.get(INTEGER_ZO, BOOLEAN_O).seqType();
+
+    combine(f1, op);
+    combine(f2, op);
+    combine(f3, op);
+    combine(f4, op);
+    combine(f5, op);
+    combine(f6, op);
+
+    combine(XNODE_O, INTEGER_O, null, op);
+    combine(f1, INTEGER_O, null, op);
+    combine(f1, ERROR_O, ERROR_O, op);
+    combine(f1, f1, f1, op);
+    combine(f1, f2, f2, op);
+    combine(f1, f5, f5, op);
+    combine(f1, f4, FuncType.get(NON_NEGATIVE_INTEGER.seqType(), ANY_ATOMIC_TYPE_O).seqType(), op);
+    combine(f2, f3, null, op);
+    combine(f5, f6, null, op);
+
+    final SeqType
+      // map(xs:anyAtomicType, xs:integer)
+      m1 = MapType.get(ANY_ATOMIC_TYPE, INTEGER_O).seqType(),
+      // map(xs:boolean, xs:integer)
+      m2 = MapType.get(BOOLEAN, INTEGER_O).seqType(),
+      // map(xs:boolean, xs:nonNegativeInteger)
+      m3 = MapType.get(BOOLEAN, NON_NEGATIVE_INTEGER.seqType()).seqType(),
+      // map(xs:integer, xs:integer)
+      m4 = MapType.get(INTEGER, INTEGER_O).seqType();
+
+    combine(m1, op);
+    combine(m2, op);
+    combine(m3, op);
+    combine(m4, op);
+
+    combine(m1, f1, m1, op);
+    combine(m1, ITEM_O, m1, op);
+    combine(m1, INTEGER_O, null, op);
+    combine(m1, ERROR_O, ERROR_O, op);
+    combine(m1, m2, m2, op);
+    combine(m2, MapType.get(BOOLEAN, BOOLEAN_O).seqType(), null, op);
+    combine(m1, FUNCTION_O, m1, op);
+    combine(m1, f3, null, op);
+    combine(m1, f6, null, op);
+    combine(m1, FuncType.get(INTEGER_O, ITEM_O).seqType(), null, op);
+    combine(m1, m3,
+        MapType.get(BOOLEAN, NON_NEGATIVE_INTEGER.seqType()).seqType(), op);
+    combine(m2, m4, null, op);
+    combine(m4, f7, m4, op);
+
+    final SeqType
+      // array(xs:integer)
+      a1 = ArrayType.get(INTEGER_O).seqType(),
+      // array(xs:integer)
+      a2 = ArrayType.get(INTEGER_O).seqType(),
+      // array(xs:nonNegativeInteger)
+      a3 = ArrayType.get(NON_NEGATIVE_INTEGER.seqType()).seqType(),
+      // array(xs:integer)
+      a4 = ArrayType.get(INTEGER_O).seqType();
+
+    combine(a1, op);
+    combine(a2, op);
+    combine(a3, op);
+    combine(a4, op);
+
+    combine(a1, ITEM_O, a1, op);
+    combine(a1, INTEGER_O, null, op);
+    combine(a1, a2, a1, op);
+    combine(a1, a3, ArrayType.get(NON_NEGATIVE_INTEGER.seqType()).seqType(), op);
+    combine(a2, a4, a1, op);
+    combine(a2, ArrayType.get(BOOLEAN_O).seqType(), null, op);
+    combine(a1, FUNCTION_O, a1, op);
+    combine(a1, f3, null, op);
+    combine(a1, f6, null, op);
+    combine(a1, FuncType.get(ITEM_O).seqType(), null, op);
+    combine(a1, f1, null, op);
+    combine(a4, f5, null, op);
+
+    // enums
+    final SeqType
+      // enum('a')
+      e1 = new EnumType(new TokenSet("a")).seqType(),
+      // enum('b')
+      e2 = new EnumType(new TokenSet("b")).seqType(),
+      // enum('a', 'b')
+      e3 = new EnumType(new TokenSet("a", "b")).seqType();
+
+    combine(e1, e2, null, op);
+    combine(e1, e3, e1, op);
+    combine(e3, op);
+    combine(e1, STRING_O, e1, op);
+    combine(e1, LANGUAGE_O, null, op);
+    combine(e1, INTEGER_O, null, op);
+    combine(e1, ERROR_O, ERROR_O, op);
+
+    final SeqType
+      // (xs:date | xs:string)
+      c1 = ChoiceItemType.get(DATE, STRING).seqType(),
+      // (element() | xs:string)
+      c2 = ChoiceItemType.get(ELEMENT, STRING).seqType(),
+      // (xs:NMTOKENS | xs:string)
+      c3 = ChoiceItemType.get(NMTOKENS, STRING).seqType(),
+      // (array(*) | xs:string)
+      c4 = ChoiceItemType.get(ARRAY, STRING).seqType(),
+      // (map(*) | xs:string)
+      c5 = ChoiceItemType.get(MAP, STRING).seqType(),
+      // (function(*) | xs:string)
+      c6 = ChoiceItemType.get(FUNCTION, STRING).seqType();
+
+    combine(c1, op);
+    combine(c1, DATE_O, DATE_O, op);
+    combine(c1, STRING_O, STRING_O, op);
+    combine(c1, INTEGER_O, null, op);
+    combine(c1, ITEM_O, c1, op);
+    combine(c1, ERROR_O, ERROR_O, op);
+    combine(c2, op);
+    combine(c2, ELEMENT_O, ELEMENT_O, op);
+    combine(c2, STRING_O, STRING_O, op);
+    combine(c2, INTEGER_O, null, op);
+    combine(c2, ITEM_O, c2, op);
+    combine(c3, op);
+    combine(c3, NMTOKENS_O, NMTOKENS_O, op);
+    combine(c3, STRING_O, STRING_O, op);
+    combine(c3, INTEGER_O, null, op);
+    combine(c3, ITEM_O, c3, op);
+    combine(c4, op);
+    combine(c4, ARRAY_O, ARRAY_O, op);
+    combine(c4, STRING_O, STRING_O, op);
+    combine(c4, INTEGER_O, null, op);
+    combine(c4, ITEM_O, c4, op);
+    combine(c5, op);
+    combine(c5, MAP_O, MAP_O, op);
+    combine(c5, STRING_O, STRING_O, op);
+    combine(c5, INTEGER_O, null, op);
+    combine(c5, ITEM_O, c5, op);
+    combine(c6, op);
+    combine(c6, FUNCTION_O, FUNCTION_O, op);
+    combine(c6, STRING_O, STRING_O, op);
+    combine(c6, INTEGER_O, null, op);
+    combine(c6, ITEM_O, c6, op);
+
+    final TokenObjectMap<ShapeField> fld1 = new TokenObjectMap<>(),
+        fld2 = new TokenObjectMap<>(),
+        fld3 = new TokenObjectMap<>(),
+        fld5 = new TokenObjectMap<>(),
+        fld6 = new TokenObjectMap<>(),
+        fld7 = new TokenObjectMap<>(),
+        fld8 = new TokenObjectMap<>(),
+        fld9 = new TokenObjectMap<>(),
+        fld10 = new TokenObjectMap<>();
+    fld1.put(Token.token("a"), new ShapeField(INTEGER_O));
+    fld2.put(Token.token("a"), new ShapeField(STRING_O));
+    fld3.put(Token.token("a"), new ShapeField(ANY_ATOMIC_TYPE_O));
+    fld5.put(Token.token("a"), new ShapeField(INTEGER_O.union(ZERO)));
+    fld6.put(Token.token("b"), new ShapeField(INTEGER_O.union(ZERO)));
+    fld7.put(Token.token("a"), new ShapeField(INTEGER_O));
+    fld7.put(Token.token("b"), new ShapeField(INTEGER_O.union(ZERO)));
+    fld10.put(Token.token("a"), new ShapeField(INTEGER_O.union(ZERO)));
+    fld10.put(Token.token("b"), new ShapeField(INTEGER_O.union(ZERO)));
+    final QNm r8Name = new QNm(Token.token("r8")),
+      r9Name = new QNm(Token.token("r9"));
+    final InputInfo ii = new InputInfo(getClass().getName(), 1, 1);
+    final SeqType
+      // record(a as xs:integer)
+      r1 = new RecordType(fld1).seqType(),
+      // record(a as xs:string)
+      r2 = new RecordType(fld2).seqType(),
+      // record(a as xs:anyAtomicType)
+      r3 = new RecordType(fld3).seqType(),
+      // record(a? as xs:integer)
+      r5 = new RecordType(fld5).seqType(),
+      // record(b? as xs:integer)
+      r6 = new RecordType(fld6).seqType(),
+      // r8 record(next? as r8, x, y)
+      r8 = new TypeRef(r8Name, ii).seqType(),
+      // r9 record(next? as r9, x, z)
+      r9 = new TypeRef(r9Name, ii).seqType();
+
+    fld8.put(Token.token("next"), new ShapeField(r8.union(ZERO)));
+    fld8.put(Token.token("x"), new ShapeField(ITEM_ZM));
+    fld8.put(Token.token("y"), new ShapeField(ITEM_ZM));
+
+    fld9.put(Token.token("next"), new ShapeField(r9.union(ZERO)));
+    fld9.put(Token.token("x"), new ShapeField(ITEM_ZM));
+    fld9.put(Token.token("z"), new ShapeField(ITEM_ZM));
+
+    ((TypeRef) r8.type).resolve(new ShapeType(fld8));
+    ((TypeRef) r9.type).resolve(new ShapeType(fld9));
+
+    combine(RECORD_O, FUNCTION_O, RECORD_O, op);
+    combine(RECORD_O, MAP_O, RECORD_O, op);
+    // a specific record type is a subtype of record(*)
+    combine(RECORD_O, r1, r1, op);
+    combine(RECORD_O, ERROR_O, ERROR_O, op);
+    combine(FUNCTION_O, r1, r1, op);
+    combine(FUNCTION_O, ERROR_O, ERROR_O, op);
+    combine(MAP_O, r1, r1, op);
+    combine(MAP_O, ERROR_O, ERROR_O, op);
+    combine(r1, r2, null, op);
+    combine(r1, r3, r1, op);
+    combine(r1, r1, r1, op);
+    combine(r1, ERROR_O, ERROR_O, op);
+    combine(r5, r1, r1, op);
+    combine(r1, r6, null, op);
+    combine(r2, r6, null, op);
+    combine(r5, r6, null, op);
+    combine(r8, r9, null, op);
+  }
+
+  /**
+   * May-be tests.
+   */
+  @Test public void mayBe() {
+    assertTrue(ITEM_O.mayBeNumber());
+    assertFalse(FUNCTION_O.mayBeNumber());
+    assertFalse(MAP_O.mayBeNumber());
+    assertFalse(ARRAY_O.mayBeNumber());
+    assertFalse(RECORD_O.mayBeNumber());
+    assertTrue(ANY_ATOMIC_TYPE_O.mayBeNumber());
+    assertTrue(NUMERIC_O.mayBeNumber());
+    assertTrue(INTEGER_O.mayBeNumber());
+    assertTrue(BYTE.seqType().mayBeNumber());
+    assertFalse(STRING_O.mayBeNumber());
+    assertFalse(XNODE_O.mayBeNumber());
+    assertFalse(ELEMENT_O.mayBeNumber());
+    assertFalse(NMTOKENS_O.mayBeNumber());
+    assertFalse(DATE_TIME_O.mayBeNumber());
+    assertFalse(DATE_TIME_STAMP_O.mayBeNumber());
+    assertFalse(ERROR_O.mayBeNumber());
+    assertTrue(ChoiceItemType.get(INTEGER, STRING).seqType().mayBeNumber());
+    assertFalse(ChoiceItemType.get(DATE, STRING).seqType().mayBeNumber());
+
+    assertTrue(ITEM_O.mayBeWrapped());
+    assertTrue(FUNCTION_O.mayBeWrapped());
+    assertTrue(MAP_O.mayBeWrapped());
+    assertTrue(ARRAY_O.mayBeWrapped());
+    assertTrue(RECORD_O.mayBeWrapped());
+    assertFalse(ANY_ATOMIC_TYPE_O.mayBeWrapped());
+    assertFalse(NUMERIC_O.mayBeWrapped());
+    assertFalse(INTEGER_O.mayBeWrapped());
+    assertFalse(BYTE.seqType().mayBeWrapped());
+    assertFalse(STRING_O.mayBeWrapped());
+    assertFalse(XNODE_O.mayBeWrapped());
+    assertFalse(ELEMENT_O.mayBeWrapped());
+    assertFalse(NMTOKENS_O.mayBeWrapped());
+    assertFalse(DATE_TIME_O.mayBeWrapped());
+    assertFalse(DATE_TIME_STAMP_O.mayBeWrapped());
+    assertFalse(ERROR_O.mayBeWrapped());
+    assertTrue(NODE_O.mayBeWrapped());
+    assertTrue(JNODE.seqType().mayBeWrapped());
+    assertTrue(ChoiceItemType.get(ARRAY, STRING).seqType().mayBeWrapped());
+    assertFalse(ChoiceItemType.get(DATE, STRING).seqType().mayBeWrapped());
+
+    assertTrue(ITEM_O.mayBeJNode());
+    assertTrue(NODE_O.mayBeJNode());
+    assertTrue(JNODE.seqType().mayBeJNode());
+    assertFalse(FUNCTION_O.mayBeJNode());
+    assertFalse(MAP_O.mayBeJNode());
+    assertFalse(ARRAY_O.mayBeJNode());
+    assertFalse(RECORD_O.mayBeJNode());
+    assertFalse(XNODE_O.mayBeJNode());
+    assertFalse(ELEMENT_O.mayBeJNode());
+    assertFalse(ANY_ATOMIC_TYPE_O.mayBeJNode());
+    assertFalse(INTEGER_O.mayBeJNode());
+    assertFalse(ERROR_O.mayBeJNode());
+    assertTrue(ChoiceItemType.get(JNODE, STRING).seqType().mayBeJNode());
+    assertFalse(ChoiceItemType.get(ARRAY, STRING).seqType().mayBeJNode());
+
+    assertTrue(ITEM_O.mayBeFunction());
+    assertTrue(FUNCTION_O.mayBeFunction());
+    assertTrue(MAP_O.mayBeFunction());
+    assertTrue(ARRAY_O.mayBeFunction());
+    assertTrue(RECORD_O.mayBeFunction());
+    assertFalse(ANY_ATOMIC_TYPE_O.mayBeFunction());
+    assertFalse(INTEGER_O.mayBeFunction());
+    assertFalse(STRING_O.mayBeFunction());
+    assertFalse(XNODE_O.mayBeFunction());
+    assertFalse(NODE_O.mayBeFunction());
+    assertFalse(JNODE.seqType().mayBeFunction());
+    assertFalse(ERROR_O.mayBeFunction());
+    assertFalse(ChoiceItemType.get(ARRAY, STRING).seqType().mayBeFunction());
+  }
+
+  /** Checks that in-place resolution of forward references is not cached away. */
+  @Test public void forwardReferences() {
+    // a direct reference denotes item() while unresolved
+    final TypeRef ref = new TypeRef(new QNm("r"), null);
+    final SeqType st = ref.seqType();
+    assertTrue(st.mayBeJNode());
+    assertTrue(st.mayBeNumber());
+    ref.resolve(MAP_O.type);
+    assertFalse(st.mayBeJNode());
+    assertFalse(st.mayBeNumber());
+
+    // a reference in a choice item type is not dereferenced while unresolved
+    final TypeRef ref2 = new TypeRef(new QNm("s"), null);
+    final SeqType choice = ChoiceItemType.get(ref2, STRING).seqType();
+    assertFalse(choice.mayBeJNode());
+    ref2.resolve(JNODE);
+    assertTrue(choice.mayBeJNode());
+  }
+
+  /**
+   * Combines two sequences types.
+   * @param st1 first type
+   * @param st2 second type
+   * @param expected expected result or {@code null}
+   * @param func combining function
+   */
+  private static void combine(final SeqType st1, final SeqType st2,
+      final SeqType expected, final BiFunction<SeqType, SeqType, SeqType> func) {
+
+    final String message = "\nType 1: " + st1 + "\nType 2: " + st2 +
+        "\nExpected: " + expected + "\nReturned: ";
+
+    final SeqType result1 = func.apply(st1, st2), result2 = func.apply(st2, st1);
+    if(result1 == null ^ result2 == null || result1 != null && !result1.eq(result2)) {
+      fail("Operation is not commutative:" + message + result1 + " vs " + result2 + '\n');
+    }
+
+    final Consumer<SeqType> check = result -> {
+      final String msg = message + result + '\n';
+      if(expected == null) {
+        assertNull(result, msg);
+      } else {
+        assertNotNull(result, msg);
+        assertTrue(result.eq(expected), msg);
+      }
+    };
+    check.accept(result1);
+    check.accept(result2);
+  }
+
+  /**
+   * Combines a sequence type with itself.
+   * @param st sequence type
+   * @param func combining function
+   */
+  private static void combine(final SeqType st, final BiFunction<SeqType, SeqType, SeqType> func) {
+    final SeqType result = func.apply(st, st);
+    final String msg = "\nType: " + st + "\nReturned: " + result + '\n';
+    assertNotNull(result, msg);
+    assertTrue(st.eq(result), msg);
+  }
+}

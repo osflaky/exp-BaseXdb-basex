@@ -1,0 +1,54 @@
+package org.basex.query.func.ft;
+
+import org.basex.data.*;
+import org.basex.index.*;
+import org.basex.index.query.*;
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.index.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.util.ft.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FtTokens extends FtAccessFn {
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    final Data data = toData(qc);
+    final FtFuzzyOptions options = options(2, FtFuzzyOptions::new, qc);
+
+    byte[] token = toZeroToken(arg(1), qc);
+    if(token.length != 0) {
+      final FTLexer lexer = new FTLexer(new FTOpt().assign(data.meta));
+      lexer.init(token);
+      token = lexer.nextToken();
+    }
+
+    final IndexEntries entries;
+    if(token.length != 0 && options.get(FtFuzzyOptions.FUZZY) == Boolean.TRUE) {
+      // negative values are treated like 0: the number of errors is computed dynamically
+      final int errors = options.contains(FtFuzzyOptions.ERRORS) ?
+        Math.max(0, options.get(FtFuzzyOptions.ERRORS)) : 0;
+      entries = new IndexEntries(token, errors, IndexType.FULLTEXT);
+    } else {
+      entries = new IndexEntries(token, IndexType.FULLTEXT);
+    }
+    return IndexFn.entries(data, entries, this);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    optOptions(2, FtFuzzyOptions::new, cc);
+    return this;
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return dataLock(arg(0), false, false, visitor) && super.accept(visitor);
+  }
+}

@@ -1,0 +1,45 @@
+package org.basex.query.func.fn;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnResolveUri extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final byte[] uri = toTokenOrNull(arg(0), qc);
+    final byte[] base = toTokenOrNull(arg(1), qc);
+    if(uri == null) return Empty.VALUE;
+
+    // check relative URI
+    final Uri u = Uri.get(uri);
+    if(!u.isValid()) throw URIARG_X.get(info, u);
+    if(u.isAbsolute()) return u;
+
+    // check base URI: reject invalid, relative and non-hierarchical URIs
+    final Uri b = base == null ? sc().baseURI() : Uri.get(base);
+    final byte[] string = b.string();
+    if(!b.isValid() || !b.isAbsolute() || !contains(string, '/')) throw URIARG_X.get(info, b);
+
+    // a fragment identifier in the base URI is ignored
+    final int f = indexOf(string, '#');
+    return (f == -1 ? b : Uri.get(substring(string, 0, f))).resolve(u);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) {
+    return optFirst();
+  }
+}

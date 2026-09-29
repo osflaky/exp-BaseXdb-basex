@@ -1,0 +1,1443 @@
+package org.basex.http;
+
+import static org.basex.core.Text.*;
+import static org.basex.query.QueryError.*;
+import static org.basex.query.func.Function.*;
+import static org.basex.util.Token.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.io.*;
+import java.net.*;
+import java.net.http.*;
+import java.net.http.HttpClient.Version;
+import java.nio.charset.*;
+import java.util.*;
+import java.util.List;
+import java.util.Map.*;
+import java.util.zip.*;
+
+import javax.net.ssl.*;
+
+import org.basex.core.*;
+import org.basex.core.cmd.*;
+import org.basex.io.*;
+import org.basex.io.in.*;
+import org.basex.io.serial.*;
+import org.basex.query.*;
+import org.basex.query.util.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.map.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.http.*;
+import org.basex.util.list.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * This class tests the server-based HTTP Client.
+ *
+ * @author BaseX Team, BSD License
+ * @author Rositsa Shadura
+ */
+public abstract class FnHttpTest extends HTTPTest {
+  /** Example url. */
+  static final String REST_URL = REST_ROOT + NAME;
+
+  /** Books document. */
+  private static final String BOOKS = "<books>" + "<book id='1'>"
+      + "<name>Sherlock Holmes</name>" + "<author>Doyle</author>" + "</book>"
+      + "<book id='2'>" + "<name>Winnetou</name>" + "<author>May</author>"
+      + "</book>" + "<book id='3'>" + "<name>Tom Sawyer</name>"
+      + "<author>Twain</author>" + "</book>" + "</books>";
+  /** Carriage return/line feed. */
+  private static final String CRLF = "\r\n";
+  /** HTTP client namespace declaration. */
+  private static final String HTTP_NS = "xmlns:http='http://expath.org/ns/http-client'";
+
+  /** Local database context. */
+  static Context ctx;
+
+  /**
+   * Test sending of HTTP PUT requests.
+   * @throws Exception exception
+   */
+  @Test public final void put() throws Exception {
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='put' status-only='true'>"
+        + "<http:body media-type='text/xml'>" + BOOKS + "</http:body>"
+        + "</http:request>", REST_URL), ctx)) {
+      checkResponse(qp.value(), 1, 201);
+    }
+  }
+
+  /**
+   * Test sending of HTTP POST requests.
+   * @throws Exception exception
+   */
+  @Test public final void putPost() throws Exception {
+    // PUT - query
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='put' status-only='true'>"
+        + "<http:body media-type='text/xml'>" + BOOKS + "</http:body>"
+        + "</http:request>", REST_URL), ctx)) {
+      checkResponse(qp.value(), 1, 201);
+    }
+
+    // POST - query
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='post'>"
+        + "<http:body media-type='application/xml'>"
+        + "<query xmlns='" + QueryText.BASEX_URL + "/rest'>"
+        + "<text><![CDATA[<x>1</x>]]></text>"
+        + "</query>"
+        + "</http:body>"
+        + "</http:request>", REST_URL), ctx)) {
+        checkResponse(qp.value(), 2, 200);
+    }
+
+    // Execute the same query but with content set from $bodies
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='post'>"
+        + "<http:body media-type='application/xml'/>"
+        + "</http:request>",
+        REST_URL,
+        " <query xmlns='" + QueryText.BASEX_URL + "/rest'>"
+        + "<text><![CDATA[<x>1</x>]]></text>"
+        + "</query>"), ctx)) {
+      checkResponse(qp.value(), 2, 200);
+    }
+  }
+
+  /**
+   * Test sending of HTTP GET requests.
+   * @throws Exception exception
+   */
+  @Test public final void get() throws Exception {
+    // GET1 - just send a GET request
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='get' href='" + REST_ROOT + "'/>"), ctx)) {
+      final Value value = qp.value();
+      checkResponse(value, 2, 200);
+
+      assertEquals(NodeType.DOCUMENT, value.itemAt(1).type);
+    }
+
+    // GET2 - with override-media-type='text/plain'
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='get' override-media-type='text/plain'/>", REST_ROOT), ctx)) {
+      final Value value = qp.value();
+      checkResponse(value, 2, 200);
+
+      assertEquals(BasicType.STRING, value.itemAt(1).type);
+    }
+
+    // Get3 - with status-only='true'
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='get' status-only='true'/>", REST_ROOT), ctx)) {
+      checkResponse(qp.value(), 1, 200);
+    }
+  }
+
+  /**
+   * Tests that the BaseX user agent is sent unless a custom one is specified.
+   * @throws Exception exception
+   */
+  @Test public final void userAgent() throws Exception {
+    final String url = REST_ROOT + "?query=request:header(%22User-Agent%22)";
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='get' override-media-type='text/plain'/>", url), ctx)) {
+      assertEquals(IOUrl.AGENT, string(qp.value().itemAt(1).string(null)));
+    }
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='get' override-media-type='text/plain'>"
+        + "<http:header name='user-agent' value='custom'/>"
+        + "</http:request>", url), ctx)) {
+      assertEquals("custom", string(qp.value().itemAt(1).string(null)));
+    }
+  }
+
+  /**
+   * Tests sending of body contents linked via the src attribute.
+   * @throws Exception exception
+   */
+  @Test public final void putSrc() throws Exception {
+    final IOFile file = new IOFile(sandbox(), "src-payload.xml");
+    file.write(token("<src-payload/>"));
+
+    // PUT - contents of linked file
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='put' status-only='true'>"
+        + "<http:body media-type='application/xml' src='" + file.url() + "'/>"
+        + "</http:request>", REST_URL), ctx)) {
+      checkResponse(qp.value(), 1, 201);
+    }
+
+    // GET - verify that the contents were transmitted
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='get'/>", REST_URL + '/' + NAME + ".xml") + "[2]", ctx)) {
+      assertEquals("<src-payload/>", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Tests lazy retrieval of binary response bodies.
+   * @throws Exception exception
+   */
+  @Test public final void lazyResponse() throws Exception {
+    // create database
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='put' status-only='true'>"
+        + "<http:body media-type='text/xml'><x/></http:body>"
+        + "</http:request>", REST_URL), ctx)) {
+      checkResponse(qp.value(), 1, 201);
+    }
+
+    // response body is lazy; the first consumption caches it, the request is not repeated
+    try(QueryProcessor qp = new QueryProcessor(
+        "let $body := " + _HTTP_SEND_REQUEST.args(
+        " <http:request method='post'>"
+        + "<http:body media-type='application/xml'>"
+        + "<query xmlns='http://basex.org/rest'>"
+        + "<text>bin:encode-string(random:uuid())</text>"
+        + "<parameter name='media-type' value='application/octet-stream'/>"
+        + "</query></http:body></http:request>", REST_URL) + "[2] "
+        + "return string-join((lazy:is-lazy($body), lazy:is-cached($body), "
+        + "hash($body, 'md5') = hash($body, 'md5'), lazy:is-cached($body)) ! string(), ',')",
+        ctx)) {
+      assertEquals("true,false,true,true", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Tests that the contents of remote resources are retrieved only once.
+   * @throws Exception exception
+   */
+  @Test public final void lazyRemote() throws Exception {
+    // the REST query returns a different result for each request
+    final String url = REST_ROOT + "?query=random:uuid()";
+    try(QueryProcessor qp = new QueryProcessor("let $bin := " + _FETCH_BINARY.args(url)
+        + " return hash($bin, 'md5') = hash($bin, 'md5')", ctx)) {
+      assertEquals("true", qp.value().serialize().toString());
+    }
+
+    final IOFile file1 = new IOFile(sandbox(), "remote1.txt");
+    final IOFile file2 = new IOFile(sandbox(), "remote2.txt");
+    try(QueryProcessor qp = new QueryProcessor("let $text := " + _FETCH_TEXT.args(url)
+        + " return (" + _FILE_WRITE_TEXT.args(file1.path(), " $text") + ", "
+        + _FILE_WRITE_TEXT.args(file2.path(), " $text") + ')', ctx)) {
+      qp.value();
+    }
+    assertEquals(36, file1.read().length);
+    assertEquals(string(file1.read()), string(file2.read()));
+  }
+
+  /**
+   * Tests streaming of file-based request payloads.
+   * @throws Exception exception
+   */
+  @Test public final void putLazy() throws Exception {
+    final IOFile file = new IOFile(sandbox(), "lazy-payload.bin");
+    file.write(token("lazy-payload"));
+
+    // PUT - file-backed lazy item is streamed
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='put' status-only='true'>"
+        + "<http:body media-type='text/xml'><x/></http:body>"
+        + "</http:request>", REST_URL), ctx)) {
+      checkResponse(qp.value(), 1, 201);
+    }
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='put' status-only='true'>"
+        + "<http:body media-type='application/octet-stream'/>"
+        + "</http:request>", REST_URL + "/lazy.bin",
+        " file:read-binary('" + file.url() + "')"), ctx)) {
+      checkResponse(qp.value(), 1, 201);
+    }
+
+    // PUT - lazy response body as request payload (materialized: guards against deadlocks)
+    try(QueryProcessor qp = new QueryProcessor(
+        "let $body := " + _HTTP_SEND_REQUEST.args(
+        " <http:request method='get'/>", REST_URL + "/lazy.bin") + "[2] "
+        + "return " + _HTTP_SEND_REQUEST.args(
+        " <http:request method='put' status-only='true' timeout='10'>"
+        + "<http:body media-type='application/octet-stream'/>"
+        + "</http:request>", REST_URL + "/copy.bin", " $body"), ctx)) {
+      checkResponse(qp.value(), 1, 201);
+    }
+
+    // GET - verify that the contents were transmitted
+    try(QueryProcessor qp = new QueryProcessor(
+        "string(" + _HTTP_SEND_REQUEST.args(
+        " <http:request method='get'/>", REST_URL + "/copy.bin") + "[2])", ctx)) {
+      assertEquals("bGF6eS1wYXlsb2Fk", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Test sending of HTTP DELETE requests.
+   * @throws Exception exception
+   */
+  @Test public final void putDelete() throws Exception {
+    // add document to be deleted
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='put'>"
+        + "<http:body media-type='text/xml'><ToBeDeleted/></http:body>"
+        + "</http:request>", REST_URL), ctx)) {
+      qp.value();
+    }
+
+    // DELETE
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='delete' status-only='true'/>", REST_URL), ctx)) {
+      checkResponse(qp.value(), 1, 200);
+    }
+
+    // DELETE (same resource, empty sequence as body, 404 expected)
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='delete'/>", REST_URL, " ()") + "[1]/@status/data()", ctx)) {
+      assertEquals("404", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Test sending of HTTP request without any attributes - error shall be thrown
+   * that mandatory attributes are missing.
+   */
+  @Test public final void emptyReq() {
+    try {
+      new XQuery(_HTTP_SEND_REQUEST.args(" <http:request/>")).execute(ctx);
+      fail("Error expected");
+    } catch(final BaseXException ex) {
+      assertTrue(ex.getMessage().contains(ErrType.HC.toString()));
+    }
+  }
+
+  /**
+   * Tests http:send-request((),()).
+   */
+  @Test public final void noParams() {
+    final Command cmd = new XQuery(_HTTP_SEND_REQUEST.args(" ()"));
+    try {
+      cmd.execute(ctx);
+      fail("Error expected");
+    } catch(final BaseXException ex) {
+      assertTrue(ex.getMessage().contains(ErrType.HC.toString()));
+    }
+  }
+
+  /**
+   * Tests an erroneous query.
+   * @throws Exception exception
+   */
+  @Test public final void unknown() throws Exception {
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_SEND_REQUEST.args(
+        " <http:request method='get'/>", REST_URL + "unknown") + "[1]/@status/data()", ctx)) {
+      assertEquals("404", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Parse normal request.
+   * @throws Exception exception
+   */
+  @Test public final void parseRequest() throws Exception {
+    // Simple HTTP request with no errors
+    final String request = "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + "method='POST' href='" + REST_ROOT + "'>"
+        + "<http:header name='hdr1' value='hdr1val'/>"
+        + "<http:header name='hdr2' value='hdr2val'/>"
+        + "<http:body media-type='text/xml'>" + "Test body content"
+        + "</http:body>" + "</http:request>";
+    final DBNode dbNode = new DBNode(new IOContent(request));
+    final RequestParser rp = new RequestParser(null);
+    final Request r = rp.parse(dbNode.childIter().next(), Empty.VALUE);
+
+    assertEquals("POST", r.method);
+    assertEquals(REST_ROOT, r.href);
+    assertEquals(2, r.headers.size());
+    assertFalse(r.payload.isEmpty());
+    assertEquals(1, r.payloadAtts.size());
+  }
+
+  /**
+   * Parse multipart request.
+   * @throws Exception exception
+   */
+  @Test public final void parseMultipartReq() throws Exception {
+    final String multiReq = "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + "method='POST' href='" + REST_ROOT + "'>"
+        + "<http:header name='hdr1' value='hdr1val'/>"
+        + "<http:header name='hdr2' value='hdr2val'/>"
+        + "<http:multipart media-type='multipart/mixed' boundary='xxxx'>"
+        + "<http:header name='p1hdr1' value='p1hdr1val'/>"
+        + "<http:header name='p1hdr2' value='p1hdr2val'/>"
+        + "<http:body media-type='text/plain'>" + "Part1" + "</http:body>"
+        + "<http:header name='p2hdr1' value='p2hdr1val'/>"
+        + "<http:body media-type='text/plain'>" + "Part2" + "</http:body>"
+        + "<http:body media-type='text/plain'>"
+        + "Part3" + "</http:body>" + "</http:multipart>"
+        + "</http:request>";
+
+    final DBNode dbNode1 = new DBNode(new IOContent(multiReq));
+    final RequestParser rp = new RequestParser(null);
+    final Request r = rp.parse(dbNode1.childIter().next(), Empty.VALUE);
+
+    assertEquals("POST", r.method);
+    assertEquals(REST_ROOT, r.href);
+    assertEquals(2, r.headers.size());
+    assertTrue(r.isMultipart);
+    assertEquals(3, r.parts.size());
+
+    // check parts
+    final Iterator<Part> i = r.parts.iterator();
+    Part part = i.next();
+    assertEquals(2, part.headers.size());
+    assertEquals(1, part.contents.size());
+    assertEquals(1, part.attributes.size());
+
+    part = i.next();
+    assertEquals(1, part.headers.size());
+    assertEquals(1, part.contents.size());
+    assertEquals(1, part.attributes.size());
+
+    part = i.next();
+    assertEquals(0, part.headers.size());
+    assertEquals(1, part.contents.size());
+    assertEquals(1, part.attributes.size());
+  }
+
+  /**
+   * Parse multipart request when the contents for each part are set from the $bodies parameter.
+   * @throws Exception exception
+   */
+  @Test public final void parseMultipartReqBodies() throws Exception {
+    final String multiReq = "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + "method='POST' href='" + REST_ROOT + "'>"
+        + "<http:header name='hdr1' value='hdr1val'/>"
+        + "<http:header name='hdr2' value='hdr2val'/>"
+        + "<http:multipart media-type='multipart/mixed' boundary='xxxx'>"
+        + "<http:header name='p1hdr1' value='p1hdr1val'/>"
+        + "<http:header name='p1hdr2' value='p1hdr2val'/>"
+        + "<http:body media-type='text/plain'/>"
+        + "<http:header name='p2hdr1' value='p2hdr1val'/>"
+        + "<http:body media-type='text/plain'/>"
+        + "<http:body media-type='text/plain'/>"
+        + "</http:multipart>" + "</http:request>";
+
+    final DBNode dbNode1 = new DBNode(new IOContent(multiReq));
+    final TokenList bodies = new TokenList();
+    bodies.add("Part1");
+    bodies.add("Part2");
+    bodies.add("Part3");
+
+    final RequestParser rp = new RequestParser(null);
+    final Request r = rp.parse(dbNode1.childIter().next(), StrSeq.get(bodies));
+
+    assertEquals("POST", r.method);
+    assertEquals(REST_ROOT, r.href);
+    assertEquals(2, r.headers.size());
+    assertTrue(r.isMultipart);
+    assertEquals(3, r.parts.size());
+
+    // check parts
+    final Iterator<Part> i = r.parts.iterator();
+    Part part = i.next();
+    assertEquals(2, part.headers.size());
+    assertEquals(1, part.contents.size());
+    assertEquals(1, part.attributes.size());
+
+    part = i.next();
+    assertEquals(1, part.headers.size());
+    assertEquals(1, part.contents.size());
+    assertEquals(1, part.attributes.size());
+
+    part = i.next();
+    assertEquals(0, part.headers.size());
+    assertEquals(1, part.contents.size());
+    assertEquals(1, part.attributes.size());
+  }
+
+  /**
+   * Tests if errors are thrown when some mandatory attributes are missing in a
+   * <http:request/>, <http:body/> or <http:multipart/>.
+   * @throws IOException I/O exception
+   */
+  @Test public final void errors() throws IOException {
+    // Incorrect requests
+    final HashMap<String, String> queries = new HashMap<>();
+
+    queries.put("Request without method",
+        "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + "href='" + REST_ROOT + "'/>");
+
+    queries.put("Request with send-authorization and only username",
+        "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + "method='GET' href='" + REST_ROOT + "' username='test'/>");
+
+    queries.put("Request with body that has no media-type",
+        "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + "method='POST' href='" + REST_ROOT + "'>" + "<http:body>"
+        + "</http:body>" + "</http:request>");
+
+    queries.put("Request with multipart that has no media-type",
+        "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + " method='POST' href='" + REST_ROOT + "'>" + "<http:multipart boundary='xxx'>"
+        + "</http:multipart>" + "</http:request>");
+
+    queries.put("Request with multipart with part that has a body without media-type",
+        "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + " method='POST' href='" + REST_ROOT + "'>" + "<http:multipart boundary='xxx'>"
+        + "<http:header name='hdr1' value-='val1'/>"
+        + "<http:body media-type='text/plain'>" + "Part1" + "</http:body>"
+        + "<http:header name='hdr1' value-='val1'/>"
+        + "<http:body>" + "Part1" + "</http:body>"
+        + "</http:multipart>" + "</http:request>");
+
+    queries.put("Request with schema different from http",
+        "<http:request xmlns:http='http://expath.org/ns/http-client' "
+        + "href='ftp://basex.org'/>");
+
+    final StringBuilder error = new StringBuilder();
+    for(final Entry<String, String> entry : queries.entrySet()) {
+      final String name = entry.getKey(), query = entry.getValue();
+      final DBNode dbNode = new DBNode(new IOContent(query));
+      try {
+        final RequestParser rp = new RequestParser(null);
+        rp.parse(dbNode.childIter().next(), Empty.VALUE);
+        error.append(name).append(": Request did not fail.");
+      } catch(final QueryException ex) {
+        if(!ex.getMessage().contains(ErrType.HC.toString())) {
+          error.append(name).append(": Wrong error code (").append(ex.getMessage()).append(")");
+        }
+      }
+    }
+    if(!error.isEmpty()) fail(error.toString());
+  }
+
+  /**
+   * Tests method setRequestContent of HttpClient.
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeMultipartMessage() throws IOException {
+    final Request request = new Request();
+    request.isMultipart = true;
+    request.payloadAtts.put("media-type", "multipart/alternative");
+    request.payloadAtts.put("boundary", "boundary42");
+    final Part p1 = new Part();
+    p1.headers.put("Content-Type", "text/plain; charset=us-ascii");
+    p1.attributes.put("media-type", "text/plain");
+    final String plain = "PLAIN\r\n";
+    p1.contents.add(Str.get(plain));
+
+    final Part p2 = new Part();
+    p2.headers.put("Content-Type", "text/richtext");
+    p2.attributes.put("media-type", "text/richtext");
+    final String rich = "RICH\n";
+    p2.contents.add(Str.get(rich));
+
+    final Part p3 = new Part();
+    p3.headers.put("Content-Type", "text/x-whatever");
+    p3.attributes.put("media-type", "text/x-whatever");
+    final String fancy = "FANCY";
+    p3.contents.add(Str.get(fancy));
+
+    request.parts.add(p1);
+    request.parts.add(p2);
+    request.parts.add(p3);
+
+    final String expResult = "--boundary42" + CRLF
+        + "Content-Type: text/plain; charset=us-ascii" + CRLF + CRLF + plain + CRLF
+        + "--boundary42" + CRLF + "Content-Type: text/richtext" + CRLF + CRLF + rich + CRLF
+        + "--boundary42" + CRLF + "Content-Type: text/x-whatever" + CRLF + CRLF + fancy + CRLF
+        + "--boundary42--" + CRLF;
+    assertEquals(expResult, write(request));
+  }
+
+  /**
+   * Tests method setRequestContent of HttpClient.
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeMultipartBinary() throws IOException {
+    final Request request = new Request();
+    request.isMultipart = true;
+    request.payloadAtts.put("media-type", "multipart/mixed");
+    request.payloadAtts.put("boundary", "boundary");
+    final Part p1 = new Part();
+    p1.headers.put("Content-Type", "application/octet-stream");
+    p1.attributes.put("media-type", "application/octet-stream");
+    p1.contents.add(B64.get((byte) -1));
+    request.parts.add(p1);
+
+    final ByteList bl = new ByteList();
+    bl.add(token("--boundary" + CRLF + "Content-Type: application/octet-stream" + CRLF + CRLF));
+    bl.add(-1).add(token(CRLF + "--boundary--" + CRLF));
+
+    // Compare results
+    assertEquals(bl.toString(), write(request));
+  }
+
+  /**
+   * Tests writing of request content with different combinations of the body
+   * attributes media-type and method.
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeMessage() throws IOException {
+    // Case 1: No method, media-type='text/xml'
+    Request request = new Request();
+    request.payloadAtts.put(SerializerOptions.MEDIA_TYPE.name(), "text/xml");
+    // Node child
+    request.payload.add(FElem.build(new QNm("a")).text("a").finish());
+    // String item child
+    request.payload.add(Str.get("<b>b</b>"));
+    assertEquals("<a>a</a>&lt;b&gt;b&lt;/b&gt;", write(request));
+
+    // Case 2: No method, media-type='text/plain'
+    request = new Request();
+    request.payloadAtts.put(SerializerOptions.MEDIA_TYPE.name(), "text/plain");
+    // Node child
+    request.payload.add(FElem.build(new QNm("a")).text("a").finish());
+    // String item child
+    request.payload.add(Str.get("<b>b</b>"));
+    assertEquals("a<b>b</b>", write(request));
+
+    // Case 3: method='text', media-type='text/xml'
+    request = new Request();
+    request.payloadAtts.put(SerializerOptions.MEDIA_TYPE.name(), "text/xml");
+    request.payloadAtts.put("method", "text");
+    // Node child
+    request.payload.add(FElem.build(new QNm("a")).text("a").finish());
+    // String item child
+    request.payload.add(Str.get("<b>b</b>"));
+    assertEquals("a<b>b</b>", write(request));
+  }
+
+  /**
+   * Tests writing of body content when @method is binary and output is xs:base64Binary.
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeBase64() throws IOException {
+    // Case 1: content is xs:base64Binary
+    Request request = new Request();
+    request.payloadAtts.put("method", SerialMethod.BASEX.toString());
+    request.payload.add(B64.get(token("test")));
+    assertEquals("test", write(request));
+
+    // Case 2: content is a node
+    request = new Request();
+    request.payloadAtts.put("method", SerialMethod.BASEX.toString());
+    request.payload.add(FElem.build(new QNm("a")).text("test").finish());
+    assertEquals("<a>test</a>", write(request));
+  }
+
+  /**
+   * Tests writing text nodes (children of http:send-request bodies).
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeText() throws IOException {
+    Request request = new Request();
+    request.payloadAtts.put(SerializerOptions.MEDIA_TYPE.name(), "application/octet-stream");
+    request.payload.add(new FTxt("&"));
+    assertEquals("&", write(request));
+
+    request = new Request();
+    request.payloadAtts.put(SerializerOptions.MEDIA_TYPE.name(),
+        "application/x-www-form-urlencoded");
+    request.payload.add(new FTxt("&"));
+    assertEquals("&", write(request));
+  }
+
+  /**
+   * Tests writing of body content when @method is binary and output is xs:hexBinary.
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeHex() throws IOException {
+    // Case 1: content is xs:hexBinary
+    Request request = new Request();
+    request.payloadAtts.put("method", SerialMethod.BASEX.toString());
+    request.payload.add(new Hex(token("test")));
+    assertEquals("test", write(request));
+
+    // Case 2: content is a node
+    request = new Request();
+    request.payloadAtts.put("method", SerialMethod.BASEX.toString());
+    request.payload.add(FElem.build(new QNm("a")).text("test").finish());
+    assertEquals("<a>test</a>", write(request));
+  }
+
+  /**
+   * Tests writing of request content when @src is set.
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeFromResource() throws IOException {
+    // Create a file form which will be read
+    final IOFile file = new IOFile(Prop.TEMPDIR, Util.className(FnHttpTest.class));
+    file.write("test");
+
+    // Request
+    try {
+      final Request request = new Request();
+      request.payloadAtts.put("src", file.url());
+      request.payloadAtts.put("method", "binary");
+      assertEquals("test", write(request));
+    } finally {
+      // Delete file
+      file.delete();
+    }
+  }
+
+  /**
+   * Tests response handling with specified charset in the header 'Content-Type'.
+   * @throws Exception exception
+   */
+  @Test public final void responseWithCharset() throws Exception {
+    // Create fake HTTP connection
+    final FakeHttpResponse response = new FakeHttpResponse();
+    // Set content type
+    response.header("Content-Type", "text/plain; charset=CP1251");
+    // set content encoded in CP1251
+    final String test = "\u0442\u0435\u0441\u0442";
+    response.input(Charset.forName("CP1251").encode(test).array());
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    // compare results
+    assertEquals(test, string(returned.itemAt(1).string(null)));
+  }
+
+  /**
+   * Tests content-type parsing.
+   * @throws Exception exception
+   */
+  @Test public final void parseContentType() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    // upper case attribute, quoted string
+    response.header("Content-Type", "text/plain; CHARSET=\"CP1252\"");
+    response.input(Token.EMPTY);
+    new Response(null, ctx.options).getResponse(response, BodyMode.PARSE, null, null);
+
+    response.header("Content-Type", "text/plain; ChArSeT=\"\\C\\P\\1\\2\\5\\2\"");
+    new Response(null, ctx.options).getResponse(response, BodyMode.PARSE, null, null);
+
+    try {
+      response.header("Content-Type", "text/plain; CHARSET=\\C\\P\\1\\2\\5\\2");
+      new Response(null, ctx.options).getResponse(response, BodyMode.PARSE, null, null);
+      fail("Encoding exception expected");
+    } catch(final QueryException ex) {
+      Util.debug(ex);
+    }
+  }
+
+  /**
+   * Tests that HTTP/2 pseudo-headers are not returned as response headers.
+   * @throws Exception exception
+   */
+  @Test public final void pseudoHeaders() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header(":status", "200");
+    response.header("Content-Type", "text/plain");
+    response.input(token("x"));
+    final String result = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null).
+        serialize().toString();
+    assertFalse(result.contains(":status"), result);
+    assertTrue(result.contains("content-type"), result);
+  }
+
+  /**
+   * Tests ResponseHandler.getResponse() with multipart response.
+   * @throws IOException I/O exception
+   * @throws Exception exception
+   */
+  @Test public final void multipartResponse() throws Exception {
+    // Create fake HTTP connection
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("From", "Nathaniel Borenstein <nsb@bellcore.com>");
+    response.header("MIME-version", "1.0");
+    response.header("Subject", "Formatted text mail");
+    response.header("Content-Type", "multipart/alternative;boundary=\"boundary42\"");
+    response.input(token("--boundary42" + CRLF
+        + "Content-Type: text/plain; charset=us-ascii" + CRLF + CRLF
+        + "...plain text...." + CRLF + CRLF
+        + "--boundary42" + CRLF + "Content-Type: text/richtext" + CRLF + CRLF
+        + ".... richtext..." + CRLF
+        + "--boundary42" + CRLF + "Content-Type: text/x-whatever" + CRLF + CRLF
+        + ".... fanciest formatted version  " + CRLF + "..."  + CRLF + "--boundary42--"));
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+
+    // Construct expected result
+    final ItemList expected = new ItemList();
+    final String content = "<http:response xmlns:http='http://expath.org/ns/http-client' "
+        + "status='200' message='OK'>"
+        + "<http:header name='subject' value='Formatted text mail'/>"
+        + "<http:header name='content-type' "
+        + "value='multipart/alternative;boundary=&quot;boundary42&quot;'/>"
+        + "<http:header name='mime-version' value='1.0'/>"
+        + "<http:header name='from' value='Nathaniel Borenstein "
+        + "&lt;nsb@bellcore.com&gt;'/>"
+        + "<http:multipart media-type='multipart/alternative' "
+        + "boundary='boundary42'>"
+        + "<http:header name='content-type' "
+        + "value='text/plain; charset=us-ascii'/>"
+        + "<http:body media-type='text/plain; charset=us-ascii'/>"
+        + "<http:header name='content-type' value='text/richtext'/>"
+        + "<http:body media-type='text/richtext'/>"
+        + "<http:header name='content-type' value='text/x-whatever'/>"
+        + "<http:body media-type='text/x-whatever'/>"
+        + "</http:multipart>" + "</http:response> ";
+    expected.add(new DBNode(new IOContent(content)).childIter().next());
+    expected.add(Str.get("...plain text....\n"));
+    expected.add(Str.get(".... richtext..."));
+    expected.add(Str.get(".... fanciest formatted version  \n..."));
+    compare(expected.value(), returned);
+  }
+
+  /**
+   * Tests ResponseHandler.getResponse() with multipart response having preamble and epilogue.
+   * @throws IOException I/O exception
+   * @throws Exception exception
+   */
+  @Test public final void multipartRespPreamble() throws Exception {
+    // Create fake HTTP connection
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("From", "Nathaniel Borenstein <nsb@bellcore.com>");
+    response.header("MIME-version", "1.0");
+    response.header("To", "Ned Freed <ned@innosoft.com>");
+    response.header("Subject", "Formatted text mail");
+    response.header("Content-Type", "multipart/mixed;boundary=\"simple boundary\"");
+    // Response to be read
+    response.input(token("This is the preamble.  "
+        + "It is to be ignored, though it" + NL
+        + "is a handy place for mail composers to include an" + CRLF
+        + "explanatory note to non-MIME compliant readers." + CRLF
+        + "--simple boundary" + CRLF + CRLF
+        + "This is implicitly typed plain ASCII text." + CRLF
+        + "It does NOT end with a linebreak."
+        +  CRLF + "--simple boundary" + CRLF
+        + "Content-type: text/plain; charset=us-ascii" + CRLF + CRLF
+        + "This is explicitly typed plain ASCII text." + CRLF
+        + "It DOES end with a linebreak." + CRLF
+        +  CRLF + "--simple boundary--" + CRLF
+        + "This is the epilogue.  It is also to be ignored."));
+    // Get response as sequence of XQuery items
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+
+    // Construct expected result
+    final ItemList expected = new ItemList();
+    final String content = "<http:response xmlns:http='http://expath.org/ns/http-client' "
+        + "status='200' message='OK'>"
+        + "<http:header name='subject' value='Formatted text mail'/>"
+        + "<http:header name='to' value='Ned "
+        + "Freed &lt;ned@innosoft.com&gt;'/>"
+        + "<http:header name='content-type' value='multipart/mixed;"
+        + "boundary=&quot;simple boundary&quot;'/>"
+        + "<http:header name='mime-version' value='1.0'/>"
+        + "<http:header name='from' value='Nathaniel Borenstein "
+        + "&lt;nsb@bellcore.com&gt;'/>"
+        + "<http:multipart boundary='simple boundary' media-type='multipart/mixed'>"
+        + "<http:body media-type='text/plain'/>"
+        + "<http:header name='content-type' value='text/plain; "
+        + "charset=us-ascii'/>"
+        + "<http:body media-type='text/plain; charset=us-ascii'/>"
+        + "</http:multipart>" + "</http:response>";
+    expected.add(new DBNode(new IOContent(content)).childIter().next());
+    expected.add(Str.get("This is implicitly typed plain ASCII text.\n"
+        + "It does NOT end with a linebreak."));
+    expected.add(Str.get("This is explicitly typed plain ASCII text.\n"
+        + "It DOES end with a linebreak.\n"));
+
+    compare(expected.value(), returned);
+  }
+
+  /**
+   * Tests nested multipart responses.
+   * @throws Exception exception
+   */
+  @Test public final void nestedMultipart() throws Exception {
+    // Create fake HTTP connection
+    final String boundary = "batchresponse_4c4c5223-efa7-4aba-9865-fb4cb102cfd2";
+
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "multipart/mixed;boundary=\"" + boundary + '"');
+    response.input(new IOFile("src/test/resources/response.txt").read());
+
+    new Response(null, ctx.options).getResponse(response, BodyMode.PARSE, null, null);
+  }
+
+  /**
+   * Tests that a quoted boundary parameter containing a semicolon is parsed as a whole.
+   * @throws Exception exception
+   */
+  @Test public final void quotedBoundarySemicolon() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "multipart/mixed; boundary=\"a;b\"");
+    response.input(token("--a;b" + CRLF + "Content-Type: text/plain" + CRLF + CRLF
+        + "hello" + CRLF + "--a;b--" + CRLF));
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    assertEquals("hello", string(returned.itemAt(1).string(null)));
+  }
+
+  /**
+   * Tests that boundary lines with trailing transport-padding (spaces/tabs) are recognized.
+   * @throws Exception exception
+   */
+  @Test public final void paddedBoundary() throws Exception {
+    // padded opening delimiter
+    FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "multipart/mixed; boundary=bnd");
+    response.input(token("--bnd \t" + CRLF + "Content-Type: text/plain" + CRLF + CRLF
+        + "hello" + CRLF + "--bnd--" + CRLF));
+    Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    assertEquals("hello", string(returned.itemAt(1).string(null)));
+
+    // padded closing delimiter
+    response = new FakeHttpResponse();
+    response.header("Content-Type", "multipart/mixed; boundary=bnd");
+    response.input(token("--bnd" + CRLF + "Content-Type: text/plain" + CRLF + CRLF
+        + "hello" + CRLF + "--bnd-- " + CRLF));
+    returned = new Response(null, ctx.options).getResponse(response, BodyMode.PARSE, null, null);
+    assertEquals("hello", string(returned.itemAt(1).string(null)));
+  }
+
+  /**
+   * Tests that Content-Transfer-Encoding 'base64' is recognized case-insensitively.
+   * @throws Exception exception
+   */
+  @Test public final void transferEncodingCase() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "multipart/mixed; boundary=bnd");
+    response.input(token("--bnd" + CRLF + "Content-Type: text/plain" + CRLF
+        + "Content-Transfer-Encoding: Base64" + CRLF + CRLF
+        + "aGk=" + CRLF + "--bnd--" + CRLF));
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    assertEquals("hi", string(returned.itemAt(1).string(null)));
+  }
+
+  /**
+   * Tests that gzip content encoding is decoded case-insensitively.
+   * @throws Exception exception
+   */
+  @Test public final void contentEncodingGzip() throws Exception {
+    // single part, capitalized coding
+    FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "application/xml");
+    response.header("Content-Encoding", "GzIp");
+    response.input(gzip("<doc/>"));
+    Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    assertEquals(NodeType.DOCUMENT, returned.itemAt(1).type);
+
+    // multipart
+    response = new FakeHttpResponse();
+    response.header("Content-Type", "multipart/mixed; boundary=bnd");
+    response.header("Content-Encoding", "gzip");
+    response.input(gzip("--bnd" + CRLF + "Content-Type: text/plain" + CRLF + CRLF
+        + "hello" + CRLF + "--bnd--" + CRLF));
+    returned = new Response(null, ctx.options).getResponse(response, BodyMode.PARSE, null, null);
+    assertEquals("hello", string(returned.itemAt(1).string(null)));
+  }
+
+  /**
+   * Tests that a part header with an empty value is reported, as the response headers are.
+   * @throws Exception exception
+   */
+  @Test public final void emptyPartHeader() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "multipart/mixed; boundary=bnd");
+    response.header("X-Empty", "");
+    response.input(token("--bnd" + CRLF + "Content-Type: text/plain" + CRLF
+        + "Content-Description:" + CRLF + CRLF + "hello" + CRLF + "--bnd--" + CRLF));
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    final String xml = string(returned.itemAt(0).serialize().finish());
+    assertTrue(xml.contains("name=\"content-description\" value=\"\""), xml);
+    assertTrue(xml.contains("name=\"x-empty\" value=\"\""), xml);
+  }
+
+  /**
+   * Tests the response record of the HTTP Client 2.0 functions.
+   * @throws Exception exception
+   */
+  @Test public final void getRecord() throws Exception {
+    try(QueryProcessor qp = new QueryProcessor("string-join(" + _HTTP_GET.args(REST_ROOT)
+        + " ! (?status, ?href, ?version, ?body instance of document-node(),"
+        + " exists(?headers?content-type)), ' ')", ctx)) {
+      assertEquals("200 " + REST_ROOT + " 1.1 true true", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Tests the headers option of the HTTP Client 2.0 functions.
+   * @throws Exception exception
+   */
+  @Test public final void getHeaders() throws Exception {
+    // a custom field is sent
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_GET.args(echo("X-Test"),
+        " { 'headers': { 'X-Test': 'a' } }") + "?body/x/string()", ctx)) {
+      assertEquals("a", qp.value().serialize().toString());
+    }
+    // an empty sequence suppresses the user agent of the implementation
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_GET.args(echo("User-Agent"),
+        " { 'headers': { 'User-Agent': () } }") + "?body/x/string()", ctx)) {
+      assertNotEquals(IOUrl.AGENT, qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Tests the encoding option of the HTTP Client 2.0 functions.
+   * @throws Exception exception
+   */
+  @Test public final void getEncoding() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "text/plain");
+    response.input(new byte[] { (byte) 0xE4 });
+    final Response resp = new Response(null, ctx.options);
+    final XQMap map = resp.getRecord(response, BodyMode.TEXT, "ISO-8859-1", null);
+    assertEquals("ä", string(map.get(Str.get("body")).itemAt(0).string(null)));
+  }
+
+  /**
+   * Tests that a lazy body raises the errors of the function that created it.
+   */
+  @Test public final void lazyErrors() {
+    // version 2.0
+    final B64HttpLazy lazy = new B64HttpLazy("http://x/", broken(), "", null,
+      _HTTP_GET.definition());
+    QueryException ex = assertThrows(QueryException.class, () -> lazy.string(null));
+    assertSame(HTTP_NETWORK_X, ex.error());
+    assertEquals("http:get(\"http://x/\")", lazy.toString());
+
+    // version 1.0
+    final B64HttpLazy lazy1 = new B64HttpLazy("http://x/", broken(), "", null,
+      _HTTP_SEND_REQUEST.definition());
+    ex = assertThrows(QueryException.class, () -> lazy1.string(null));
+    assertSame(HC_ERROR_X, ex.error());
+  }
+
+  /**
+   * Returns an input stream that fails on the first access.
+   * @return input stream
+   */
+  private static InputStream broken() {
+    return new InputStream() {
+      @Override
+      public int read() throws IOException {
+        throw new IOException("Broken stream");
+      }
+    };
+  }
+
+  /**
+   * Tests that an unparsable body reports the response as error value.
+   * @throws Exception exception
+   */
+  @Test public final void getParseError() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "application/xml");
+    response.input(token("<x"));
+    final Response resp = new Response(null, ctx.options);
+    final QueryException ex = assertThrows(QueryException.class, () ->
+      resp.getRecord(response, BodyMode.PARSE, null, null));
+    assertSame(HTTP_PARSE_X, ex.error());
+    final XQMap map = (XQMap) ex.value();
+    assertEquals(200, ((Itr) map.get(Str.get("status")).itemAt(0)).itr());
+    // the body is the one that 'binary' would return
+    assertEquals("PHg=", string(map.get(Str.get("body")).itemAt(0).string(null)));
+  }
+
+  /**
+   * Tests the response-body option of the HTTP Client 2.0 functions.
+   * @throws Exception exception
+   */
+  @Test public final void getResponseBody() throws Exception {
+    final String query = "string-join(("
+      + _HTTP_GET.args(REST_ROOT, " { 'response-body': 'text' }")
+      + "?body instance of xs:string,"
+      + _HTTP_GET.args(REST_ROOT, " { 'response-body': 'binary' }")
+      + "?body instance of xs:base64Binary,"
+      + _HTTP_GET.args(REST_ROOT, " { 'response-body': 'none' }")
+      + " ! empty(?body)), ' ')";
+    try(QueryProcessor qp = new QueryProcessor(query, ctx)) {
+      assertEquals("true true true", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Tests the query option of the HTTP Client 2.0 functions.
+   * @throws Exception exception
+   */
+  @Test public final void getQuery() throws Exception {
+    // parameters are appended to the existing query string and percent-encoded
+    final String url = REST_ROOT + "?query=%3Cx%3E%7Brequest:parameter(%22q%22)%7D%3C/x%3E";
+    try(QueryProcessor qp = new QueryProcessor(_HTTP_GET.args(url,
+        " { 'query': { 'q': 'a b' } }") + "?body/x/string()", ctx)) {
+      assertEquals("a b", qp.value().serialize().toString());
+    }
+  }
+
+  /**
+   * Returns the URL of a service that echoes a header field.
+   * @param name field name
+   * @return URL
+   */
+  private static String echo(final String name) {
+    return REST_ROOT + "?query=%3Cx%3E%7Brequest:header(%22" + name + "%22)%7D%3C/x%3E";
+  }
+
+  /**
+   * Tests that a media type is recognized regardless of the case of its type/subtype.
+   * @throws Exception exception
+   */
+  @Test public final void mediaTypeCase() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "Application/Xml");
+    response.input(token("<doc/>"));
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    assertEquals(NodeType.DOCUMENT, returned.itemAt(1).type);
+  }
+
+  /**
+   * Tests that a leading '<?xml-...?>' processing instruction is not stripped as a declaration.
+   * @throws Exception exception
+   */
+  @Test public final void xmlDeclarationPi() throws Exception {
+    final FakeHttpResponse response = new FakeHttpResponse();
+    response.header("Content-Type", "application/xml");
+    response.input(token("<?xml-stylesheet type=\"text/xsl\" href=\"s.xsl\"?><doc/>"));
+    final Value returned = new Response(null, ctx.options).
+      getResponse(response, BodyMode.PARSE, null, null);
+    final String xml = string(returned.itemAt(1).serialize().finish());
+    assertTrue(xml.contains("<?xml-stylesheet"), xml);
+  }
+
+  /**
+   * Tests that boolean request attributes accept the full boolean vocabulary (as at read time).
+   * @throws Exception exception
+   */
+  @Test public final void booleanAttributes() throws Exception {
+    final Request r = parse("<http:request " + HTTP_NS + " method='get' href='http://x/' "
+        + "status-only='1' follow-redirect='yes' send-authorization='off'/>");
+    assertSame(BodyMode.NONE, r.bodyMode);
+    assertEquals(Request.MAX_REDIRECTS, r.redirects);
+    assertFalse(r.sendAuthorization);
+  }
+
+  /**
+   * Tests that 'timeout=0' is rejected up front with a specific diagnostic.
+   */
+  @Test public final void invalidTimeout() {
+    for(final String timeout : new String[] { "0", "-1", "x" }) {
+      final QueryException ex = assertThrows(QueryException.class, () -> parse("<http:request "
+          + HTTP_NS + " method='get' href='http://x/' timeout='" + timeout + "'/>"));
+      assertTrue(ex.getMessage().contains("Invalid timeout"), ex.getMessage());
+    }
+  }
+
+  /**
+   * Tests that fractions of a second are accepted as timeout.
+   * @throws Exception exception
+   */
+  @Test public final void fractionalTimeout() throws Exception {
+    final Request r = parse("<http:request " + HTTP_NS + " method='get' href='http://x/' "
+        + "timeout='0.5'/>");
+    assertEquals(500, r.timeout.toMillis());
+  }
+
+  /**
+   * Tests that repeated request headers are comma-merged and empty values are kept.
+   * @throws Exception exception
+   */
+  @Test public final void headerMergingAndEmpty() throws Exception {
+    final Request r = parse("<http:request " + HTTP_NS + " method='get' href='http://x/'>"
+        + "<http:header name='X-Tag' value='a'/>"
+        + "<http:header name='X-Tag' value='b'/>"
+        + "<http:header name='X-Empty' value=''/>"
+        + "</http:request>");
+    assertEquals("a, b", r.headers.get("X-Tag"));
+    assertTrue(r.headers.containsKey("X-Empty"));
+    assertEquals("", r.headers.get("X-Empty"));
+  }
+
+  /**
+   * Tests that request headers are merged case-insensitively, and cookies with semicolons.
+   * @throws Exception exception
+   */
+  @Test public final void headerCase() throws Exception {
+    final Request r = parse("<http:request " + HTTP_NS + " method='get' href='http://x/'>"
+        + "<http:header name='X-Tag' value='a'/>"
+        + "<http:header name='x-tag' value='b'/>"
+        + "<http:header name='Cookie' value='a=1'/>"
+        + "<http:header name='cookie' value='b=2'/>"
+        + "</http:request>");
+    assertEquals(2, r.headers.size());
+    assertEquals("a, b", r.headers.get("X-TAG"));
+    assertEquals("a=1; b=2", r.headers.get("Cookie"));
+  }
+
+  /**
+   * Tests that methods and headers rejected by the HTTP client are reported as request errors.
+   */
+  @Test public final void invalidHeaders() {
+    for(final String request : new String[] {
+      "<http:request " + HTTP_NS + " method='connect' href='http://x/'/>",
+      "<http:request " + HTTP_NS + " method='g e t' href='http://x/'/>",
+      "<http:request " + HTTP_NS + " method='get' href='http://x/'>"
+        + "<http:header name='Host' value='y'/></http:request>",
+      "<http:request " + HTTP_NS + " method='get' href='http://x/'>"
+        + "<http:header name='X Y' value='z'/></http:request>"
+    }) {
+      final QueryException ex = assertThrows(QueryException.class, () -> parse(request));
+      assertEquals(QueryError.HC_REQ_X, ex.error(), ex.getMessage());
+    }
+  }
+
+  /**
+   * Tests that a multipart part only accepts an http:body payload element.
+   */
+  @Test public final void partPayloadElement() {
+    // nested multipart inside a part
+    assertThrows(QueryException.class, () ->
+        parse("<http:request " + HTTP_NS + " method='post' href='http://x/'>"
+        + "<http:multipart media-type='multipart/mixed' boundary='b'>"
+        + "<http:multipart media-type='text/xml'>"
+        + "<http:body media-type='text/xml'>x</http:body>"
+        + "</http:multipart></http:multipart></http:request>"));
+    // namespace-less body inside a part
+    assertThrows(QueryException.class, () ->
+        parse("<http:request " + HTTP_NS + " method='post' href='http://x/'>"
+        + "<http:multipart media-type='multipart/mixed' boundary='b'>"
+        + "<body media-type='text/xml'>x</body>"
+        + "</http:multipart></http:request>"));
+  }
+
+  /**
+   * Tests that a 'src' part does not consume an item from the $bodies sequence.
+   * @throws Exception exception
+   */
+  @Test public final void srcPartBodyAlignment() throws Exception {
+    final Request r = parse("<http:request " + HTTP_NS + " method='post' href='http://x/'>"
+        + "<http:multipart media-type='multipart/mixed' boundary='bnd'>"
+        + "<http:body media-type='text/plain' src='http://x/src'/>"
+        + "<http:body media-type='text/plain'/>"
+        + "</http:multipart></http:request>", Str.get("BODY2"));
+    assertEquals(2, r.parts.size());
+    // src part takes no body from the list
+    assertEquals(0, r.parts.getFirst().contents.size());
+    // the following part receives the list item
+    final Part part = r.parts.get(1);
+    assertEquals(1, part.contents.size());
+    assertEquals("BODY2", string(part.contents.value().itemAt(0).string(null)));
+  }
+
+  /**
+   * Tests that an explicit binary method atomizes a node to its string value.
+   * @throws IOException I/O exception
+   */
+  @Test public final void writeBinaryMethod() throws IOException {
+    final Request request = new Request();
+    request.payloadAtts.put(SerializerOptions.MEDIA_TYPE.name(), "text/plain");
+    request.payloadAtts.put("method", "binary");
+    request.payload.add(FElem.build(new QNm("a")).text("x").finish());
+    assertEquals("x", write(request));
+  }
+
+  /**
+   * Tests that a multipart form field is keyed by 'name' even when 'filename' precedes it.
+   * @throws Exception exception
+   */
+  @Test public final void multipartFormFieldName() throws Exception {
+    final byte[] input = token("--bnd" + CRLF
+        + "Content-Disposition: form-data; filename=\"photo.jpg\"; name=\"upload\"" + CRLF + CRLF
+        + "hello" + CRLF + "--bnd--" + CRLF);
+    final Payload payload = new Payload(new ArrayInput(input), BodyMode.PARSE, null, ctx.options);
+    final MediaType type = new MediaType("multipart/form-data; boundary=bnd");
+    final Value keys = payload.multiForm(type, null).keys();
+    assertEquals(1, keys.size());
+    assertEquals("upload", string(keys.itemAt(0).string(null)));
+  }
+
+  /**
+   * Compares results.
+   * @param expected expected result
+   * @param returned returned result
+   * @throws Exception exception
+   */
+  private static void compare(final Value expected, final Value returned) throws Exception {
+    // Compare response with expected result
+    assertEquals(expected.size(), returned.size(), "Different number of results");
+
+    final long es = expected.size();
+    for(int e = 0; e < es; e++) {
+      Item exp = expected.itemAt(e), ret = returned.itemAt(e);
+      // reorder response headers
+      if(exp.type == NodeType.ELEMENT) exp = reorderHeaders(exp);
+      if(ret.type == NodeType.ELEMENT) ret = reorderHeaders(ret);
+      // compare items
+      if(!new DeepEqual().equal(exp, ret)) {
+        fail(Strings.concat("Result ", e, " differs:\nReturned: ",
+            ret.serialize().finish(), "\nExpected: ", exp.serialize()));
+      }
+    }
+  }
+
+  /**
+   * Sorts HTTP headers.
+   * @param xml original element
+   * @return element with reordered headers
+   * @throws QueryException query exception
+   */
+  private static Item reorderHeaders(final Item xml) throws QueryException {
+    final String query = ". update {"
+      + " delete nodes http:header,"
+      + " for $h in http:header"
+      + " order by $h/@name"
+      + " return insert node $h as first into ."
+      + '}';
+    try(QueryProcessor qp = new QueryProcessor(query, ctx).context(xml)) {
+      return qp.iter().next();
+    }
+  }
+
+  /**
+   * Checks the response to an HTTP request.
+   * @param value query result
+   * @param itemsCount expected number of items
+   * @param expStatus expected status
+   */
+  private static void checkResponse(final Value value, final int itemsCount, final int expStatus) {
+    assertEquals(itemsCount, value.size());
+    assertInstanceOf(FElem.class, value.itemAt(0));
+    final FElem response = (FElem) value.itemAt(0);
+    assertNotNull(response.attributeIter());
+    if(!eq(response.attribute(HTTPText.Q_STATUS), token(expStatus))) {
+      fail("Expected: " + expStatus + "\nFound: " + response);
+    }
+  }
+
+  /**
+   * Returns the output stream of a fake connection.
+   * @param request request
+   * @return output stream
+   * @throws IOException I/O exception
+   */
+  private static String write(final Request request) throws IOException {
+    return Token.string(Client.payload(request));
+  }
+
+  /**
+   * Parses an http:request element with no bodies.
+   * @param request request string
+   * @return parsed request
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private static Request parse(final String request) throws QueryException, IOException {
+    return parse(request, Empty.VALUE);
+  }
+
+  /**
+   * Parses an http:request element.
+   * @param request request string
+   * @param bodies request bodies
+   * @return parsed request
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  private static Request parse(final String request, final Value bodies)
+      throws QueryException, IOException {
+    final DBNode node = new DBNode(new IOContent(request));
+    return new RequestParser(null).parse(node.childIter().next(), bodies);
+  }
+
+  /**
+   * Compresses a string with gzip.
+   * @param string string to compress
+   * @return gzip-compressed bytes
+   * @throws IOException I/O exception
+   */
+  private static byte[] gzip(final String string) throws IOException {
+    final ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    try(GZIPOutputStream gos = new GZIPOutputStream(bos)) {
+      gos.write(token(string));
+    }
+    return bos.toByteArray();
+  }
+
+  /**
+   * Fake HTTP connection.
+   *
+   * @author BaseX Team, BSD License
+   * @author Rositsa Shadura
+   */
+  static final class FakeHttpResponse implements HttpResponse<InputStream> {
+    /** Request headers. */
+    private final Map<String, List<String>> headers = new HashMap<>();
+    /** Input stream. */
+    private InputStream input;
+
+    /**
+     * Adds a header value.
+     * @param name name
+     * @param value value
+     */
+    void header(final String name, final String value) {
+      headers.put(name, List.of(value));
+    }
+
+    /**
+     * Content type.
+     * @param token input to be assigned
+     */
+    void input(final byte[] token) {
+      input = new ArrayInput(token);
+    }
+
+    @Override
+    public int statusCode() {
+      return 200;
+    }
+
+    @Override
+    public HttpRequest request() {
+      return null;
+    }
+
+    @Override
+    public Optional<HttpResponse<InputStream>> previousResponse() {
+      return Optional.empty();
+    }
+
+    @Override
+    public HttpHeaders headers() {
+      return HttpHeaders.of(headers, (a, b) -> true);
+    }
+
+    @Override
+    public InputStream body() {
+      return input;
+    }
+
+    @Override
+    public Optional<SSLSession> sslSession() {
+      return Optional.empty();
+    }
+
+    @Override
+    public URI uri() {
+      return null;
+    }
+
+    @Override
+    public Version version() {
+      return null;
+    }
+  }
+}

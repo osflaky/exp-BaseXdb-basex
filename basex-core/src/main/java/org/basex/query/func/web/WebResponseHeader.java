@@ -1,0 +1,23 @@
+package org.basex.query.func.web;
+
+import java.util.*;
+
+import org.basex.query.*;
+import org.basex.query.value.node.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class WebResponseHeader extends WebFn {
+  @Override
+  public FNode value(final QueryContext qc) throws QueryException {
+    final HashMap<String, String> output = toOptions(arg(0), qc);
+    final HashMap<String, String> headers = toOptions(arg(1), qc);
+    final ResponseOptions response = toOptions(arg(2), new ResponseOptions(), qc);
+
+    return createResponse(response, headers, output);
+  }
+}

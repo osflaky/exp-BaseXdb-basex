@@ -1,0 +1,61 @@
+package org.basex.query.func.ft;
+
+import static org.basex.util.ft.FTFlag.*;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.ft.*;
+import org.basex.util.list.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public class FtTokenize extends StandardFunc {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    return StrSeq.get(tokens(qc, false));
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    optOptions(1, FtLexerOptions::new, cc);
+    return this;
+  }
+
+  /**
+   * Returns all tokens.
+   * @param qc query context
+   * @param all include separators
+   * @return resulting tokens
+   * @throws QueryException query exception
+   */
+  protected final TokenList tokens(final QueryContext qc, final boolean all) throws QueryException {
+    final Item value = arg(0).atomItem(qc, info);
+    final FtLexerOptions options = options(1, FtLexerOptions::new, qc);
+
+    final TokenList tl = new TokenList();
+    if(!value.isEmpty()) {
+      final FTOpt opt = new FTOpt().assign(qc.ftOpt());
+      final FTDiacritics dc = options.get(FtLexerOptions.DIACRITICS);
+      if(dc != null) opt.set(DC, dc == FTDiacritics.SENSITIVE);
+      final Boolean st = options.get(FtLexerOptions.STEMMING);
+      if(st != null) opt.set(ST, st);
+      final String ln = options.get(FtLexerOptions.LANGUAGE);
+      if(ln != null) opt.ln = Language.get(ln);
+      final FTCase cs = options.get(FtLexerOptions.CASE);
+      if(cs != null) opt.cs = cs;
+
+      final FTLexer lexer = new FTLexer(opt).init(toToken(value));
+      if(all) lexer.all();
+      while(lexer.hasNext()) tl.add(lexer.nextToken());
+    }
+    return tl;
+  }
+}

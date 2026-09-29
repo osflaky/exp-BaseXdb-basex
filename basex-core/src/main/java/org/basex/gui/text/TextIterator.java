@@ -1,0 +1,292 @@
+package org.basex.gui.text;
+
+import static org.basex.util.FTToken.*;
+import static org.basex.util.Token.*;
+
+import java.util.*;
+
+import org.basex.util.*;
+import org.basex.util.list.*;
+
+/**
+ * Returns an iterator for the visualized text.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+final class TextIterator {
+  /** Text. */
+  private final byte[] text;
+  /** Text length. */
+  private final int length;
+  /** Caret position. */
+  private final int caret;
+  /** Indicates if the caret is placed at the end of a rendered row. */
+  private final boolean rowEnd;
+  /** Start position of a text selection. */
+  private final int start;
+  /** End position of a text selection (+1). */
+  private final int end;
+  /** Start position of an error highlighting. */
+  private final int errPos;
+  /** Start and end positions of search terms. */
+  private final IntList[] searchResults;
+  /** Search results of the current token. */
+  private final ArrayList<int[]> results = new ArrayList<>();
+  /** Name at the caret (can be {@code null}: no name is highlighted). */
+  private final byte[] name;
+  /** Occurrences of the name in the current token. */
+  private final ArrayList<int[]> occurrences = new ArrayList<>();
+
+  /** Current start position. */
+  private int pos;
+  /** Current end position. */
+  private int posEnd;
+  /** Current search index. */
+  private int searchIndex;
+  /** Position up to which occurrences have been located. */
+  private int occurrencePos;
+  /** Occurrence that was located last (can be {@code null}). */
+  private int[] occurrence;
+  /** Indicates if current token is part of a link. */
+  private boolean link;
+
+  /**
+   * Constructor.
+   * @param et text reference
+   */
+  TextIterator(final TextEditor et) {
+    text = et.text();
+    length = text.length;
+    caret = et.pos();
+    rowEnd = et.atRowEnd();
+    start = et.start();
+    end = et.end();
+    errPos = et.error();
+    searchResults = et.searchResults();
+    name = et.occurrence();
+  }
+
+  /**
+   * Checks if the text contains more strings.
+   * @param max maximum number of characters to check (long strings will be chopped later on)
+   * @return result of check
+   */
+  boolean moreStrings(final int max) {
+    final int l = length;
+    int p = posEnd;
+    pos = p;
+    if(p >= l) return false;
+
+    // find next token boundary (excessively long tokens will be wrapped later on)
+    final int e = pos + max;
+    final byte[] txt = text;
+    int ch = cp(txt, p);
+    p += cl(txt, p);
+    if(lod(ch)) {
+      while(p < l && p < e) {
+        ch = cp(txt, p);
+        if(!lod(ch)) break;
+        p += cl(txt, p);
+      }
+    }
+    posEnd = p;
+    return true;
+  }
+
+  /**
+   * Returns the current character.
+   * @return current character
+   */
+  int curr() {
+    return cp(text, pos);
+  }
+
+  /**
+   * Returns the text.
+   * @return text
+   */
+  byte[] text() {
+    return text;
+  }
+
+  /**
+   * Returns the iterator position.
+   * @return iterator position
+   */
+  int pos() {
+    return pos;
+  }
+
+  /**
+   * Returns the iterator end position.
+   * @return iterator end position
+   */
+  int posEnd() {
+    return posEnd;
+  }
+
+  /**
+   * Sets the iterator position.
+   * @param p iterator position
+   */
+  void pos(final int p) {
+    pos = p;
+  }
+
+  /**
+   * Sets the iterator end position.
+   * @param p iterator position
+   */
+  void posEnd(final int p) {
+    posEnd = p;
+  }
+
+  /**
+   * Checks if the character position equals the word end.
+   * @return result of check
+   */
+  boolean more() {
+    return pos < posEnd;
+  }
+
+  /**
+   * Returns the current character and moves one character forward.
+   * @return current character
+   */
+  int next() {
+    final int c = curr();
+    pos += cl(text, pos);
+    return c;
+  }
+
+  /**
+   * Checks if the caret position is within the current token.
+   * @return result of check
+   */
+  boolean edited() {
+    return caret >= pos && caret < posEnd;
+  }
+
+  /**
+   * Returns the position of the text cursor.
+   * @return cursor position
+   */
+  int caret() {
+    return caret;
+  }
+
+  /**
+   * Indicates if the caret is placed at the end of a rendered row.
+   * @return result of check
+   */
+  boolean rowEnd() {
+    return rowEnd;
+  }
+
+  /**
+   * Returns a selection range.
+   * @return range or {@code null}
+   */
+  int[] selection() {
+    if(start != end) {
+      final boolean asc = start < end;
+      final int s = asc ? start : end, e = asc ? end : start;
+      if(pos >= s && pos < e || s >= pos && s < posEnd) return new int[] { s, e };
+    }
+    return null;
+  }
+
+  /**
+   * Returns the search results of the current token.
+   * @return ranges
+   */
+  ArrayList<int[]> searchResults() {
+    results.clear();
+    final IntList starts = searchResults[0], ends = searchResults[1];
+    int si = searchIndex;
+    for(final int ss = starts.size(); si < ss; si++) {
+      final int s = starts.get(si), e = ends.get(si);
+      if(s >= posEnd) break;
+      results.add(new int[] { s, e });
+    }
+    searchIndex = results.isEmpty() ? si : si - 1;
+    return results;
+  }
+
+  /**
+   * Returns the occurrences of the name at the caret in the current token. The text is scanned
+   * while it is rendered: occurrences outside the rendered range are never located.
+   * @return ranges
+   */
+  ArrayList<int[]> occurrences() {
+    occurrences.clear();
+    if(name != null) {
+      // an occurrence that spans several tokens is reported for each of them
+      if(occurrence != null && occurrence[1] > pos) occurrences.add(occurrence);
+      final int nl = name.length, max = Math.min(length - nl, posEnd - 1);
+      for(int p = Math.max(occurrencePos, pos); p <= max; p++) {
+        if(matches(p)) {
+          occurrence = new int[] { p, p + nl };
+          occurrences.add(occurrence);
+          p += nl - 1;
+        }
+      }
+      occurrencePos = posEnd;
+    }
+    return occurrences;
+  }
+
+  /**
+   * Checks if the name occurs at the specified position.
+   * @param p position
+   * @return result of check
+   */
+  private boolean matches(final int p) {
+    final int nl = name.length;
+    for(int n = 0; n < nl; n++) {
+      if(text[p + n] != name[n]) return false;
+    }
+    // the name must not be preceded or followed by other name characters
+    return !(p > 0 && (TextEditor.nameChar(text[p - 1]) || text[p - 1] == '$')) &&
+      !(p + nl < length && TextEditor.nameChar(text[p + nl]));
+  }
+
+  /**
+   * Tests if the current token is erroneous.
+   * @return result of check
+   */
+  boolean error() {
+    return errPos >= pos && errPos < posEnd;
+  }
+
+  /**
+   * Returns the error position.
+   * @return error position
+   */
+  int errorPos() {
+    return errPos;
+  }
+
+  /**
+   * Sets the link flag.
+   * @param lnk flag
+   */
+  void link(final boolean lnk) {
+    link = lnk;
+  }
+
+  /**
+   * Retrieves the current hyperlink.
+   * @return link string or {@code null}
+   */
+  String link() {
+    if(!link) return null;
+    // find beginning and end of link
+    int ls = pos, le = ls;
+    while(--ls > 0 && (text[ls] < -64 || cp(text, ls) != TokenBuilder.ULINE));
+    while(++le < length && (text[le] < -64 || cp(text, le) != TokenBuilder.ULINE));
+    ls += cl(text, ls);
+    return string(text, ls, le - ls);
+  }
+}

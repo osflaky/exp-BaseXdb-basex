@@ -1,0 +1,465 @@
+package org.basex.core.locks;
+
+import static org.basex.query.func.Function.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+import org.basex.*;
+import org.basex.core.*;
+import org.basex.core.cmd.*;
+import org.basex.index.*;
+import org.basex.query.func.*;
+import org.basex.util.list.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * This class tests commands and XQuery expressions for correct identification of databases to lock.
+ *
+ * @author BaseX Team, BSD License
+ * @author Jens Erat
+ */
+public final class CommandLockingTest extends SandboxTest {
+  /** Static dummy context so we do not have to create a new one every time. */
+  private static final Context DUMMY_CONTEXT = new Context();
+  /** Test file name. */
+  private static final String FN = "hello.xq";
+  /** Test folder. */
+  private static final String FLDR = "src/test/resources";
+  /** Test file. */
+  private static final String FILE = FLDR + '/' + FN;
+  /** Test name. */
+  private static final String NAME2 = NAME + '2';
+  /** Test repository. **/
+  private static final String REPO = "src/test/resources/repo/";
+  /** Empty StringList. */
+  private static final LockList NONE = new LockList();
+  /** StringList containing name. */
+  private static final LockList NAME_LIST = new LockList().add(NAME);
+  /** StringList containing second name. */
+  private static final LockList NAME2_LIST = new LockList().add(NAME2);
+  /** StringList containing context. */
+  private static final LockList CTX_LIST = new LockList().add(Locking.CONTEXT);
+  /** StringList containing name and context. */
+  private static final LockList NAME_CTX = new LockList().add(NAME).add(Locking.CONTEXT);
+  /** StringList containing USER lock string. */
+  private static final LockList USER_LIST = new LockList().add(Locking.USER);
+  /** StringList containing REPO lock string. */
+  private static final LockList REPO_LIST = new LockList().add(Locking.REPO);
+  /** StringList containing the backup lock string of the test database. */
+  private static final LockList BACKUP_LIST = new LockList().add(Locking.backup(NAME));
+  /** StringList containing the backup lock strings of both test databases. */
+  private static final LockList BACKUPS_LIST = new LockList().
+      add(Locking.backup(NAME)).add(Locking.backup(NAME2));
+  /** StringList containing java module test lock strings. */
+  private static final LockList MODULE_LIST = new LockList().
+      add(Locking.BASEX_PREFIX + QueryModuleTest.LOCK);
+
+  /**
+   * Test commands affecting databases.
+   */
+  @Test public void commands() {
+    ckDBs(new Add(FILE, FILE), true, CTX_LIST);
+    ckDBs(new AlterDB(NAME, NAME2), true, new LockList().add(NAME).add(NAME2));
+    ckDBs(new AlterBackup(NAME, NAME2), true, BACKUPS_LIST);
+    ckDBs(new AlterPassword(NAME, NAME), true, USER_LIST);
+    ckDBs(new AlterUser(NAME, NAME), true, USER_LIST);
+    ckDBs(new BinaryGet(FILE), false, CTX_LIST);
+    ckDBs(new BinaryPut(FILE), true, CTX_LIST);
+    ckDBs(new Check(NAME), CTX_LIST, NAME_LIST);
+    ckDBs(new Close(), false, CTX_LIST);
+    ckDBs(new Copy(NAME2, NAME), new LockList().add(NAME2), NAME_LIST);
+    ckDBs(new CreateBackup(NAME), NAME_LIST, BACKUP_LIST);
+    ckDBs(new CreateDB(NAME), CTX_LIST, NAME_LIST);
+    ckDBs(new CreateIndex(IndexType.TEXT), true, CTX_LIST);
+    ckDBs(new CreateUser(NAME, NAME), true, USER_LIST);
+    ckDBs(new Delete(FILE), true, CTX_LIST);
+    ckDBs(new Dir(FILE), false, CTX_LIST);
+    ckDBs(new DropBackup(NAME), true, BACKUP_LIST);
+    ckDBs(new DropDB(NAME + '*'), true, null);
+    ckDBs(new DropDB(NAME), true, NAME_LIST);
+    ckDBs(new DropIndex(IndexType.TEXT), true, CTX_LIST);
+    ckDBs(new DropUser(NAME), true, USER_LIST);
+    ckDBs(new Execute("RUN " + FILE), false, null);
+    ckDBs(new Export(FILE), false, CTX_LIST);
+    ckDBs(new Find("token"), false, CTX_LIST);
+    ckDBs(new Flush(), true, CTX_LIST);
+    ckDBs(new Get(FILE), false, CTX_LIST);
+    ckDBs(new Grant("all", NAME), true, USER_LIST);
+    ckDBs(new Grant("all", NAME, NAME), true, USER_LIST);
+    ckDBs(new Grant("all", NAME, NAME + '*'), true, USER_LIST);
+    ckDBs(new Help("HELP"), false, NONE);
+    ckDBs(new Info(), false, NONE);
+    ckDBs(new InfoDB(), false, CTX_LIST);
+    ckDBs(new InfoIndex(), false, CTX_LIST);
+    ckDBs(new InfoStorage(), false, CTX_LIST);
+    ckDBs(new Inspect(), false, CTX_LIST);
+    ckDBs(new Inspect(NAME), false, NAME_LIST);
+    ckDBs(new Kill(NAME), true, USER_LIST);
+    ckDBs(new List(), false, null);
+    ckDBs(new List(NAME), false, NAME_LIST);
+    ckDBs(new Open(NAME), false, NAME_CTX);
+    ckDBs(new Optimize(), true, CTX_LIST);
+    ckDBs(new OptimizeAll(), true, CTX_LIST);
+    ckDBs(new Password(NAME), true, USER_LIST);
+    ckDBs(new Put(FILE, FILE), true, CTX_LIST);
+    ckDBs(new Rename(FILE, FILE), true, CTX_LIST);
+    ckDBs(new RepoInstall(REPO + "/pkg3.xar", null), true, REPO_LIST);
+    ckDBs(new RepoList(), false, REPO_LIST);
+    ckDBs(new RepoDelete("http://www.pkg3.com", null), true, REPO_LIST);
+    ckDBs(new Restore(NAME), BACKUP_LIST, NAME_LIST);
+    ckDBs(new Run(FILE), false, null);
+    ckDBs(new Set(NAME, NAME), false, NONE);
+    ckDBs(new ShowBackups(), false, null);
+    ckDBs(new ShowOptions("DBPATH"), false, NONE);
+    ckDBs(new ShowSessions(), false, NONE);
+    ckDBs(new ShowUsers(), false, USER_LIST);
+    ckDBs(new ShowUsers(NAME), false, USER_LIST);
+    ckDBs(new org.basex.core.cmd.Test(NAME), true, null);
+  }
+
+  /** Tests locked databases in XQuery queries. */
+  @Test public void xquery() {
+    // context access
+    ckDBs(new XQuery("."), false, CTX_LIST);
+
+    // functions
+    ckDBs(new XQuery(COLLECTION.args()), false, CTX_LIST);
+    ckDBs(new XQuery(COLLECTION.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery("<a/>/" + COUNT.args(COLLECTION.args())), false, CTX_LIST);
+
+    ckDBs(new XQuery(DOC.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(DOC.args("http://abc.de/")), false, NONE);
+    ckDBs(new XQuery(DOC_AVAILABLE.args(NAME + "/foo.xml")), false, NAME_LIST, null);
+
+    ckDBs(new XQuery(ID.args(NAME)), false, CTX_LIST);
+    ckDBs(new XQuery(IDREF.args(NAME)), false, CTX_LIST);
+    ckDBs(new XQuery(ELEMENT_WITH_ID.args(NAME)), false, CTX_LIST);
+    ckDBs(new XQuery(LANG.args(NAME)), false, CTX_LIST);
+    ckDBs(new XQuery(ID.args(NAME, DOC.args(NAME))), false, NAME_LIST);
+    ckDBs(new XQuery(IDREF.args(NAME, DOC.args(NAME))), false, NAME_LIST);
+    ckDBs(new XQuery(ELEMENT_WITH_ID.args(NAME, DOC.args(NAME))), false, NAME_LIST);
+    ckDBs(new XQuery(LANG.args(NAME, DOC.args(NAME))), false, NAME_LIST);
+
+    ckDBs(new XQuery(PARSE_XML.args(" <foo/>")), true, NONE);
+    ckDBs(new XQuery(PARSE_XML_FRAGMENT.args(" <foo/>")), true, NONE);
+
+    ckDBs(new XQuery(PUT.args(" <foo/>", NAME)), true, NONE);
+    ckDBs(new XQuery(PUT.args(" .", NAME)), true, CTX_LIST);
+
+    ckDBs(new XQuery(ROOT.args()), false, CTX_LIST);
+    ckDBs(new XQuery(ROOT.args(" .")), false, CTX_LIST);
+    ckDBs(new XQuery(ROOT.args(" ./test")), false, CTX_LIST);
+    ckDBs(new XQuery(ROOT.args(" <foo/>")), true, NONE);
+
+    ckDBs(new XQuery(UNPARSED_TEXT.args(FILE)), false, NONE);
+    ckDBs(new XQuery(UNPARSED_TEXT_AVAILABLE.args(FILE)), false, NONE);
+    ckDBs(new XQuery(UNPARSED_TEXT_LINES.args(FILE)), false, NONE);
+
+    ckDBs(new XQuery(URI_COLLECTION.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(URI_COLLECTION.args()), false, CTX_LIST);
+
+    // accessor and node functions
+    final Function[] functions = { DATA, STRING, NUMBER, STRING_LENGTH, NORMALIZE_SPACE,
+        DOCUMENT_URI, NILLED, NODE_NAME, LOCAL_NAME, Function.NAME, NAMESPACE_URI, ROOT, BASE_URI,
+        GENERATE_ID, HAS_CHILDREN, PATH };
+    for(final Function function : functions) {
+      ckDBs(new XQuery(function.args()), false, CTX_LIST);
+      ckDBs(new XQuery(DOC.args(NAME) + "/*/" + function.args()), false, NAME_LIST, NAME_CTX);
+    }
+    for(final Function function : functions) {
+      ckDBs(new XQuery(function.args(DOC.args(NAME) + "/*")), false, NAME_LIST);
+    }
+
+    // errors
+    ckDBs(new XQuery(ERROR.args()), false, NONE);
+    ckDBs(new XQuery(ERROR.args(" xs:QName('foo')")), false, NONE);
+    ckDBs(new XQuery(ERROR.args(" xs:QName('foo')", "bar")), false, NONE);
+    ckDBs(new XQuery(ERROR.args(" xs:QName('foo')", "bar", " <batz/>")), false, NONE);
+    ckDBs(new XQuery(_RANDOM_INTEGER.args()), false, NONE);
+  }
+
+  /** Tests read and write locks of updating queries. */
+  @Test public void readWrite() {
+    // databases that are only read keep their read lock
+    ckDBs(new XQuery("for $node in " + _DB_GET.args(NAME) + " return " +
+        _DB_PUT.args(NAME2, " $node", FILE)), NAME_LIST, NAME2_LIST);
+    // copied nodes are updated, not the database
+    ckDBs(new XQuery("for $node in " + _DB_GET.args(NAME) + " return " +
+        _DB_PUT.args(NAME2, " $node update { delete node .//x }", FILE)), NAME_LIST, NAME2_LIST);
+    // target of a node update cannot be resolved statically: read locks become write locks
+    ckDBs(new XQuery("delete node " + _DB_GET.args(NAME) + "/*"), true, NAME_LIST);
+    ckDBs(new XQuery(PUT.args(_DB_GET.args(NAME), FILE)), true, NAME_LIST);
+    // read locks of databases that are not updated are promoted as well
+    ckDBs(new XQuery("let $x := " + _DB_GET.args(NAME2) + " return delete node " +
+        _DB_GET.args(NAME) + "/*[. = $x]"), true, new LockList().add(NAME).add(NAME2));
+    // updates in a modify clause do not promote read locks
+    ckDBs(new XQuery("copy $c := " + _DB_GET.args(NAME) + "/* " +
+        "modify delete node $c/x return $c"), false, NAME_LIST);
+    // locks that do not refer to databases are not promoted
+    ckDBs(new XQuery("let $users := " + _USER_LIST.args() + " return delete node " +
+        _DB_GET.args(NAME) + "/*[. = $users]"), USER_LIST, NAME_LIST);
+    // name of a database that is read cannot be resolved statically: global read lock
+    ckDBs(new XQuery(_DB_PUT.args(NAME, " " + _DB_GET.args(
+        " string(" + _RANDOM_INTEGER.args() + ")"), FILE)), null, NAME_LIST);
+  }
+
+  /** Tests that the first operand of a simple map is evaluated in the outer focus. */
+  @Test public void simpleMap() {
+    execute(new CreateDB(NAME));
+    try {
+      ckDBs(new XQuery("for $node in ./* return " + COUNT.args(" $node")), false, NAME_LIST);
+    } finally {
+      execute(new DropDB(NAME));
+    }
+  }
+
+  /** Tests user-defined functions. */
+  @Test public void userDefined() {
+    ckDBs(new XQuery("declare function local:a($a) { " +
+        "if($a = 0) then $a else local:a($a idiv 2) };" +
+        "local:a(5)"), false, NONE);
+    ckDBs(new XQuery("declare function local:a($a) { " +
+        "if($a = 0) then " + COLLECTION.args() + " else local:a($a idiv 2) };" +
+        "local:a(5)"), false, CTX_LIST);
+    ckDBs(new XQuery("declare function local:a($a) { " +
+        "if($a = 0) then " + DOC.args(NAME) + " else local:a($a idiv 2) };" +
+        "local:a(5)"), false, NAME_LIST);
+  }
+
+  /** Tests locked databases in XQuery java function calls. */
+  @Test public void javaRead() {
+    final String prolog = "import module namespace qm='java:org.basex.query.func.QueryModuleTest';";
+    final XQuery query = new XQuery(prolog + "qm:read-lock()");
+    execute(query);
+    ckDBs(query, false, MODULE_LIST);
+  }
+
+  /** Tests locked databases in XQuery java function calls. */
+  @Test public void javaWrite() {
+    final String prolog = "import module namespace qm='java:org.basex.query.func.QueryModuleTest';";
+    final XQuery query = new XQuery(prolog + "qm:write-lock()");
+    execute(query);
+    ckDBs(query, true, MODULE_LIST);
+  }
+
+  /** Test admin module. */
+  @Test public void admin() {
+    ckDBs(new XQuery(_ADMIN_SESSIONS.args()), false, NONE);
+    ckDBs(new XQuery(_ADMIN_LOGS.args()), false, NONE);
+  }
+
+  /** Test user module. */
+  @Test public void user() {
+    ckDBs(new XQuery(_USER_LIST.args()), false, USER_LIST);
+    ckDBs(new XQuery(_USER_LIST_DETAILS.args()), false, USER_LIST);
+  }
+
+  /** Test database module. */
+  @Test public void db() {
+    // General Functions
+    ckDBs(new XQuery(_DB_INFO.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_INSPECT.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_LIST.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_LIST_DETAILS.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_LIST_DETAILS.args()), false, null);
+    ckDBs(new XQuery(_DB_GET.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_GET_ID.args(NAME, 0)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_GET_PRE.args(NAME, 0)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_GET_BINARY.args(NAME, "path")), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_GET_VALUE.args(NAME, "path")), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_SYSTEM.args()), false, NONE);
+
+    // Read Operations
+    ckDBs(new XQuery(_DB_ATTRIBUTE.args(NAME, "foo")), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_ATTRIBUTE.args(NAME, 23, 42)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_NODE_ID.args(" .")), false, CTX_LIST);
+    ckDBs(new XQuery(_DB_NODE_PRE.args(" .")), false, CTX_LIST);
+    ckDBs(new XQuery(_DB_TEXT.args(NAME, "foo")), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_TEXT_RANGE.args(NAME, 23, 42)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_TOKEN.args(NAME, "foo")), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_TOKEN.args(NAME, 23, 42)), false, NAME_LIST);
+
+    // Updates
+    ckDBs(new XQuery(_DB_CREATE.args(NAME)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_CREATE.args(NAME, FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_CREATE.args(NAME, " <foo/>", FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_CREATE.args(NAME, FILE, FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_DROP.args(NAME)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_ADD.args(NAME, FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_ADD.args(NAME, " <foo/>", FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_ADD.args(NAME, FILE, FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_DELETE.args(NAME, FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_FLUSH.args(NAME)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_OPTIMIZE.args(NAME)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_OPTIMIZE.args(NAME, "true()")), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_PUT.args(NAME, FILE + '2', FILE)), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_PUT_BINARY.args(NAME, "binary", "path")), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_PUT_VALUE.args(NAME, "value", "path")), true, NAME_LIST);
+    ckDBs(new XQuery(_DB_RENAME.args(NAME, FILE, FILE + '2')), true, NAME_LIST);
+
+    // Backups: the database and its backups are locked separately
+    ckDBs(new XQuery(_DB_BACKUPS.args()), false, null);
+    ckDBs(new XQuery(_DB_BACKUPS.args(NAME)), false, BACKUP_LIST);
+    ckDBs(new XQuery(_DB_CREATE_BACKUP.args(NAME)), NAME_LIST, BACKUP_LIST);
+    ckDBs(new XQuery(_DB_DROP_BACKUP.args(NAME)), true, BACKUP_LIST);
+    ckDBs(new XQuery(_DB_ALTER_BACKUP.args(NAME, NAME2)), true, BACKUPS_LIST);
+    ckDBs(new XQuery(_DB_RESTORE.args(NAME)), BACKUP_LIST, NAME_LIST);
+
+    // Copying and renaming: the source is only read by db:copy
+    ckDBs(new XQuery(_DB_COPY.args(NAME, NAME2)), NAME_LIST, NAME2_LIST);
+    ckDBs(new XQuery(_DB_ALTER.args(NAME, NAME2)), true,
+        new LockList().add(NAME).add(NAME2));
+    ckDBs(new XQuery(_DB_EXPORT.args(NAME, FILE)), false, NAME_LIST);
+
+    // Helper Functions
+    ckDBs(new XQuery(_DB_EXISTS.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_TYPE.args(NAME, FILE)), false, NAME_LIST);
+    ckDBs(new XQuery(_DB_CONTENT_TYPE.args(NAME, FILE)), false, NAME_LIST);
+  }
+
+  /** Test ft module. */
+  @Test public void ft() {
+    ckDBs(new XQuery(_FT_SEARCH.args(NAME, "foo")), false, NAME_LIST);
+    ckDBs(new XQuery(_FT_TOKENS.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_FT_TOKENS.args(NAME, "foo")), false, NAME_LIST);
+    ckDBs(new XQuery(_FT_TOKENIZE.args("foo")), false, NONE);
+  }
+
+  /** Test index module. */
+  @Test public void index() {
+    ckDBs(new XQuery(_INDEX_FACETS.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_TEXTS.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_TEXTS.args(NAME, "foo")), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_TEXTS.args(NAME, "foo", "true()")), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_ATTRIBUTES.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_ATTRIBUTES.args(NAME, "foo")), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_ATTRIBUTES.args(NAME, "foo", "true()")), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_ELEMENT_NAMES.args(NAME)), false, NAME_LIST);
+    ckDBs(new XQuery(_INDEX_ATTRIBUTE_NAMES.args(NAME)), false, NAME_LIST);
+  }
+
+  /** Update module. */
+  @Test public void update() {
+    ckDBs(new XQuery(_UPDATE_OUTPUT.args("foo")), true, NONE);
+  }
+
+  /** Test repository module. */
+  @Test public void repository() {
+    ckDBs(new XQuery(_REPO_LIST.args()), false, REPO_LIST);
+  }
+
+  /** Test store module: store functions never acquire query locks (in-memory monitor only). */
+  @Test public void store() {
+    ckDBs(new XQuery(_STORE_GET.args("key")), false, NONE);
+    ckDBs(new XQuery(_STORE_PUT.args("key", "value")), false, NONE);
+    ckDBs(new XQuery(_STORE_READ.args()), false, NONE);
+    ckDBs(new XQuery(_STORE_WRITE.args()), false, NONE);
+  }
+
+  /** Test XQuery module. */
+  @Test public void xqueryModule() {
+    ckDBs(new XQuery(_XQUERY_EVAL.args("1")), false, null);
+    ckDBs(new XQuery(_XQUERY_EVAL.args(FILE)), false, null);
+  }
+
+  /**
+   * Test if the right databases are identified for locking. Required databases are exact,
+   * no additional ones allowed.
+   * Pass empty string for currently opened database, {@code null} for all.
+   * @param cmd command to test
+   * @param updating updating command?
+   * @param dbs required and allowed databases (can be {@code null})
+   */
+  private static void ckDBs(final Command cmd, final boolean updating, final LockList dbs) {
+    ckDBs(cmd, updating, dbs, dbs);
+  }
+
+  /**
+   * Test if the right databases are identified for locking. Required databases are exact,
+   * no additional ones allowed.
+   * Pass empty string for currently opened database, {@code null} for all.
+   * @param cmd command to test
+   * @param read required and allowed databases for read lock (can be {@code null})
+   * @param write required and allowed databases for write lock (can be {@code null})
+   */
+  private static void ckDBs(final Command cmd, final LockList read, final LockList write) {
+    ckDBs(cmd, read, read, write, write);
+  }
+
+  /**
+   * Test if the right databases are identified for locking.
+   * Pass empty string for currently opened database, {@code null} for all.
+   * @param cmd command to test
+   * @param updating updating command?
+   * @param required required databases (can be {@code null})
+   * @param allowed allowed databases (can be {@code null})
+   */
+  private static void ckDBs(final Command cmd, final boolean updating, final LockList required,
+      final LockList allowed) {
+
+    final LockList reqRd = updating ? NONE : required, allowRd = updating ? NONE : allowed;
+    final LockList reqWt = updating ? required : NONE, allowWt = updating ? allowed : NONE;
+    ckDBs(cmd, reqRd, allowRd, reqWt, allowWt);
+  }
+
+  /**
+   * Test if the right databases are identified for locking.
+   * Pass empty string for currently opened database, {@code null} for all.
+   * @param cmd command to test
+   * @param reqRd required databases for read locks (can be {@code null})
+   * @param allowRd allowed databases for read locks (can be {@code null})
+   * @param reqWt required databases for write locks (can be {@code null})
+   * @param allowWt allowed databases for write locks (can be {@code null})
+   */
+  private static void ckDBs(final Command cmd, final LockList reqRd, final LockList allowRd,
+      final LockList reqWt, final LockList allowWt) {
+
+    // Fetch databases BaseX thinks it needs to lock
+    cmd.updating(DUMMY_CONTEXT);
+    cmd.addLocks();
+
+    final Locks locks = cmd.jc().locks.finish(context);
+    for(final LockList list : new LockList[] { reqRd, allowRd, reqWt, allowWt }) {
+      if(list != null) list.finish(null);
+    }
+
+    // read locks
+    final StringList list = new StringList();
+    if(reqRd == null && !locks.reads.global())
+      list.add("No global READ lock.");
+    if(reqRd != null && allowRd != null && !containsAll(locks.reads, reqRd))
+      list.add("Too few READ locks: " + locks.reads + " vs. " + reqRd);
+    if(allowRd != null && locks.reads.global())
+      list.add("Global READ lock; expected: " + allowRd);
+    if(allowRd != null && !containsAll(allowRd, locks.reads))
+      list.add("Too many READ locks: " + locks.reads + " vs. " + allowRd);
+
+    // write locks
+    if(reqWt == null && !locks.writes.global())
+      list.add("No global WRITE lock.");
+    if(reqWt != null && allowWt != null && !containsAll(locks.writes, reqWt))
+      list.add("Too few WRITE locks: " + locks.writes + " vs. " + reqWt);
+    if(allowWt != null && locks.writes.global())
+      list.add("Global WRITE lock; expected: " + allowWt);
+    if(allowWt != null && !containsAll(allowWt, locks.writes))
+      list.add("Too many WRITE locks: " + locks.writes + " vs. " + allowWt);
+
+    if(!list.isEmpty()) {
+      final StringBuilder sb = new StringBuilder("Errors:");
+      for(final String string : list) sb.append("\n- ").append(string);
+      fail(sb.append("\nCommand: ").append(cmd).toString());
+    }
+  }
+
+  /**
+   * Check if all elements of the second list are contained in the first.
+   * @param list1 first list
+   * @param list2 second list
+   * @return result of check
+   */
+  private static boolean containsAll(final LockList list1, final LockList list2) {
+    for(final String lock : list2) {
+      if(!list1.contains(lock)) return false;
+    }
+    return true;
+  }
+}

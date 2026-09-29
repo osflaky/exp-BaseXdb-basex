@@ -1,0 +1,20 @@
+package org.basex.query.func.math;
+
+import static java.lang.StrictMath.*;
+
+import org.basex.query.*;
+import org.basex.query.func.*;
+import org.basex.query.value.item.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class MathAtan2 extends StandardFunc {
+  @Override
+  public Dbl value(final QueryContext qc) throws QueryException {
+    return Dbl.get(atan2(toDouble(arg(0), qc), toDouble(arg(1), qc)));
+  }
+}

@@ -1,0 +1,64 @@
+package org.basex.query.func.user;
+
+import static org.basex.query.QueryError.*;
+
+import org.basex.core.users.*;
+import org.basex.query.*;
+import org.basex.query.up.primitives.*;
+import org.basex.query.value.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.seq.*;
+import org.basex.util.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class UserUpdateInfo extends UserFn {
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final XNode node = toElem(arg(0), Q_INFO, qc, ELM_X_X_X);
+    final User user = toUser(arg(1), true, qc);
+
+    qc.updates().add(new UpdateInfo(node.materialize(n -> false, info, qc), user, qc, info), qc);
+    return Empty.VALUE;
+  }
+
+  /** Update primitive. */
+  private static final class UpdateInfo extends UserUpdate {
+    /** Node to be updated. */
+    private final XNode node;
+
+    /**
+     * Constructor.
+     * @param node info element
+     * @param user user ({@code null} if operation is global)
+     * @param qc query context
+     * @param info input info (can be {@code null})
+     */
+    private UpdateInfo(final XNode node, final User user, final QueryContext qc,
+        final InputInfo info) {
+      super(UpdateType.USERINFO, user, qc, info);
+      this.node = node;
+    }
+
+    @Override
+    public void merge(final Update update) throws QueryException {
+      if(user != null) super.merge(update);
+      else throw USER_INFO_X.get(info, operation());
+    }
+
+    @Override
+    public void apply() {
+      if(user != null) user.info(node);
+      else users.info(node);
+    }
+
+    @Override
+    public String operation() {
+      return "updated";
+    }
+  }
+}

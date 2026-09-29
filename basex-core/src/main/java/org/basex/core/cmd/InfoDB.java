@@ -1,0 +1,106 @@
+package org.basex.core.cmd;
+
+import static org.basex.core.Text.*;
+
+import java.io.*;
+
+import org.basex.core.locks.*;
+import org.basex.core.parse.*;
+import org.basex.core.parse.Commands.*;
+import org.basex.data.*;
+import org.basex.util.*;
+
+/**
+ * Evaluates the 'info database' command and returns information on the
+ * currently opened database.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class InfoDB extends AInfo {
+  /**
+   * Default constructor.
+   */
+  public InfoDB() {
+    super(true);
+  }
+
+  @Override
+  protected boolean run() throws IOException {
+    out.print(db(context.data(), false, true));
+    return true;
+  }
+
+  @Override
+  public void addLocks() {
+    jc().locks.reads.add(Locking.CONTEXT);
+  }
+
+  /**
+   * Creates a database information string.
+   * @param data data reference
+   * @param bold header bold flag
+   * @param index add index information
+   * @return info string
+   */
+  public static String db(final Data data, final boolean bold, final boolean index) {
+    return db(data.meta, data.nodes(), bold, index);
+  }
+
+  /**
+   * Creates a database information string.
+   * @param meta meta data
+   * @param bold header bold flag
+   * @param index add index information
+   * @return info string
+   */
+  public static String db(final MetaData meta, final boolean bold, final boolean index) {
+    return db(meta, meta.size, bold, index);
+  }
+
+  /**
+   * Creates a database information string.
+   * @param meta meta data
+   * @param nodes number of nodes
+   * @param bold header bold flag
+   * @param index add index information
+   * @return info string
+   */
+  private static String db(final MetaData meta, final int nodes, final boolean bold,
+      final boolean index) {
+    final TokenBuilder tb = new TokenBuilder();
+    final String header = (bold ? new TokenBuilder().bold().add('%').norm().toString() : "%") + NL;
+    tb.addExt(header, INFO_DB_PROPS);
+    info(tb, MetaProp.NAME, meta);
+    info(tb, MetaProp.SIZE.name(), Performance.formatHuman(meta.dbSize()));
+    info(tb, MetaProp.NODES.name(), nodes);
+    info(tb, MetaProp.DOCUMENTS, meta);
+    info(tb, MetaProp.BINARIES, meta);
+    info(tb, MetaProp.VALUES, meta);
+    info(tb, MetaProp.TIMESTAMP, meta);
+    info(tb, MetaProp.UPTODATE, meta);
+    if(meta.corrupt) tb.add(' ' + DB_CORRUPT + NL);
+
+    tb.add(NL).addExt(header, RES_PROPS);
+    info(tb, MetaProp.INPUTPATH, meta);
+    info(tb, MetaProp.INPUTSIZE.name(), Performance.formatHuman(meta.inputsize));
+    info(tb, MetaProp.INPUTDATE, meta);
+
+    if(index) {
+      tb.add(NL).addExt(header, INFO_INDEXES);
+      if(meta.oldindex()) {
+        tb.add(' ' + H_INDEX_FORMAT + NL);
+      } else {
+        for(final MetaProp prop : MetaProp.values()) {
+          if(prop.index) info(tb, prop, meta);
+        }
+      }
+    }
+    return tb.toString();
+  }
+
+  @Override
+  public void build(final CmdBuilder cb) {
+    cb.init(Cmd.INFO + " " + CmdInfo.DB);
+  }
+}

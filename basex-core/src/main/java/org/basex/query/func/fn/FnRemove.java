@@ -1,0 +1,134 @@
+package org.basex.query.func.fn;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.func.*;
+import org.basex.query.iter.*;
+import org.basex.query.value.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.util.list.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FnRemove extends StandardFunc {
+  @Override
+  public Iter iter(final QueryContext qc) throws QueryException {
+    // value-based input: remove positions from value
+    if(eager()) return value(qc).iter();
+
+    final Iter iter = arg(0).iter(qc);
+    final LongList pos = positions(qc);
+    if(pos.isEmpty()) return iter;
+
+    // value-based iterator
+    final Value value = iter.eagerValue();
+    if(value != null) return value(value, pos, qc).iter();
+    if(pos.size() > 1) return value(iter.value(qc, null), pos, qc).iter();
+
+    final long size = iter.size();
+    return new Iter() {
+      final long p = pos.get(0);
+      long c;
+
+      @Override
+      public Item next() throws QueryException {
+        return c++ != p || iter.next() != null ? iter.next() : null;
+      }
+      @Override
+      public Item get(final long i) throws QueryException {
+        return iter.get(i < p ? i : i + 1);
+      }
+      @Override
+      public long size() {
+        return Math.max(-1, size - 1);
+      }
+    };
+  }
+
+  @Override
+  public Value value(final QueryContext qc) throws QueryException {
+    final Value input = arg(0).value(qc);
+    final LongList positions = positions(qc);
+    return value(input, positions, qc);
+  }
+
+  @Override
+  public boolean eager() {
+    return arg(0).eager();
+  }
+
+  /**
+   * Returns the result value.
+   * @param value original value
+   * @param positions positions of the items to remove (sorted, duplicate-free)
+   * @param qc query context
+   * @return resulting value
+   */
+  private static Value value(final Value value, final LongList positions, final QueryContext qc) {
+    Value val = value;
+    for(int l = positions.size() - 1; l >= 0 && !val.isEmpty(); l--) {
+      final long pos = positions.get(l), size = val.size();
+      final boolean first = pos == 0, last = pos == size - 1;
+      if(first || last) {
+        // remove first or last item
+        val = val.subsequence(first ? 1 : 0, size - 1, qc);
+      } else if(pos > 0 && pos < size) {
+        // remove item at supplied position
+        val = val.removeItem(pos, qc);
+      }
+    }
+    return val;
+  }
+
+  /**
+   * Returns sorted and duplicate-free positions.
+   * @param qc query context
+   * @return positions
+   * @throws QueryException query exception
+   */
+  private LongList positions(final QueryContext qc) throws QueryException {
+    final LongList pos = new LongList();
+    final Iter iter = arg(1).atomIter(qc, info);
+    for(Item item; (item = qc.next(iter)) != null;) pos.add(toLong(item) - 1);
+    return pos.ddo();
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    // ignore standard limitation for large values to speed up evaluation of result
+    if(values(false, cc)) return value(cc.qc);
+
+    final Expr input = arg(0), pos = arg(1);
+    final SeqType st = input.seqType();
+    if(st.zero()) return input;
+    if(pos.seqType().zero()) return cc.voidAndReturn(pos, input, info);
+
+    long sz = -1;
+    if(pos instanceof Item) {
+      // position is static...
+      final long p = toLong(pos, cc.qc);
+      // return all items
+      final long size = input.size();
+      if(p < 1 || size > 0 && p > size) return input;
+      // skip first item: remove($seq, 1) → tail($seq)
+      if(p == 1) return cc.function(Function.TAIL, info, input);
+      // skip last item: remove($seq, count($seq)) → trunk($seq)
+      if(p == size) return cc.function(Function.TRUNK, info, input);
+      // decrement result size
+      if(size != -1) sz = size - 1;
+    }
+
+    exprType.assign(st.union(Occ.ZERO), sz).data(input);
+    return this;
+  }
+
+  @Override
+  public boolean ddo() {
+    return arg(0).ddo();
+  }
+}

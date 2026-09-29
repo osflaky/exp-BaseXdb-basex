@@ -1,0 +1,78 @@
+package org.basex.http.restxq;
+
+import java.util.*;
+import java.util.function.*;
+
+import org.basex.query.expr.path.*;
+import org.basex.query.value.item.*;
+
+/**
+ * This class catches RESTXQ errors with the same priority.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+final class RestXqError implements Comparable<RestXqError> {
+  /** Error tests. */
+  private final ArrayList<NameTest> tests = new ArrayList<>(1);
+  /** Function for comparing tests. */
+  private static final Function<NameTest, Integer> COMPARE =
+      test -> test == null ? -1 : test.scope.ordinal();
+
+  /**
+   * Adds a test if it has not been specified before.
+   * @param test test to be added
+   * @return success flag
+   */
+  boolean add(final NameTest test) {
+    for(final NameTest nt : tests) {
+      if(Objects.equals(nt, test)) return false;
+    }
+    tests.add(test);
+    return true;
+  }
+
+  /**
+   * Returns the test at the specified position.
+   * @param index test index
+   * @return test, or {@code null}
+   */
+  NameTest get(final int index) {
+    return index < tests.size() ? tests.get(index) : null;
+  }
+
+  /**
+   * Tests whether the error has no tests.
+   * @return result of check
+   */
+  public boolean isEmpty() {
+    return tests.isEmpty();
+  }
+
+  /**
+   * Checks if the specified name matches the test.
+   * @param name name
+   * @return result of check
+   */
+  boolean matches(final QNm name) {
+    for(final NameTest nt : tests) {
+      if(nt == null || nt.matches(name)) return true;
+    }
+    return false;
+  }
+
+  @Override
+  public int compareTo(final RestXqError error) {
+    return COMPARE.apply(error.tests.getFirst()) - COMPARE.apply(tests.getFirst());
+  }
+
+  @Override
+  public String toString() {
+    final StringBuilder sb = new StringBuilder();
+    for(final NameTest test : tests) {
+      if(!sb.isEmpty()) sb.append(", ");
+      sb.append(test != null ? test : "*");
+    }
+    return sb.toString();
+  }
+}

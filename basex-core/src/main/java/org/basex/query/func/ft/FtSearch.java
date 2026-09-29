@@ -1,0 +1,61 @@
+package org.basex.query.func.ft;
+
+import org.basex.data.*;
+import org.basex.query.*;
+import org.basex.query.CompileContext.*;
+import org.basex.query.expr.*;
+import org.basex.query.expr.ft.*;
+import org.basex.query.expr.index.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.*;
+import org.basex.query.value.*;
+import org.basex.util.ft.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class FtSearch extends FtAccessFn {
+  @Override
+  public NodeIter iter(final QueryContext qc) throws QueryException {
+    final Data data = toData(qc);
+    final Value query = arg(1).value(qc);
+    final FtIndexOptions options = options(2, FtIndexOptions::new, qc);
+
+    final IndexDb db = new IndexStaticDb(data, info);
+    final FTMode mode = options.get(FtIndexOptions.MODE);
+    // tokenization is dictated by the index; all other options can be inherited from the prolog
+    final FTOpt opt = ftOpt(options, new FTOpt().assign(data.meta).assign(qc.ftOpt()));
+
+    final FTWords ftw = new FTWords(info, db, query, mode).ftOpt(opt).optimize(qc);
+    return new FTIndexAccess(info, ftExpr(ftw, options), db).iter(qc);
+  }
+
+  @Override
+  public boolean accept(final ASTVisitor visitor) {
+    return dataLock(arg(0), false, false, visitor) && super.accept(visitor);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    optOptions(2, FtIndexOptions::new, cc);
+    compileData(cc);
+    // the index defines if elements or text nodes are returned
+    final Data data = data();
+    if(data != null) exprType.assign(FTIndexAccess.seqType(data));
+    return this;
+  }
+
+  @Override
+  public boolean ddo() {
+    return true;
+  }
+
+  @Override
+  protected void simplifyArgs(final CompileContext cc) throws QueryException {
+    arg(1, arg -> arg.simplifyFor(Simplify.STRING, cc));
+    super.simplifyArgs(cc);
+  }
+}

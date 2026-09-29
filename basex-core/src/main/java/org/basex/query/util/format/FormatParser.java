@@ -1,0 +1,147 @@
+package org.basex.query.util.format;
+
+import static org.basex.query.QueryError.*;
+import static org.basex.util.Token.*;
+
+import org.basex.query.*;
+import org.basex.util.*;
+
+/**
+ * Format parser for integers and dates.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+abstract class FormatParser extends FormatUtil {
+  /** Input information. */
+  private final InputInfo info;
+
+  /** Case. */
+  Case cs;
+  /** Primary format token. */
+  byte[] primary;
+  /** First character of format token, or mandatory digit. */
+  int first = -1;
+  /** Numeral type. */
+  enum NumeralType {
+    /** Ordinal. */
+    ORDINAL,
+    /** Cardinal. */
+    CARDINAL,
+    /** Numbering. */
+    NUMBERING
+  }
+  /** Type of numeral. */
+  NumeralType numType = NumeralType.NUMBERING;
+  /** Format modifier; {@code null} if not specified. */
+  byte[] modifier;
+  /** Traditional modifier. */
+  boolean trad;
+  /** Minimum width. */
+  int min;
+  /** Maximum width. */
+  int max = Integer.MAX_VALUE;
+  /** Radix. */
+  int radix = 10;
+
+  /**
+   * Constructor for formatting integers.
+   * @param info input info (can be {@code null})
+   */
+  FormatParser(final InputInfo info) {
+    this.info = info;
+  }
+
+  /**
+   * Parses and returns the presentation modifier.
+   * @param pic picture
+   * @param def default token
+   * @param date date flag
+   * @param frac fractional seconds flag
+   * @return presentation modifier
+   * @throws QueryException query exception
+   */
+  byte[] presentation(final byte[] pic, final byte[] def, final boolean date, final boolean frac)
+      throws QueryException {
+
+    // find primary format
+    final TokenParser tp = new TokenParser(pic);
+    int cp = tp.next();
+    // check single character
+    if(tp.more()) {
+      // Word output (title case)
+      if(cp == 'W' && tp.consume('w')) return pic;
+      // Textual output (title case)
+      if(date && cp == 'N' && tp.consume('n')) return pic;
+    } else if(
+      sequence(cp) != null || // Latin, Greek and other alphabets
+      cp == 'i' || cp == 'I' || // Roman sequences (lower/upper case)
+      cp == 'w' || cp == 'W' || // Word output (lower/upper case)
+      date && (cp == 'n' || cp == 'N') || // Textual output
+      cp == '\u2460' || cp == '\u2474' || cp == '\u2488' || // circled, parenthesized, full stop
+      cp == KANJI[1] // Japanese numbering
+    ) {
+      return pic;
+    }
+
+    // find digit of decimal-digit-pattern
+    tp.reset();
+    while(first == -1 && tp.more()) first = zeroes(tp.next());
+    // no digit found: return default primary token
+    if(first == -1) return def;
+
+    // flags for mandatory-digit-sign and group-separator-sign
+    tp.reset();
+    boolean gss = true;
+    boolean mds = false;
+    boolean ods = false;
+    while(tp.more()) {
+      cp = tp.next();
+      final int d = zeroes(cp);
+      if(d != -1) {
+        // mandatory-digit-sign
+        if(ods && frac) throw OPTBEFORE_X.get(info, pic);
+        if(first != d) throw DIFFMAND_X.get(info, pic);
+        mds = true;
+        gss = false;
+      } else if(cp == '#') {
+        // optional-digit-sign
+        if(mds && !frac) throw OPTAFTER_X.get(info, pic);
+        ods = true;
+        gss = false;
+      } else if(!Character.isLetter(cp)) {
+        // grouping-separator-sign
+        if(gss) throw INVGROUP_X.get(info, pic);
+        gss = true;
+      } else {
+        // any other letter: return default primary token
+        throw INVDDPATTERN_X.get(info, pic);
+      }
+    }
+    if(gss) throw INVGROUP_X.get(info, pic);
+    return pic;
+  }
+
+  /**
+   * Checks if a character is a valid digit.
+   * @param ch character
+   * @param zero zero character
+   * @return result of check
+   */
+  public boolean digit(final int ch, final int zero) {
+    return ch >= zero && ch <= zero + 9;
+  }
+
+  /**
+   * Finishes format parsing.
+   * @param pres presentation string
+   */
+  void finish(final byte[] pres) {
+    // skip correction of case if modifier has more than one codepoint (Ww)
+    final int cp = ch(pres, 0);
+    cs = radix == 10 && (cl(pres, 0) < pres.length || Token.digit(cp)) ? Case.STANDARD :
+      (cp & ' ') == 0 ? Case.UPPER : Case.LOWER;
+    primary = lc(pres);
+    if(first == -1) first = ch(primary, 0);
+  }
+}

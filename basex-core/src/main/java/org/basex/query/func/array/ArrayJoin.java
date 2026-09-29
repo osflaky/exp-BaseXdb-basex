@@ -1,0 +1,70 @@
+package org.basex.query.func.array;
+
+import org.basex.query.*;
+import org.basex.query.expr.*;
+import org.basex.query.iter.*;
+import org.basex.query.util.list.*;
+import org.basex.query.value.*;
+import org.basex.query.value.array.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class ArrayJoin extends ArrayFn {
+  @Override
+  public XQArray value(final QueryContext qc) throws QueryException {
+    final Expr arrays = arg(0);
+
+    // create single-member array
+    final SeqType st = arrays.seqType();
+    if(st.type instanceof ArrayType && st.zeroOrOne()) {
+      final Item item = arrays.item(qc, info);
+      return item.isEmpty() ? XQArray.empty() : toArray(item);
+    }
+
+    // empty array
+    final Iter iter = arrays.unwrappedIter(qc);
+    Item item = iter.next();
+    if(item == null) return XQArray.empty();
+
+    // iterative array building
+    final ArrayBuilder ab = new ArrayBuilder(qc);
+    do {
+      for(final Value value : toArray(item).members()) {
+        ab.add(value);
+      }
+    } while((item = qc.next(iter)) != null);
+
+    return ab.array(this);
+  }
+
+  @Override
+  protected Expr opt(final CompileContext cc) throws QueryException {
+    final Expr arrays = arg(0);
+    final SeqType ast = arrays.seqType();
+
+    if(ast.type instanceof ArrayType) {
+      // remove empty entries
+      final Expr[] args = arrays.args();
+      if(arrays instanceof List && Checks.any(args, arg -> arg == XQArray.empty())) {
+        final ExprList list = new ExprList();
+        for(final Expr arg : args) {
+          if(arg != XQArray.empty()) list.add(arg);
+        }
+        arg(0, arg -> List.get(cc, info, list.finish()));
+      }
+      // return simple arguments: array:join($array) → $array
+      final SeqType st = arg(0).seqType();
+      if(st.one()) return arg(0);
+
+      exprType.assign(st.type);
+    }
+    return this;
+  }
+}

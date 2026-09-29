@@ -1,0 +1,531 @@
+package org.basex.gui.view.project;
+
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.regex.*;
+
+import org.basex.core.*;
+import org.basex.core.jobs.*;
+import org.basex.gui.*;
+import org.basex.gui.text.*;
+import org.basex.io.*;
+import org.basex.io.in.*;
+import org.basex.query.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.basex.util.list.*;
+
+/**
+ * Project file cache.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+final class ProjectFiles {
+  /** Content match result (success). */
+  static final int FOUND = 1;
+  /** Content match result (missing). */
+  static final int MISSING = 0;
+  /** Content match result (binary). */
+  static final int BINARY = -1;
+  /** Maximum file size for buffered scans (searching, counting). */
+  static final long MAXBYTES = 100L << 20;
+  /** Regex characters. */
+  private static final String REGEX_META = "\\.[]{}()*+?^$|";
+  /** Parse ID. */
+  private static long parseId;
+  /** Filter ID. */
+  private static long filterId;
+
+  /** Project view. */
+  private final ProjectView view;
+
+  /** Files with errors. */
+  private TreeMap<String, InputInfo> errors = new TreeMap<>();
+  /** Current file cache (can be {@code null}). */
+  private ProjectCache cache;
+
+  /**
+   * Project files.
+   * @param view project view
+   */
+  ProjectFiles(final ProjectView view) {
+    this.view = view;
+  }
+
+  /**
+   * Invalidates the file cache.
+   */
+  void reset() {
+    cache = null;
+    // stop currently running operations
+    ++filterId;
+    ++parseId;
+  }
+
+  /**
+   * Returns paths to files with errors.
+   * @return file list
+   */
+  TreeMap<String, InputInfo> errors() {
+    return errors;
+  }
+
+  /**
+   * Chooses files that match the specified pattern.
+   * @param files files filter
+   * @param content contents filter
+   * @param root root directory
+   * @return sorted file paths
+   * @throws InterruptedException interrupted exception
+   */
+  String[] filter(final String files, final ContentFilter content, final IOFile root)
+      throws InterruptedException {
+    return filter(files, content, root, view.gui.gopts.get(GUIOptions.MAXHITS), null);
+  }
+
+  /**
+   * Chooses files that match the specified pattern.
+   * @param files files filter
+   * @param content contents filter
+   * @param root root directory
+   * @param max maximum number of hits
+   * @param job job to be checked for interruptions (can be {@code null})
+   * @return sorted file paths
+   * @throws InterruptedException interrupted exception
+   */
+  String[] filter(final String files, final ContentFilter content, final IOFile root,
+      final int max, final Job job) throws InterruptedException {
+
+    final long id = ++filterId;
+    final StringList results = new StringList();
+
+    // glob pattern
+    final ProjectCache pc = cache(root);
+    if(files.contains("*") || files.contains("?")) {
+      final Pattern pt = Pattern.compile(IOFile.regex(files));
+      for(final String path : pc) {
+        if(id != filterId) throw new InterruptedException();
+        if(job != null) job.checkStop();
+        if(pt.matcher(path).matches() && content.matches(path) && add(path, results, max)) break;
+      }
+    } else {
+      filter(files, content, id, results, pc, max, job);
+    }
+    return results.finish();
+  }
+
+  /**
+   * Returns the number of cached files.
+   * @return number of files, or {@code 0} if no cache exists yet
+   */
+  int cacheSize() {
+    final ProjectCache pc = cache;
+    return pc == null ? 0 : pc.size();
+  }
+
+  /**
+   * Refreshes the view after a file has been saved.
+   * @param root root directory
+   * @param ctx database context
+   * @throws InterruptedException interrupted exception
+   */
+  void parse(final IOFile root, final Context ctx) throws InterruptedException {
+    final long id = ++parseId;
+    final HashSet<String> parsed = new HashSet<>();
+    final TreeMap<String, InputInfo> errs = new TreeMap<>();
+
+    // collect files to be parsed (parse main modules first)
+    final StringList paths = new StringList(), libs = new StringList();
+    for(final String path : cache(root)) {
+      final IOFile file = new IOFile(path);
+      if(file.hasSuffix(IO.XQSUFFIXES)) {
+        (file.hasSuffix(IO.XQMSUFFIX) ? libs : paths).add(path);
+      }
+    }
+    paths.add(libs);
+
+    // parse modules
+    for(final String path : paths) {
+      if(id != parseId) throw new InterruptedException();
+      if(parsed.contains(path)) continue;
+
+      final TokenObjectMap<byte[]> modules = parse(path, ctx, errs);
+      if(modules != null) {
+        for(final byte[] mod : modules) parsed.add(Token.string(mod));
+      }
+    }
+    errors = errs;
+  }
+
+  /**
+   * Parses a single file.
+   * @param path file path
+   * @param ctx database context
+   * @param errors files with errors
+   * @return parsed modules or {@code null}
+   */
+  static TokenObjectMap<byte[]> parse(final String path, final Context ctx,
+      final TreeMap<String, InputInfo> errors) {
+
+    try(TextInput ti = new TextInput(new IOFile(path))) {
+      final String input = ti.cache().toString();
+      // parse query
+      try(QueryContext qc = new QueryContext(ctx)) {
+        qc.parse(input, path);
+        errors.remove(path);
+        return qc.modParsed;
+      } catch(final QueryException ex) {
+        errors.put(path, ex.info());
+      }
+    } catch(final IOException ex) {
+      // file may not be accessible
+      Util.debug(ex);
+    }
+    return null;
+  }
+
+  // PRIVATE METHODS ==============================================================================
+
+  /**
+   * Returns the current file cache.
+   * @param root root directory
+   * @return ID, or {@code null} if newer file cache exists
+   * @throws InterruptedException interrupted exception
+   */
+  private ProjectCache cache(final IOFile root) throws InterruptedException {
+    final ProjectCache pc = cache;
+    if(pc == null) {
+      // no file cache available: create and return new one
+      final GUIOptions gopts = view.gui.gopts;
+      cache = new ProjectCache(gopts.get(GUIOptions.SHOWHIDDEN), gopts.get(GUIOptions.MAXFILES));
+      cache.scan(Paths.get(root.path()), p -> p != cache);
+    } else {
+      // wait until file cache is initialized
+      while(!pc.valid()) {
+        Performance.sleep(1);
+        // file cache was replaced with newer version
+        if(pc != cache) throw new InterruptedException();
+      }
+    }
+    // return existing file cache
+    return cache;
+  }
+
+  /**
+   * Chooses tokens from the file cache that match the specified pattern.
+   * @param files files filter
+   * @param content content filter
+   * @param id search ID
+   * @param results search result
+   * @param cache file cache
+   * @param max maximum number of hits
+   * @param job job to be checked for interruptions (can be {@code null})
+   * @throws InterruptedException interrupted exception
+   */
+  private static void filter(final String files, final ContentFilter content, final long id,
+      final StringList results, final ProjectCache cache, final int max, final Job job)
+          throws InterruptedException {
+
+    final String query = files.replace('\\', '/');
+    final HashSet<String> exclude = new HashSet<>();
+    for(final boolean onlyName : new boolean[] { true, false }) {
+      for(int mode = 0; mode < 3; mode++) {
+        for(final String path : cache) {
+          if(id != filterId) throw new InterruptedException();
+          if(job != null) job.checkStop();
+          // skip files that were already added or whose contents were already scanned
+          if(exclude.contains(path)) continue;
+          // check if the file name (or path) matches the pattern
+          final String file = onlyName ? path.substring(path.lastIndexOf('/') + 1) : path;
+          if(nameMatches(mode, file, query)) {
+            if(content.matches(path) && add(path, results, max)) return;
+            exclude.add(path);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Checks if a file name or path matches the query with the specified strategy.
+   * @param mode match strategy (0: prefix, 1: substring, 2: characters)
+   * @param file file name or path
+   * @param query search query
+   * @return result of check
+   */
+  private static boolean nameMatches(final int mode, final String file, final String query) {
+    return mode == 0 ? SmartStrings.startsWith(file, query) :
+           mode == 1 ? SmartStrings.contains(file, query) :
+           SmartStrings.containsChars(file, query, false);
+  }
+
+  /**
+   * Adds a matching path to the results.
+   * @param path file path
+   * @param results result list
+   * @param max maximum number of hits
+   * @return {@code true} if the hit limit has been reached
+   */
+  private static boolean add(final String path, final StringList results, final int max) {
+    results.add(path);
+    return results.size() >= max;
+  }
+
+  /** Content matcher. */
+  static final class ContentFilter {
+    /** Streaming search codepoints ({@code null} for the buffered or trivial matcher). */
+    private final int[] cps;
+    /** KMP prefix function of {@link #cps} ({@code null} if {@link #cps} is {@code null}). */
+    private final int[] lps;
+    /** Fold characters to lower case (streaming matcher). */
+    private final boolean fold;
+    /** Search pattern ({@code null} for the streaming or trivial matcher). */
+    private final Pattern pattern;
+    /** Error message of an invalid regular expression ({@code null} otherwise). */
+    private final String error;
+    /** Number of files whose contents were examined. */
+    private int searched;
+    /** Number of files skipped because they exceed {@link ProjectFiles#MAXBYTES}. */
+    private int tooLarge;
+    /** Number of files skipped because they are binary. */
+    private int binary;
+
+    /**
+     * Constructor.
+     * @param cps streaming search codepoints (can be {@code null})
+     * @param fold fold characters to lower case
+     * @param pattern search pattern (can be {@code null})
+     * @param error error of an invalid expression (can be {@code null})
+     */
+    private ContentFilter(final int[] cps, final boolean fold, final Pattern pattern,
+        final String error) {
+      this.cps = cps;
+      this.lps = cps != null ? prefixes(cps) : null;
+      this.fold = fold;
+      this.pattern = pattern;
+      this.error = error;
+    }
+
+    /**
+     * Checks if the contents of a file match.
+     * @param path file path
+     * @return result of check
+     */
+    boolean matches(final String path) {
+      if(cps != null) {
+        // streaming scan: distinguish a binary file from a plain non-match
+        final int result = filterContent(path, cps, lps, fold);
+        if(result == BINARY) binary++;
+        else searched++;
+        return result == FOUND;
+      }
+      // no pattern: an empty search matches every file, an invalid expression none
+      if(pattern == null) return error == null;
+      final IOFile file = new IOFile(path);
+      // skip files that are too large to scan
+      if(file.length() > MAXBYTES) {
+        tooLarge++;
+        return false;
+      }
+      final String text = read(file);
+      if(text == null) {
+        binary++;
+        return false;
+      }
+      searched++;
+      return pattern.matcher(text).find();
+    }
+
+    /**
+     * Returns the number of files whose contents were examined.
+     * @return count
+     */
+    int searched() {
+      return searched;
+    }
+
+    /**
+     * Returns the number of files that were skipped because they were too large.
+     * @return count
+     */
+    int tooLarge() {
+      return tooLarge;
+    }
+
+    /**
+     * Returns the number of files that were skipped because they were binary.
+     * @return count
+     */
+    int binary() {
+      return binary;
+    }
+
+    /**
+     * Returns the error message of an invalid regular expression.
+     * @return error message or {@code null}
+     */
+    String error() {
+      return error;
+    }
+  }
+
+  /**
+   * Creates a filter for the file contents.
+   * @param contents contents search string
+   * @param mcase match case
+   * @param word whole word
+   * @param regex regular expression
+   * @param dotall dot matches all
+   * @return content filter
+   */
+  ContentFilter contentFilter(final String contents, final boolean mcase, final boolean word,
+      final boolean regex, final boolean dotall) {
+    // empty search string matches every file
+    if(contents.isEmpty()) return new ContentFilter(null, false, null, null);
+
+    // fast path: literal searches (incl. regex mode without metacharacters) use a streaming scan
+    if(!word && (!regex || literal(contents))) {
+      final String search = mcase ? contents : contents.toLowerCase(Locale.ENGLISH);
+      return new ContentFilter(search.codePoints().toArray(), !mcase, null, null);
+    }
+
+    // buffered path: reuse the editor's pattern logic
+    try {
+      final Pattern pattern = SearchContext.pattern(contents, mcase, word, regex, dotall);
+      return new ContentFilter(null, false, pattern, null);
+    } catch(final PatternSyntaxException ex) {
+      // invalid expression: match no file, remember the error
+      return new ContentFilter(null, false, null, ex.getDescription());
+    }
+  }
+
+  /**
+   * Checks if a regular expression is a plain literal.
+   * @param string regular expression
+   * @return result of check
+   */
+  private static boolean literal(final String string) {
+    return string.chars().noneMatch(ch -> REGEX_META.indexOf(ch) != -1);
+  }
+
+  /**
+   * Searches a string in a file with a memory-light, single-pass KMP scan.
+   * @param path file path
+   * @param search codepoints of search string
+   * @param lps KMP prefix function of the search string
+   * @param fold fold characters to lower case (case-insensitive search)
+   * @return match result ({@link #FOUND}, {@link #MISSING} or {@link #BINARY})
+   */
+  static int filterContent(final String path, final int[] search, final int[] lps,
+      final boolean fold) {
+    final int cl = search.length;
+    if(cl == 0) return FOUND;
+
+    // parse input as UTF-8
+    try(TextInput ti = new TextInput(new IOFile(path))) {
+      int j = 0;
+      while(true) {
+        final int i = ti.read();
+        if(i == -1) return MISSING;
+        if(!XMLToken.valid10(i)) return BINARY;
+        final int cp = fold ? Token.lc(i) : i;
+        while(j > 0 && cp != search[j]) j = lps[j - 1];
+        if(cp == search[j] && ++j == cl) return FOUND;
+      }
+    } catch(final IOException ex) {
+      // file may not be accessible
+      Util.debug(ex);
+      return BINARY;
+    }
+  }
+
+  /**
+   * Computes the KMP prefix function of a search string.
+   * @param search codepoints of search string
+   * @return prefix function
+   */
+  static int[] prefixes(final int[] search) {
+    final int cl = search.length;
+    final int[] lps = new int[cl];
+    for(int i = 1, len = 0; i < cl;) {
+      if(search[i] == search[len]) {
+        lps[i++] = ++len;
+      } else if(len > 0) {
+        len = lps[len - 1];
+      } else {
+        lps[i++] = 0;
+      }
+    }
+    return lps;
+  }
+
+  /**
+   * Counts how often a pattern matches in a file.
+   * @param file file
+   * @param pattern search pattern
+   * @return number of matches, or {@code -1} if the file could not be processed
+   */
+  static int count(final IOFile file, final Pattern pattern) {
+    return replace(file, pattern, null, null);
+  }
+
+  /**
+   * Replaces all matches of a pattern in a file, and backs up its original contents.
+   * @param file file
+   * @param pattern search pattern
+   * @param replacement Java replacement string ({@code null} to count the matches)
+   * @param backup backup file for the original contents (can be {@code null})
+   * @return number of matches, or {@code -1} if the file could not be processed
+   */
+  static int replace(final IOFile file, final Pattern pattern, final String replacement,
+      final IOFile backup) {
+    try {
+      final String text = read(file);
+      if(text == null) return -1;
+
+      final Matcher matcher = pattern.matcher(text);
+      final StringBuilder sb = new StringBuilder();
+      int count = 0;
+      while(matcher.find()) {
+        count++;
+        if(replacement != null) matcher.appendReplacement(sb, replacement);
+      }
+      if(count == 0 || replacement == null) return count;
+      matcher.appendTail(sb);
+
+      if(backup != null) file.copyTo(backup);
+      file.write(sb.toString());
+      return count;
+    } catch(final IOException ex) {
+      Util.debug(ex);
+      return -1;
+    } catch(final OutOfMemoryError ex) {
+      // the file does not fit into main memory
+      Performance.gc(2);
+      Util.debug(ex);
+      return -1;
+    }
+  }
+
+  /**
+   * Tries to read a file as text for a regular-expression search.
+   * @param file file
+   * @return file contents or {@code null}
+   */
+  private static String read(final IOFile file) {
+    try(TextInput ti = new TextInput(file)) {
+      final StringBuilder sb = new StringBuilder();
+      for(int i; (i = ti.read()) != -1;) {
+        if(!XMLToken.valid10(i)) return null;
+        sb.appendCodePoint(i);
+      }
+      return sb.toString();
+    } catch(final IOException ex) {
+      // file may not be accessible
+      Util.debug(ex);
+      return null;
+    }
+  }
+}

@@ -1,0 +1,177 @@
+/** Log view: searching and monitoring log entries. */
+
+/** Most recent log entry search state. */
+let _logInput;
+
+/** Whether the search covers more than one log file. */
+let _logFiles = 1;
+
+/**
+ * Queries the entries of the log files that are searched: the checked ones, or the file that
+ * is opened.
+ * @param {string} key typed key
+ */
+function logEntries(key) {
+  const reset = key && key !== "Enter";
+  const input = fieldValue("input");
+  const ignore = fieldValue("ignore");
+  const filters = document.querySelectorAll("input.filter");
+  // the checked files are the scope of a search; without a search term, and without a
+  // selection, the opened file is what is listed
+  const checked = [ ...document.querySelectorAll("#list input[name=name]:checked") ].
+    map(input => input.value);
+  const dates = input && checked.length ? checked :
+    [ document.getElementById("date").value ];
+  // the filter fields belong to the rendered table, so they are missing until the first
+  // result arrives; empty ones must not count, or the first key press after a search
+  // would look like a new search and would jump back to page 1. Before that, the stored ones
+  // are sent, and the server renders them into the fields
+  const typed = filters.length ?
+    [ ...filters ].map(f => [ f.name, f.value.trim() ]).filter(([ , value ]) => value) :
+    JSON.parse(stored(fieldKey("filters"), "[]"));
+  storeField("input");
+  storeField("ignore");
+  store(fieldKey("filters"), typed.length ? JSON.stringify(typed) : null);
+  const state = JSON.stringify([ input, ignore, dates, typed ]);
+  if(reset && _logInput === state) return false;
+  _logInput = state;
+
+  // a range of files is not reloaded every second: the live refresh follows a single file
+  _logFiles = dates.length;
+  const live = document.getElementById("live");
+  if(live) live.disabled = _logFiles > 1;
+  // what is searched is stated where the date of a single file is
+  const heading = document.querySelector(".logbar h3");
+  if(heading) heading.textContent = _logFiles > 1 ? `${_logFiles} files` : dates[0];
+
+  const message = {
+    type: "entries",
+    input: input,
+    ignore: ignore,
+    dates: dates,
+    sort: document.getElementById("sort").value,
+    page: reset ? 1 : Number(document.getElementById("page").value) || 1,
+    time: document.getElementById("time").value,
+    // the fields are named after the columns they filter, with a prefix of their own
+    filters: Object.fromEntries(typed.map(([ name, value ]) => [ name.replace(/^f-/, ""), value ]))
+  };
+  // the server stops a search that is superseded by a newer one
+  message.run = startRequest();
+  sendMessage("/logs", message).then(sent => {
+    // a search that takes longer than a moment says so; the message is revoked by showMessage
+    // when the entries arrive
+    if(sent) awaitResult(message.run);
+  });
+
+  // refresh browser history, so that a reload shows what the page shows
+  window.history.replaceState(null, "", replaceParams(window.location.href,
+    { input: input, page: message.page, sort: message.sort }));
+}
+
+/**
+ * Shows the log entries that were pushed by the server.
+ * @param {string} text HTML table
+ */
+function showLogEntries(text) {
+  setText("", "");
+  const output = document.getElementById("output");
+  // the filter fields belong to the replaced table: the one that was typed into keeps the
+  // focus and the caret
+  refocus(() => {
+    output.innerHTML = text;
+    markTruncated(output);
+    // a range of files is not reloaded: the live refresh follows a single file
+    scheduleLive(() => logEntries(), liveOn() && _logFiles === 1);
+    const e = document.getElementById(window.location.hash.replace(/^#/, ""));
+    if(e) e.scrollIntoView();
+  }, "input.filter");
+}
+
+/**
+ * Requests the entries that were typed for: the search, the ignore filter and the column
+ * filters share one pending request, as a search reads all of them at once.
+ * @param {string} key typed key
+ */
+function filterLogs(key) {
+  filterKey(key, "logs", () => logEntries(key));
+}
+
+/**
+ * Restores the stored text fields, then loads the log entries.
+ */
+function initLogs() {
+  // a search of the address wins over the stored one
+  restoreField("input");
+  restoreField("ignore");
+  if(restoreField("log-filter")) logFilter();
+  // the checked files are the scope of the search, so a new selection is a new search.
+  // Clicks, not changes: the checkbox of the table header ticks the rows by script, which
+  // raises no change event of its own
+  document.getElementById("list").addEventListener("click", event => {
+    if(event.target.matches("input[type=checkbox]")) logEntries("select");
+  });
+  return logEntries();
+}
+
+/**
+ * Filters log files.
+ */
+function logFilter() {
+  const value = document.getElementById("log-filter").value;
+  storeField("log-filter");
+  const list = document.getElementById("dates");
+  let count = 0, unchecked = false;
+  for(const input of list.querySelectorAll("input[name=name]")) {
+    const visible = !value || input.value.startsWith(value);
+    input.closest("tr").style.display = visible ? null : "none";
+    if(visible) {
+      count++;
+    } else if(input.checked) {
+      // a file that is filtered out is no longer searched
+      input.checked = false;
+      unchecked = true;
+    }
+  }
+  // the summary counts what is left; the words are the ones the table was rendered with, and
+  // the buttons are derived from the selection by buttons()
+  const summary = list.querySelector("h3");
+  if(summary) summary.textContent =
+    plural(count, summary.dataset.singular, summary.dataset.plural);
+  buttons();
+  if(unchecked) logEntries("filter");
+}
+
+/**
+ * Shows the entries of another log file. The search and the order it is shown in are kept; the
+ * page and the highlighted entry are not, as both refer to the file that was left.
+ * @param {string} date name of the log file
+ */
+function selectLog(date) {
+  const file = document.getElementById("date");
+  if(date === file.value) return;
+  file.value = date;
+  document.getElementById("page").value = 1;
+  document.getElementById("time").value = "";
+  document.querySelector(".logbar h3").textContent = date;
+  mark("list", date);
+  // the file is part of the address, so a reload shows what the page shows; the fragment
+  // named an entry of the previous file
+  const url = new URL(replaceParam(window.location.href, "name", date));
+  url.hash = "";
+  window.history.replaceState(null, "", url);
+  logEntries();
+}
+
+/** The sort and page links of the entry table are followed in place: they name what the table
+    shows, and the fields that state it are what the next request reads. */
+followPanelLinks({ output: (sort, page) => {
+  document.getElementById("sort").value = sort;
+  document.getElementById("page").value = page;
+  logEntries();
+} });
+
+/** The log view receives its entries as a rendered table. */
+_handlers["/logs"] = json => {
+  if(json.type === "result") showLogEntries(json.result);
+};
+_live_actions.logs = logEntries;

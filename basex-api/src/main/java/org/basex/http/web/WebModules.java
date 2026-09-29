@@ -1,0 +1,548 @@
+package org.basex.http.web;
+
+import static org.basex.http.web.WebText.*;
+import static org.basex.util.Token.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+import jakarta.servlet.http.*;
+
+import org.basex.core.*;
+import org.basex.http.*;
+import org.basex.http.restxq.*;
+import org.basex.http.ws.*;
+import org.basex.io.*;
+import org.basex.query.*;
+import org.basex.query.ann.*;
+import org.basex.query.util.pkg.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.util.*;
+import org.basex.util.http.*;
+
+/**
+ * This class caches RESTXQ modules found in the HTTP root directory.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class WebModules {
+  /** Singleton instance (can be {@code null}). */
+  private static volatile WebModules instance;
+
+  /** RESTXQ path. */
+  private final IOFile path;
+
+  /** Module cache. */
+  private HashMap<String, WebModule> modules = new HashMap<>();
+  /** Web archive cache. */
+  private HashMap<String, WebArchive> archives = new HashMap<>();
+  /** Indicates if modules have been cached. */
+  private boolean parsed;
+  /** Last access time. */
+  private long access;
+
+  /**
+   * Private constructor.
+   * @param ctx database context
+   */
+  private WebModules(final Context ctx) {
+    final StaticOptions sopts = ctx.soptions;
+    path = sopts.restxqPath();
+
+    // RESTXQ parsing
+    final int sec = sopts.get(StaticOptions.PARSERESTXQ);
+    // < 0: process until cache is invalidated
+    if(sec >= 0) {
+      // speed up permission checks: keep cache for a minimum of time even if caching is disabled
+      final int ms = sec == 0 ? 10 : sec * 1000;
+      final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
+          runnable -> {
+            final Thread thread = new Thread(runnable, "basex-restxq-cache");
+            thread.setDaemon(true);
+            return thread;
+          });
+      scheduler.scheduleAtFixedRate(() -> {
+        synchronized(WebModules.this) {
+          if(System.currentTimeMillis() - access >= ms) init(true);
+        }
+      }, 0, 100, TimeUnit.MILLISECONDS);
+    }
+  }
+
+  /**
+   * Returns the singleton instance.
+   * @param ctx database context
+   * @return instance
+   */
+  public static synchronized WebModules get(final Context ctx) {
+    if(instance == null) instance = new WebModules(ctx);
+    return instance;
+  }
+
+  /**
+   * Initializes the module cache.
+   * @param update only update new modules
+   */
+  public synchronized void init(final boolean update) {
+    if(!update) modules = new HashMap<>();
+    parsed = false;
+  }
+
+  /**
+   * Returns a WADL description for all available URIs.
+   * @param request HTTP request
+   * @param ctx database context
+   * @return WADL description
+   * @throws QueryException query exception
+   */
+  public FNode wadl(final HttpServletRequest request, final Context ctx) throws QueryException {
+    try {
+      return new RestXqWadl(request).create(cache(ctx));
+    } catch(final IOException ex) {
+      throw new QueryException(ex);
+    }
+  }
+
+  /**
+   * Returns a RESTXQ function that matches the current request or the specified error code best.
+   * @param conn HTTP connection
+   * @param error error code (can be {@code null}; assigned if error function is to be called)
+   * @return function, or {@code null} if no function matches
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  public RestXqFunction restxq(final HTTPConnection conn, final QNm error)
+      throws QueryException, IOException {
+
+    // collect all function candidates
+    final List<RestXqFunction> funcs = find(conn, error, false);
+    if(funcs.isEmpty()) return null;
+
+    // multiple functions: check specificity
+    if(funcs.size() > 1) bestSpec(funcs);
+    // multiple functions: check quality factors
+    if(funcs.size() > 1) bestQf(funcs, conn);
+    // multiple functions: check consume filter
+    if(funcs.size() > 1) bestConsume(funcs, conn);
+    // multiple functions: check method annotations
+    if(funcs.size() > 1) bestMethod(funcs);
+
+    final RestXqFunction first = funcs.getFirst();
+    if(funcs.size() == 1) return first;
+
+    // show error if we are left with multiple function candidates
+    throw error != null ?
+      first.error(ERROR_CONFLICT_X_X, error, toString(funcs)) :
+      first.error(PATH_CONFLICT_X_X, first.path, toString(funcs));
+  }
+
+  /**
+   * Returns an exception for a request that is matched by no RESTXQ function, and assigns
+   * response headers that are required for the status code.
+   * @param conn HTTP connection
+   * @return exception
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  public HTTPException noMatch(final HTTPConnection conn) throws QueryException, IOException {
+    // collect all functions that are addressed by the requested path
+    final ArrayList<RestXqFunction> funcs = collect(conn, func -> func.matchesPath(conn));
+    if(!funcs.isEmpty()) {
+      // the path is known: report the first constraint that is not satisfied
+      final ArrayList<RestXqFunction> byMethod = new ArrayList<>(funcs);
+      byMethod.removeIf(func -> !func.matchesMethod(conn));
+      if(byMethod.isEmpty()) {
+        final TreeSet<String> allowed = new TreeSet<>();
+        for(final RestXqFunction func : funcs) allowed.addAll(func.methods);
+        // GET functions also serve HEAD requests
+        if(allowed.contains(Method.GET.name())) allowed.add(Method.HEAD.name());
+        final String supported = String.join(", ", allowed);
+        conn.response.setHeader(HTTPText.ALLOW, supported);
+        return HTTPStatus.METHOD_NOT_ALLOWED_X_X.get(conn.method, supported);
+      }
+
+      final ArrayList<RestXqFunction> byType = new ArrayList<>(byMethod);
+      byType.removeIf(func -> !func.matchesConsumes(conn));
+      if(byType.isEmpty()) {
+        // requests without content type are rejected as before
+        final MediaType type = conn.mediaType();
+        if(!type.is(MediaType.ALL_ALL)) {
+          return HTTPStatus.UNSUPPORTED_TYPE_X_X.get(type.type(), types(byMethod, true));
+        }
+      } else if(!Checks.any(byType, func -> func.matchesProduces(conn))) {
+        return HTTPStatus.NOT_ACCEPTABLE_X.get(types(byType, false));
+      }
+    }
+
+    // nothing was found: report modules that could not be parsed
+    if(conn.context.soptions.get(StaticOptions.RESTXQERRORS)) {
+      for(final WebModule module : cache(conn.context).values()) {
+        final QueryException ex = module.error();
+        if(ex != null) throw ex;
+      }
+    }
+    return HTTPStatus.SERVICE_NOT_FOUND.get();
+  }
+
+  /**
+   * Returns all RESTXQ functions that satisfy the specified constraint.
+   * @param conn HTTP connection
+   * @param constraint constraint to be checked
+   * @return functions
+   * @throws IOException I/O exception
+   */
+  private ArrayList<RestXqFunction> collect(final HTTPConnection conn,
+      final Checks<RestXqFunction> constraint) throws IOException {
+    final ArrayList<RestXqFunction> list = new ArrayList<>();
+    for(final WebModule module : cache(conn.context).values()) {
+      for(final RestXqFunction func : module.functions()) {
+        if(constraint.ok(func)) list.add(func);
+      }
+    }
+    return list;
+  }
+
+  /**
+   * Returns a string with the media types of the specified functions.
+   * @param funcs functions
+   * @param consumed return consumed instead of produced media types
+   * @return media types
+   */
+  private static String types(final ArrayList<RestXqFunction> funcs, final boolean consumed) {
+    final TreeSet<String> types = new TreeSet<>();
+    for(final RestXqFunction func : funcs) {
+      for(final MediaType type : consumed ? func.consumes : func.produces) types.add(type.type());
+    }
+    return String.join(", ", types);
+  }
+
+  /**
+   * Returns RESTXQ and permissions functions that match the current request.
+   * @param conn HTTP connection
+   * @param error error code (can be {@code null}; assigned if error function is to be called)
+   * @param perm permission flag
+   * @return list of matching functions, ordered by specificity
+   * @throws IOException I/O exception
+   */
+  private List<RestXqFunction> find(final HTTPConnection conn, final QNm error, final boolean perm)
+      throws IOException {
+
+    // collect all functions and sort them by specificity
+    final ArrayList<RestXqFunction> list = collect(conn, func -> func.matches(conn, error, perm));
+    Collections.sort(list);
+    return list;
+  }
+
+  /**
+   * Returns permission functions that match the current request.
+   * @param conn HTTP connection
+   * @return list of function, ordered by relevance
+   * @throws IOException I/O exception
+   */
+  public List<RestXqFunction> checks(final HTTPConnection conn) throws IOException {
+    return find(conn, null, true);
+  }
+
+  /**
+   * Returns all WebSocket functions that match the specified path.
+   * @param pth concrete connection path
+   * @param ctx database context
+   * @param ann annotation (can be {@code null})
+   * @return matching functions
+   * @throws IOException I/O exception
+   */
+  private ArrayList<WsFunction> findWs(final String pth, final Context ctx, final Annotation ann)
+      throws IOException {
+    final ArrayList<WsFunction> funcs = new ArrayList<>();
+    for(final WebModule mod : cache(ctx).values()) {
+      for(final WsFunction func : mod.wsFunctions()) {
+        if(func.matches(ann, pth)) funcs.add(func);
+      }
+    }
+    Collections.sort(funcs);
+    return funcs;
+  }
+
+  /**
+   * Returns a WebSocket function that matches the specified path.
+   * @param pth concrete connection path
+   * @param ctx database context
+   * @return function, or {@code null} if no function matches
+   * @throws IOException I/O exception
+   */
+  public WsFunction websocket(final String pth, final Context ctx) throws IOException {
+    final ArrayList<WsFunction> funcs = findWs(pth, ctx, null);
+    return funcs.isEmpty() ? null : funcs.getFirst();
+  }
+
+  /**
+   * Checks if a WebSocket function matches the connection path of the given WebSocket.
+   * @param ws WebSocket
+   * @return result of check
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  public boolean websocket(final WebSocket ws) throws QueryException, IOException {
+    boolean found = false;
+    for(final Annotation ann : Annotation.values()) {
+      if(ann == Annotation._WS_SUBPROTOCOL || !eq(ann.name.uri(), QueryText.WS_URI)) continue;
+      final WsFunction func = websocket(ws, ann);
+      found |= func != null;
+      if(func != null && ann == Annotation._WS_CONNECT) ws.negotiate(func.subprotocols);
+    }
+    return found;
+  }
+
+  /**
+   * Returns the WebSocket function that matches the current request.
+   * @param ws WebSocket
+   * @param ann annotation
+   * @return function, or {@code null} if no function matches
+   * @throws QueryException query exception
+   * @throws IOException I/O exception
+   */
+  public WsFunction websocket(final WebSocket ws, final Annotation ann)
+      throws QueryException, IOException {
+
+    // collect and sort all function candidates
+    final ArrayList<WsFunction> funcs = findWs(ws.path, ws.context, ann);
+    if(funcs.isEmpty()) return null;
+
+    // multiple functions: check specificity
+    if(funcs.size() > 1) bestSpec(funcs);
+
+    final WsFunction first = funcs.getFirst();
+    if(funcs.size() == 1) return first;
+
+    // show error if we are left with multiple function candidates
+    throw first.error(PATH_CONFLICT_X_X, first.path, toString(funcs));
+  }
+
+  /**
+   * Returns a string representation of the specified functions.
+   * @param funcs functions
+   * @return string
+   */
+  private static String toString(final List<? extends WebFunction> funcs) {
+    final TokenBuilder tb = new TokenBuilder();
+    for(final WebFunction func : funcs) tb.add(tb.isEmpty() ? " " : ", ").add(func);
+    return tb.add('.').toString();
+  }
+
+  /**
+   * Filters functions by their consume filters.
+   * @param funcs list of functions
+   * @param conn HTTP connection
+   */
+  private static void bestConsume(final List<RestXqFunction> funcs, final HTTPConnection conn) {
+    // retrieve most specific consume types from all functions
+    final MediaType mt = conn.mediaType();
+    final ArrayList<MediaType> types = new ArrayList<>(funcs.size());
+    for(final RestXqFunction func : funcs) types.add(func.consumedType(mt));
+    // find most specific type
+    MediaType spec = null;
+    for(final MediaType type : types) {
+      if(spec == null || spec.compareTo(type) > 0) spec = type;
+    }
+    // drop functions with more generic types
+    for(int f = funcs.size() - 1; f >= 0; f--) {
+      if(!types.get(f).is(spec)) funcs.remove(f);
+    }
+  }
+
+  /**
+   * Filters functions by their specificity.
+   * @param funcs list of functions
+   */
+  private static void bestSpec(final List<? extends WebFunction> funcs) {
+    for(int l = funcs.size() - 1; l > 0; l--) {
+      if(funcs.getFirst().compareTo(funcs.get(l)) != 0) funcs.remove(l);
+    }
+  }
+
+  /**
+   * Filters functions by their method annotations.
+   * @param funcs list of functions
+   */
+  private static void bestMethod(final List<RestXqFunction> funcs) {
+    // drop method-agnostic functions if a function with method annotations exists
+    for(final RestXqFunction func : funcs) {
+      if(!func.methods.isEmpty()) {
+        funcs.removeIf(f -> f.methods.isEmpty());
+        break;
+      }
+    }
+  }
+
+  /**
+   * Filters functions by their quality factors.
+   * @param funcs list of functions
+   * @param conn HTTP connection
+   */
+  private static void bestQf(final List<RestXqFunction> funcs, final HTTPConnection conn) {
+    // find the highest matching quality factors
+    final ArrayList<MediaType> accepts = conn.accepts();
+    double cQf = 0, sQf = 0;
+    for(final RestXqFunction func : funcs) {
+      for(final MediaType accept : accepts) {
+        if(func.produces.isEmpty()) {
+          cQf = Math.max(cQf, qf(accept, "q"));
+          sQf = 1;
+        } else {
+          for(final MediaType produce : func.produces) {
+            if(produce.matches(accept)) {
+              cQf = Math.max(cQf, qf(accept, "q"));
+              sQf = Math.max(sQf, qf(produce, "qs"));
+            }
+          }
+        }
+      }
+    }
+    bestQf(funcs, accepts, cQf, -1);
+    if(funcs.size() > 1) bestQf(funcs, accepts, cQf, sQf);
+  }
+
+  /**
+   * Filters functions by their quality factors.
+   * @param funcs list of functions
+   * @param accepts accept media types
+   * @param clientQf client quality factor
+   * @param serverQf server quality factor (ignore if {@code -1})
+   */
+  private static void bestQf(final List<RestXqFunction> funcs, final ArrayList<MediaType> accepts,
+      final double clientQf, final double serverQf) {
+
+    for(int fl = funcs.size() - 1; fl >= 0; fl--) {
+      final RestXqFunction func = funcs.get(fl);
+      final Checks<MediaType> check = accept -> {
+        if(func.produces.isEmpty()) return qf(accept, "q") == clientQf;
+
+        final Checks<MediaType> checkProduce = produce ->
+          produce.matches(accept) && qf(accept, "q") == clientQf &&
+          (serverQf == -1 || qf(produce, "qs") == serverQf);
+        return Checks.any(func.produces, checkProduce);
+      };
+      if(!Checks.any(accepts, check)) funcs.remove(fl);
+    }
+  }
+
+  /**
+   * Returns the quality factor of the specified media type.
+   * @param type media type
+   * @param factor quality factor string
+   * @return quality factor
+   */
+  private static double qf(final MediaType type, final String factor) {
+    final String qf = type.parameter(factor);
+    return qf != null ? toDouble(token(qf)) : 1;
+  }
+
+  /**
+   * Returns the module cache.
+   * @param ctx database context
+   * @return module cache
+   * @throws IOException I/O exception
+   */
+  private synchronized HashMap<String, WebModule> cache(final Context ctx) throws IOException {
+
+    final HashMap<String, WebModule> cache;
+    if(parsed) {
+      // module cache is still up-to-date
+      cache = modules;
+    } else {
+      // module cache needs to be updated
+      if(!path.exists()) throw HTTPStatus.NO_RESTXQ_DIRECTORY.get();
+
+      cache = new HashMap<>();
+      final ArrayList<IOFile> files = new ArrayList<>();
+      parse(ctx, path, cache, modules, files);
+      parseArchives(ctx, cache, modules, files);
+      modules = cache;
+      parsed = true;
+    }
+
+    // update last access time
+    access = System.currentTimeMillis();
+    return cache;
+  }
+
+  /**
+   * Parses the modules of all web application archives and caches new entries.
+   * @param ctx database context
+   * @param cache cached modules
+   * @param old old cache
+   * @param files archive files
+   * @throws IOException I/O exception
+   */
+  private void parseArchives(final Context ctx, final HashMap<String, WebModule> cache,
+      final HashMap<String, WebModule> old, final ArrayList<IOFile> files) throws IOException {
+
+    final HashMap<String, WebArchive> map = new HashMap<>();
+    for(final IOFile file : files) {
+      if(!file.exists()) continue;
+
+      // reuse cached archive if it has not been modified
+      final String archivePath = file.path();
+      WebArchive archive = archives.get(archivePath);
+      final boolean reload = archive == null || archive.outdated();
+      if(reload) {
+        // skip archives that are no web applications (only the descriptor is read)
+        if(RepoArchive.entry(file, PkgText.WEBDESCRIPTOR) == null) continue;
+        archive = new WebArchive(file);
+      }
+      map.put(archivePath, archive);
+
+      for(final IO module : archive.modules()) {
+        // a reloaded archive invalidates all of its modules
+        final String pth = module.path();
+        WebModule wm = reload ? null : old.get(pth);
+        if(wm == null) wm = new WebModule(module, archive);
+        wm.parse(ctx);
+        cache.put(pth, wm);
+      }
+    }
+    archives = map;
+  }
+
+  /**
+   * Parses the specified path for modules with relevant annotations and caches new entries.
+   * @param ctx database context
+   * @param root root path
+   * @param cache cached modules
+   * @param old old cache
+   * @param archived archive files (will be assigned)
+   * @throws IOException I/O exception
+   */
+  private static void parse(final Context ctx, final IOFile root,
+      final HashMap<String, WebModule> cache, final HashMap<String, WebModule> old,
+      final ArrayList<IOFile> archived) throws IOException {
+
+    // check if directory is to be skipped
+    final IOFile[] files = root.children();
+    for(final IOFile file : files) {
+      if(file.name().equals(IO.IGNORESUFFIX)) return;
+    }
+
+    for(final IOFile file : files) {
+      if(file.isDir()) {
+        parse(ctx, file, cache, old, archived);
+      } else {
+        final String path = file.path();
+        if(file.isArchive()) {
+          archived.add(file);
+        } else if(file.hasSuffix(IO.XQSUFFIXES)) {
+          // retrieve existing module or create new instance
+          WebModule module = old.get(path);
+          if(module == null) module = new WebModule(file, null);
+
+          // parse updated module, add to cache
+          module.parse(ctx);
+          cache.put(path, module);
+        }
+      }
+    }
+  }
+}

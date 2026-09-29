@@ -1,0 +1,108 @@
+package org.basex.query.func.index;
+
+import static org.basex.index.stats.StatsType.*;
+
+import org.basex.data.*;
+import org.basex.index.name.*;
+import org.basex.index.path.*;
+import org.basex.index.stats.*;
+import org.basex.query.*;
+import org.basex.query.value.item.*;
+import org.basex.query.value.node.*;
+import org.basex.query.value.type.*;
+import org.basex.util.*;
+import org.basex.util.hash.*;
+import org.basex.util.list.*;
+
+/**
+ * Function implementation.
+ *
+ * @author BaseX Team, BSD License
+ * @author Christian Gruen
+ */
+public final class IndexFacets extends IndexFn {
+  @Override
+  public FNode value(final QueryContext qc) throws QueryException {
+    final Data data = toData(qc);
+    final String type = toZeroString(arg(1), qc);
+
+    return FDoc.build().node(type.equals(FLAT) ? flat(data, qc) :
+      tree(data, data.paths().root().getFirst(), qc)).finish();
+  }
+
+  /**
+   * Returns a flat facet representation.
+   * @param data data reference
+   * @param qc query context
+   * @return element
+   */
+  private static FBuilder flat(final Data data, final QueryContext qc) {
+    final QNm qnm = qc.shared.qName(Token.token(Kind.DOCUMENT.description()));
+    final FBuilder elem = FElem.build(qnm);
+    index(data.elemNames, Q_ELEMENT, elem);
+    index(data.attrNames, Q_ATTRIBUTE, elem);
+    return elem;
+  }
+
+  /**
+   * Returns a tree facet representation.
+   * @param data data reference
+   * @param root root node
+   * @param qc query context
+   * @return element
+   */
+  private static FBuilder tree(final Data data, final PathNode root, final QueryContext qc) {
+    final QNm qnm = qc.shared.qName(Token.token(XNode.type(root.kind).kind().description()));
+    final FBuilder elem = FElem.build(qnm);
+    final boolean elm = root.kind == Data.ELEM;
+    final Names names = elm ? data.elemNames : data.attrNames;
+    if(root.kind == Data.ATTR || elm) elem.attr(Q_NAME, names.key(root.name));
+    stats(root.stats, elem);
+    for(final PathNode pn : root.children) elem.node(tree(data, pn, qc));
+    return elem;
+  }
+
+  /**
+   * Evaluates name index information.
+   * @param names name index
+   * @param name element name
+   * @param root root node
+   */
+  private static void index(final Names names, final QNm name, final FBuilder root) {
+    final int ns = names.size();
+    for(int n = 1; n <= ns; n++) {
+      final FBuilder sub = FElem.build(name).attr(Q_NAME, names.key(n));
+      stats(names.stats(n), sub);
+      root.node(sub);
+    }
+  }
+
+  /**
+   * Attaches statistical information to the specified element.
+   * @param stats statistics
+   * @param elem element
+   */
+  private static void stats(final Stats stats, final FBuilder elem) {
+    final int type = stats.type;
+    if(!isNone(type)) elem.attr(Q_TYPE, StatsType.toString(type));
+    elem.attr(Q_COUNT, stats.count);
+    if(isInteger(type) || isDouble(type)) {
+      final int mn = (int) stats.min, mx = (int) stats.max;
+      elem.attr(Q_MIN, mn == stats.min ? mn : stats.min);
+      elem.attr(Q_MAX, mx == stats.max ? mx : stats.max);
+    }
+    if(isCategory(type)) {
+      final TokenIntMap map = stats.values;
+      final IntList list = new IntList(map.size());
+      final TokenList values = new TokenList(map.size());
+      for(final byte[] value : map) {
+        list.add(map.get(value));
+        values.add(value);
+      }
+      for(final int o : list.createOrder(false)) {
+        final byte[] value = values.get(o);
+        elem.node(FElem.build(Q_ENTRY).attr(Q_COUNT, map.get(value)).text(value));
+      }
+    }
+  }
+}
